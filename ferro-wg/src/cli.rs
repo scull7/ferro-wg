@@ -42,6 +42,17 @@ pub enum Command {
     /// Print connection status.
     Status,
 
+    /// Start the privileged tunnel daemon.
+    Daemon {
+        /// Run in the background (detach from terminal).
+        #[arg(short, long)]
+        daemonize: bool,
+
+        /// Stop a running daemon.
+        #[arg(short, long)]
+        stop: bool,
+    },
+
     /// Import a `wg-quick` configuration file.
     Import {
         /// Path to the `.conf` file.

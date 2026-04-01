@@ -1,4 +1,4 @@
-//! Unix socket IPC client for communicating with the `ferro-wg-daemon`.
+//! Unix socket IPC client for communicating with the `ferro-wg` daemon.
 
 use std::path::Path;
 
@@ -26,14 +26,9 @@ pub async fn send_command_to(
     cmd: &DaemonCommand,
     socket_path: &Path,
 ) -> Result<DaemonResponse, String> {
-    let stream = UnixStream::connect(socket_path).await.map_err(|e| {
-        format!(
-            "Cannot connect to daemon at {}: {e}\n\
-             Is ferro-wg-daemon running? Start it with:\n  \
-             sudo ferro-wg-daemon -c <config.toml>",
-            socket_path.display()
-        )
-    })?;
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|_| "NOT_RUNNING".to_owned())?;
 
     let (reader, mut writer) = stream.into_split();
 
@@ -62,8 +57,7 @@ pub async fn send_command_to(
     ipc::decode_message(&line).map_err(|e| format!("decode response: {e}"))
 }
 
-/// Check whether the daemon is running by attempting a status query.
-#[allow(dead_code)]
-pub async fn is_daemon_running() -> bool {
-    send_command(&DaemonCommand::Status).await.is_ok()
+/// Check if an error from [`send_command`] means the daemon isn't running.
+pub fn is_not_running(err: &str) -> bool {
+    err == "NOT_RUNNING"
 }

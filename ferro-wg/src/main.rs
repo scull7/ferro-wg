@@ -6,6 +6,7 @@ mod client;
 mod tui;
 
 use std::path::{Path, PathBuf};
+use std::process;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -13,10 +14,10 @@ use tracing_subscriber::EnvFilter;
 use cli::{Cli, Command};
 use ferro_wg_core::config;
 use ferro_wg_core::error::BackendKind;
-use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse};
+use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, SOCKET_PATH};
 use ferro_wg_core::key::PrivateKey;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     let cli = Cli::parse();
 
     // Configure logging based on verbosity.
@@ -32,17 +33,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = cli.config.unwrap_or_else(default_config_path);
 
-    match cli.command {
-        // Default to TUI when no subcommand given.
+    let result = match cli.command {
         None | Some(Command::Tui) => run_tui(&config_path),
         Some(Command::Up { peer }) => cmd_up(peer.as_deref()),
         Some(Command::Down { peer }) => cmd_down(peer.as_deref()),
         Some(Command::Status) => cmd_status(),
+        Some(Command::Daemon { daemonize, stop }) => cmd_daemon(&config_path, daemonize, stop),
         Some(Command::Import { path }) => cmd_import(&path, &config_path),
         Some(Command::Genkey) => {
             cmd_genkey();
             Ok(())
         }
+    };
+
+    if let Err(e) = result {
+        eprintln!("Error: {e}");
+        process::exit(1);
     }
 }
 
@@ -53,6 +59,27 @@ fn default_config_path() -> PathBuf {
         .join("ferro-wg")
         .join("config.toml")
 }
+
+// -- Daemon interaction helpers --
+
+/// Send a command to the daemon, printing a clean error if it's not running.
+fn daemon_command(cmd: &DaemonCommand) -> Result<DaemonResponse, Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(client::send_command(cmd)).map_err(|e| {
+        if client::is_not_running(&e) {
+            "daemon is not running.\n\n\
+             Start it with:\n  \
+             sudo ferro-wg daemon\n\n\
+             Or in the background:\n  \
+             sudo ferro-wg daemon --daemonize"
+                .into()
+        } else {
+            e.into()
+        }
+    })
+}
+
+// -- Subcommand handlers --
 
 /// Launch the interactive TUI.
 fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -72,13 +99,11 @@ fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Bring tunnel(s) up via the daemon.
 fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let rt = tokio::runtime::Runtime::new()?;
     let cmd = DaemonCommand::Up {
         peer_name: peer.map(ToOwned::to_owned),
         backend: BackendKind::Boringtun,
     };
-
-    let response = rt.block_on(client::send_command(&cmd))?;
+    let response = daemon_command(&cmd)?;
 
     match response {
         DaemonResponse::Ok => {
@@ -87,18 +112,16 @@ fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         DaemonResponse::Error(e) => Err(e.into()),
-        DaemonResponse::Status(_) => Err("unexpected Status response".into()),
+        DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
     }
 }
 
 /// Tear down tunnel(s) via the daemon.
 fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let rt = tokio::runtime::Runtime::new()?;
     let cmd = DaemonCommand::Down {
         peer_name: peer.map(ToOwned::to_owned),
     };
-
-    let response = rt.block_on(client::send_command(&cmd))?;
+    let response = daemon_command(&cmd)?;
 
     match response {
         DaemonResponse::Ok => {
@@ -107,14 +130,13 @@ fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         DaemonResponse::Error(e) => Err(e.into()),
-        DaemonResponse::Status(_) => Err("unexpected Status response".into()),
+        DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
     }
 }
 
 /// Print connection status from the daemon.
 fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
-    let rt = tokio::runtime::Runtime::new()?;
-    let response = rt.block_on(client::send_command(&DaemonCommand::Status))?;
+    let response = daemon_command(&DaemonCommand::Status)?;
 
     match response {
         DaemonResponse::Status(peers) => {
@@ -148,24 +170,81 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         DaemonResponse::Error(e) => Err(e.into()),
-        DaemonResponse::Ok => Err("unexpected Ok response for status query".into()),
+        DaemonResponse::Ok => Err("unexpected response from daemon".into()),
     }
 }
 
+/// Start, stop, or daemonize the tunnel daemon.
+fn cmd_daemon(
+    config_path: &Path,
+    daemonize: bool,
+    stop: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if stop {
+        return cmd_daemon_stop();
+    }
+
+    if daemonize {
+        return cmd_daemon_background(config_path);
+    }
+
+    // Foreground mode — run the daemon server directly.
+    let wg_config = load_config(config_path)?;
+    let socket_path = PathBuf::from(SOCKET_PATH);
+
+    println!("Starting ferro-wg daemon (foreground)...");
+    println!("Config: {}", config_path.display());
+    println!("Socket: {}", socket_path.display());
+    println!("Press Ctrl+C to stop.\n");
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(ferro_wg_core::daemon::run(wg_config, &socket_path))?;
+    Ok(())
+}
+
+/// Send a shutdown command to a running daemon.
+fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
+    let response = daemon_command(&DaemonCommand::Shutdown)?;
+
+    match response {
+        DaemonResponse::Ok => {
+            println!("Daemon stopped.");
+            Ok(())
+        }
+        DaemonResponse::Error(e) => Err(e.into()),
+        DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
+    }
+}
+
+/// Spawn the daemon as a detached background process.
+fn cmd_daemon_background(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+
+    // Spawn: `sudo <exe> daemon -c <config>` detached.
+    let child = std::process::Command::new("sudo")
+        .arg(&exe)
+        .arg("daemon")
+        .arg("-c")
+        .arg(config_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    println!("Daemon started in background (pid {}).", child.id());
+    println!("Stop it with: ferro-wg daemon --stop");
+    Ok(())
+}
+
 /// Import a `wg-quick` config into native TOML format.
-///
-/// Derives peer names from the source filename when the `wg-quick`
-/// format doesn't include one (which is always -- `wg-quick` has no name field).
 fn cmd_import(src_path: &Path, dst_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut wg_config = config::wg_quick::load_from_file(src_path)?;
 
-    // Derive a base name from the filename (e.g. "MIA_nathan_tensorwave_com").
     let base_name = src_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("peer");
 
-    // Assign names to unnamed peers.
     let peer_count = wg_config.peers.len();
     for (i, peer) in wg_config.peers.iter_mut().enumerate() {
         if peer.name.is_empty() {
@@ -203,7 +282,9 @@ fn cmd_genkey() {
 fn load_config(path: &Path) -> Result<ferro_wg_core::config::WgConfig, Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!(
-            "config file not found: {}\nRun `ferro-wg import <wg-quick.conf>` or create one manually.",
+            "config not found: {}\n\n\
+             Import a WireGuard config first:\n  \
+             ferro-wg import <wg-quick.conf>",
             path.display()
         )
         .into());
