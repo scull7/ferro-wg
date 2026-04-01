@@ -284,7 +284,7 @@ async fn packet_loop(
                     Ok((n, addr)) => {
                         handle_incoming(
                             &mut backend, &udp_buf[..n], addr, &mut tun_buf,
-                            &mut wg_buf, &tun, &udp, endpoint,
+                            &tun, &udp, endpoint,
                         ).await;
                     }
                     Err(e) => {
@@ -339,13 +339,11 @@ async fn handle_outgoing(
 }
 
 /// Handle an incoming UDP datagram: decrypt and write to TUN.
-#[allow(clippy::too_many_arguments)]
 async fn handle_incoming(
     backend: &mut Box<dyn WgBackend>,
     datagram: &[u8],
     src_addr: SocketAddr,
     tun_buf: &mut [u8],
-    wg_buf: &mut [u8],
     tun: &tun::AsyncDevice,
     udp: &tokio::net::UdpSocket,
     endpoint: SocketAddr,
@@ -357,8 +355,8 @@ async fn handle_incoming(
             }
         }
         PacketAction::WriteToNetwork(len) => {
-            // Handshake response — send back via UDP.
-            let _ = udp.send_to(&wg_buf[..len], endpoint).await;
+            // Handshake response — decapsulate wrote to tun_buf (its dst param).
+            let _ = udp.send_to(&tun_buf[..len], endpoint).await;
         }
         PacketAction::Err(e) => debug!("Decapsulate error: {e}"),
         PacketAction::Done => {}

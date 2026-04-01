@@ -36,8 +36,9 @@ impl GotatunBackend {
         let static_private = x25519::StaticSecret::from(*config.private_key.as_bytes());
         let peer_public = x25519::PublicKey::from(*config.peer_public_key.as_bytes());
 
+        let our_public = x25519::PublicKey::from(&static_private);
         let index_table = IndexTable::from_os_rng();
-        let rate_limiter = Arc::new(RateLimiter::new(&peer_public, 100));
+        let rate_limiter = Arc::new(RateLimiter::new(&our_public, 100));
 
         let tunn = Tunn::new(
             static_private,
@@ -146,7 +147,8 @@ impl WgBackend for GotatunBackend {
     fn reset(&mut self) {
         let static_private = x25519::StaticSecret::from(*self.config.private_key.as_bytes());
         let peer_public = x25519::PublicKey::from(*self.config.peer_public_key.as_bytes());
-        let rate_limiter = Arc::new(RateLimiter::new(&peer_public, 100));
+        let our_public = x25519::PublicKey::from(&static_private);
+        let rate_limiter = Arc::new(RateLimiter::new(&our_public, 100));
 
         self.tunn = Tunn::new(
             static_private,

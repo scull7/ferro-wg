@@ -31,7 +31,8 @@ impl NeptunBackend {
         let peer_public = config.peer_public_key.to_x25519();
         let preshared_key = config.preshared_key.as_ref().map(|k| *k.as_bytes());
 
-        let rate_limiter = Arc::new(RateLimiter::new(&peer_public, 100));
+        let our_public = x25519_dalek::PublicKey::from(&static_private);
+        let rate_limiter = Arc::new(RateLimiter::new(&our_public, 100));
 
         let tunn = Tunn::new(
             static_private,
@@ -101,7 +102,8 @@ impl WgBackend for NeptunBackend {
         let static_private = self.config.private_key.to_static_secret();
         let peer_public = self.config.peer_public_key.to_x25519();
         let preshared_key = self.config.preshared_key.as_ref().map(|k| *k.as_bytes());
-        let rate_limiter = Arc::new(RateLimiter::new(&peer_public, 100));
+        let our_public = x25519_dalek::PublicKey::from(&static_private);
+        let rate_limiter = Arc::new(RateLimiter::new(&our_public, 100));
 
         if let Ok(new_tunn) = Tunn::new(
             static_private,
