@@ -1,0 +1,43 @@
+[package]
+name = "ferro-wg-core"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WireGuard backend abstraction over boringtun, neptun, and gotatun"
+
+[features]
+default = []
+boringtun = ["dep:boringtun"]
+neptun = ["dep:neptun"]
+gotatun = ["dep:gotatun"]
+
+[dependencies]
+# Error handling
+thiserror = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# Crypto key types (shared by all backends)
+x25519-dalek = { version = "2", features = ["static_secrets", "serde"] }
+base64 = "0.22"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"
+bytes = "1"
+
+# Config parsing
+toml = "0.8"
+
+# WireGuard backends (feature-gated)
+boringtun = { version = "0.7", optional = true }
+neptun = { git = "https://github.com/NordSecurity/NepTUN", optional = true }
+gotatun = { version = "0.5", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
+[lints]
+workspace = true
