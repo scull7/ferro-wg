@@ -11,6 +11,12 @@ cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p ferro-wg -p ferr
 cp "$REPO_DIR/target/release/ferro-wg" "$INSTALL_DIR/ferro-wg"
 cp "$REPO_DIR/target/release/ferro-wg-daemon" "$INSTALL_DIR/ferro-wg-daemon"
 
+# Re-sign on macOS (replacing the binary invalidates the code signature).
+if [[ "$(uname)" == "Darwin" ]]; then
+    codesign -s - -f "$INSTALL_DIR/ferro-wg" 2>/dev/null || true
+    codesign -s - -f "$INSTALL_DIR/ferro-wg-daemon" 2>/dev/null || true
+fi
+
 echo "Installed ferro-wg to $INSTALL_DIR/ferro-wg"
 echo "Installed ferro-wg-daemon to $INSTALL_DIR/ferro-wg-daemon"
 
