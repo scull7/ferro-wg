@@ -37,7 +37,8 @@ fn main() {
         None | Some(Command::Tui) => run_tui(&config_path),
         Some(Command::Up { peer }) => cmd_up(peer.as_deref()),
         Some(Command::Down { peer }) => cmd_down(peer.as_deref()),
-        Some(Command::Status) => cmd_status(),
+        Some(Command::Status) => cmd_status(&config_path),
+        Some(Command::Routes) => cmd_routes(),
         Some(Command::Daemon { daemonize, stop }) => cmd_daemon(&config_path, daemonize, stop),
         Some(Command::Import { path }) => cmd_import(&path, &config_path),
         Some(Command::Genkey) => {
@@ -142,9 +143,16 @@ fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Print connection status from the daemon.
-fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
+/// Print connection status from the daemon, enriched with config details.
+fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let response = daemon_command(&DaemonCommand::Status)?;
+
+    // Load config for extra details (public keys, allowed IPs).
+    let app_config = if config_path.exists() {
+        config::toml::load_app_config(config_path).ok()
+    } else {
+        None
+    };
 
     match response {
         DaemonResponse::Status(peers) => {
@@ -166,9 +174,30 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  backend: {}", peer.backend);
                 println!("  endpoint: {endpoint}");
                 println!("  interface: {iface}");
+
+                // Show config details if available.
+                if let Some(wg) = app_config.as_ref().and_then(|c| c.get(&peer.name)) {
+                    println!(
+                        "  public key: {}",
+                        wg.interface.private_key.public_key().to_base64()
+                    );
+                    if !wg.interface.addresses.is_empty() {
+                        println!("  address: {}", wg.interface.addresses.join(", "));
+                    }
+                    for p in &wg.peers {
+                        println!("  allowed ips: {}", p.allowed_ips.join(", "));
+                    }
+                }
+
                 if peer.connected {
                     println!("  tx: {} bytes", peer.stats.tx_bytes);
                     println!("  rx: {} bytes", peer.stats.rx_bytes);
+                    if peer.stats.rx_bytes == 0 && peer.stats.tx_bytes > 0 {
+                        println!(
+                            "  \x1b[33mwarning: sending but not receiving — \
+                             server may not have this public key\x1b[0m"
+                        );
+                    }
                     if let Some(hs) = peer.stats.last_handshake {
                         println!("  last handshake: {}s ago", hs.as_secs());
                     }
@@ -180,6 +209,46 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Ok => Err("unexpected response from daemon".into()),
     }
+}
+
+/// Show network routes for active tunnels.
+fn cmd_routes() -> Result<(), Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("netstat")
+        .args(["-rn"])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Filter for utun routes.
+    println!("Active tunnel routes:\n");
+    println!(
+        "{:<24} {:<24} {:<8} Interface",
+        "Destination", "Gateway", "Flags"
+    );
+    println!("{}", "-".repeat(72));
+
+    let mut found = false;
+    for line in stdout.lines() {
+        if line.contains("utun") {
+            // Only show IPv4 routes, skip link-local/multicast.
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 && !line.contains("fe80") && !line.contains("ff0") {
+                found = true;
+                println!(
+                    "{:<24} {:<24} {:<8} {}",
+                    parts[0],
+                    parts[1],
+                    parts[2],
+                    parts.last().unwrap_or(&"-")
+                );
+            }
+        }
+    }
+
+    if !found {
+        println!("  (no tunnel routes found)");
+    }
+    Ok(())
 }
 
 /// Start, stop, or daemonize the tunnel daemon.

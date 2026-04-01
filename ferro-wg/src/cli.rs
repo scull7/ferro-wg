@@ -53,6 +53,9 @@ pub enum Command {
         stop: bool,
     },
 
+    /// Show network routes for active tunnels.
+    Routes,
+
     /// Import a `wg-quick` configuration file.
     Import {
         /// Path to the `.conf` file.
