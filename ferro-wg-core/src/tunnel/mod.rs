@@ -57,6 +57,18 @@ impl TunnelManager {
         }
     }
 
+    /// Replace the config with a new one (e.g. after re-reading from disk).
+    ///
+    /// Active connections are not affected — only future `up` calls and
+    /// `status` queries will use the new config.
+    pub fn reload_config(&mut self, config: AppConfig) {
+        info!(
+            "Reloaded config: {} connection(s)",
+            config.connections.len()
+        );
+        self.config = config;
+    }
+
     /// Bring up a named connection.
     ///
     /// Creates a TUN device, resolves the endpoint, starts the packet loop.

@@ -208,7 +208,11 @@ fn cmd_daemon(
     println!("Press Ctrl+C to stop.\n");
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(ferro_wg_core::daemon::run(app_config, &socket_path))?;
+    rt.block_on(ferro_wg_core::daemon::run(
+        app_config,
+        config_path,
+        &socket_path,
+    ))?;
     Ok(())
 }
 

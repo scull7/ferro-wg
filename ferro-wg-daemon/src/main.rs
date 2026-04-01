@@ -50,5 +50,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Run the IPC server.
-    server::run(config, &cli.socket).await
+    server::run(config, &cli.config, &cli.socket).await
 }

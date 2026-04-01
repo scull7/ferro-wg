@@ -4,6 +4,10 @@
 //! [`TunnelManager`](crate::tunnel::TunnelManager), and sends back
 //! [`DaemonResponse`]s. Shared between the standalone `ferro-wg-daemon` binary
 //! and the `ferro-wg daemon` subcommand.
+//!
+//! The daemon automatically reloads the config file from disk before
+//! handling `Up` and `Status` commands, so newly imported connections
+//! are picked up without restarting.
 
 use std::path::Path;
 
@@ -12,18 +16,24 @@ use tokio::net::UnixListener;
 use tracing::{info, warn};
 
 use crate::config::AppConfig;
+use crate::config::toml::load_app_config;
 use crate::ipc::{self, DaemonCommand, DaemonResponse};
 use crate::tunnel::TunnelManager;
 
 /// Run the IPC server loop.
 ///
 /// Listens on a Unix socket and handles commands from clients.
-/// Runs until a `Shutdown` command is received.
+/// Runs until a `Shutdown` command is received. Automatically reloads
+/// the config file before `Up` and `Status` commands.
 ///
 /// # Errors
 ///
 /// Returns an error if the socket cannot be bound.
-pub async fn run(config: AppConfig, socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    config: AppConfig,
+    config_path: &Path,
+    socket_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Remove stale socket file.
     if socket_path.exists() {
         std::fs::remove_file(socket_path)?;
@@ -41,6 +51,7 @@ pub async fn run(config: AppConfig, socket_path: &Path) -> Result<(), Box<dyn st
     info!("Listening on {}", socket_path.display());
 
     let mut manager = TunnelManager::new(config);
+    let config_path = config_path.to_owned();
 
     loop {
         let (stream, _addr) = listener.accept().await?;
@@ -69,6 +80,11 @@ pub async fn run(config: AppConfig, socket_path: &Path) -> Result<(), Box<dyn st
 
         info!("Received command: {command:?}");
 
+        // Reload config for commands that need the latest connections.
+        if needs_config_reload(&command) {
+            reload_config(&mut manager, &config_path);
+        }
+
         let response = handle_command(&mut manager, command).await;
 
         // Check for shutdown before sending response.
@@ -89,6 +105,22 @@ pub async fn run(config: AppConfig, socket_path: &Path) -> Result<(), Box<dyn st
     }
 
     Ok(())
+}
+
+/// Check if a command should trigger a config reload.
+fn needs_config_reload(command: &DaemonCommand) -> bool {
+    matches!(command, DaemonCommand::Up { .. } | DaemonCommand::Status)
+}
+
+/// Reload config from disk, logging any errors without failing.
+fn reload_config(manager: &mut TunnelManager, config_path: &Path) {
+    match load_app_config(config_path) {
+        Ok(new_config) => manager.reload_config(new_config),
+        Err(e) => warn!(
+            "Failed to reload config from {}: {e}",
+            config_path.display()
+        ),
+    }
 }
 
 /// Dispatch a command to the tunnel manager and produce a response.
