@@ -236,17 +236,24 @@ fn cmd_daemon_background(config_path: &Path) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Import a `wg-quick` config into native TOML format.
+/// Import a `wg-quick` config, merging peers into the existing config.
+///
+/// Each wg-quick file may have a different interface private key. Since
+/// `WireGuard` peers are identified by their public key, we merge by:
+/// - If no config exists yet, use the imported interface as-is
+/// - If a config exists, add new peers (skip duplicates by public key)
+/// - Warn if the imported interface has a different private key
 fn cmd_import(src_path: &Path, dst_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut wg_config = config::wg_quick::load_from_file(src_path)?;
+    let mut imported = config::wg_quick::load_from_file(src_path)?;
 
+    // Derive peer names from the filename.
     let base_name = src_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("peer");
 
-    let peer_count = wg_config.peers.len();
-    for (i, peer) in wg_config.peers.iter_mut().enumerate() {
+    let peer_count = imported.peers.len();
+    for (i, peer) in imported.peers.iter_mut().enumerate() {
         if peer.name.is_empty() {
             peer.name = if peer_count == 1 {
                 base_name.to_owned()
@@ -256,17 +263,72 @@ fn cmd_import(src_path: &Path, dst_path: &Path) -> Result<(), Box<dyn std::error
         }
     }
 
-    println!(
-        "Imported {} peer(s) from {}",
-        wg_config.peers.len(),
-        src_path.display()
-    );
-    for peer in &wg_config.peers {
-        let endpoint = peer.endpoint.as_deref().unwrap_or("-");
-        println!("  {} -> {}", peer.name, endpoint);
-    }
-    config::toml::save_to_file(&wg_config, dst_path)?;
+    // Merge into existing config if one exists.
+    let final_config = if dst_path.exists() {
+        let mut existing = config::toml::load_from_file(dst_path)?;
+
+        // Check for private key mismatch.
+        let existing_pub = existing.interface.private_key.public_key().to_base64();
+        let imported_pub = imported.interface.private_key.public_key().to_base64();
+        if existing_pub != imported_pub {
+            eprintln!(
+                "Note: imported config has a different private key.\n\
+                 Using the existing interface key. The peer will be added\n\
+                 with the endpoint from the imported file.\n"
+            );
+        }
+
+        // Add peers that aren't already present (by public key).
+        let mut added = 0u32;
+        let mut skipped = 0u32;
+        for new_peer in imported.peers {
+            let new_pk = new_peer.public_key.to_base64();
+            let exists = existing
+                .peers
+                .iter()
+                .any(|p| p.public_key.to_base64() == new_pk);
+
+            if exists {
+                eprintln!("  Skipping {} (already configured)", new_peer.name);
+                skipped += 1;
+            } else {
+                println!(
+                    "  {} -> {}",
+                    new_peer.name,
+                    new_peer.endpoint.as_deref().unwrap_or("-")
+                );
+                existing.peers.push(new_peer);
+                added += 1;
+            }
+        }
+
+        println!(
+            "Merged from {}: {added} added, {skipped} skipped",
+            src_path.display()
+        );
+        existing
+    } else {
+        // No existing config — use the imported one directly.
+        println!(
+            "Imported {} peer(s) from {}",
+            imported.peers.len(),
+            src_path.display()
+        );
+        for peer in &imported.peers {
+            let endpoint = peer.endpoint.as_deref().unwrap_or("-");
+            println!("  {} -> {}", peer.name, endpoint);
+        }
+        imported
+    };
+
+    // Validate before saving.
+    final_config
+        .validate()
+        .map_err(|e| format!("validation: {e}"))?;
+
+    config::toml::save_to_file(&final_config, dst_path)?;
     println!("Saved to {}", dst_path.display());
+    println!("Total peers: {}", final_config.peers.len());
     Ok(())
 }
 
