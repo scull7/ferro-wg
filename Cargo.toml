@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["ferro-wg-core", "ferro-wg"]
+members = ["ferro-wg-core", "ferro-wg", "ferro-wg-daemon"]
 
 [workspace.package]
 edition = "2024"

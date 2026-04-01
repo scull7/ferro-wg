@@ -2,21 +2,28 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY_NAME="ferro-wg"
-
-echo "Building ferro-wg (release mode)..."
-cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p ferro-wg
-
 INSTALL_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 mkdir -p "$INSTALL_DIR"
 
-cp "$REPO_DIR/target/release/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-echo "Installed $BINARY_NAME to $INSTALL_DIR/$BINARY_NAME"
+echo "Building ferro-wg and ferro-wg-daemon (release mode)..."
+cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p ferro-wg -p ferro-wg-daemon
 
-if command -v "$BINARY_NAME" >/dev/null 2>&1; then
+cp "$REPO_DIR/target/release/ferro-wg" "$INSTALL_DIR/ferro-wg"
+cp "$REPO_DIR/target/release/ferro-wg-daemon" "$INSTALL_DIR/ferro-wg-daemon"
+
+echo "Installed ferro-wg to $INSTALL_DIR/ferro-wg"
+echo "Installed ferro-wg-daemon to $INSTALL_DIR/ferro-wg-daemon"
+
+if command -v ferro-wg >/dev/null 2>&1; then
     echo ""
-    "$BINARY_NAME" --version
-    echo "Run 'ferro-wg --help' to get started."
+    ferro-wg --version
+    echo ""
+    echo "Usage:"
+    echo "  ferro-wg import <wg-quick.conf>   Import a WireGuard config"
+    echo "  sudo ferro-wg-daemon -c <config>  Start the privileged daemon"
+    echo "  ferro-wg up                       Bring up tunnel(s)"
+    echo "  ferro-wg status                   Show connection status"
+    echo "  ferro-wg tui                      Launch interactive TUI"
 else
     echo ""
     echo "Make sure $INSTALL_DIR is in your PATH:"

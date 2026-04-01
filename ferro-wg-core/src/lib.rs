@@ -15,5 +15,7 @@
 pub mod backend;
 pub mod config;
 pub mod error;
+pub mod ipc;
 pub mod key;
 pub mod stats;
+pub mod tunnel;

@@ -1,0 +1,37 @@
+[package]
+name = "ferro-wg-daemon"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Privileged daemon for ferro-wg tunnel management"
+
+[[bin]]
+name = "ferro-wg-daemon"
+path = "src/main.rs"
+
+[features]
+default = ["boringtun", "neptun", "gotatun"]
+boringtun = ["ferro-wg-core/boringtun"]
+neptun = ["ferro-wg-core/neptun"]
+gotatun = ["ferro-wg-core/gotatun"]
+
+[dependencies]
+ferro-wg-core = { path = "../ferro-wg-core" }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization (for IPC)
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[lints]
+workspace = true

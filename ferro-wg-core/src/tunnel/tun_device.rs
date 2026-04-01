@@ -1,0 +1,42 @@
+//! Async TUN device wrapper using the `tun` crate.
+//!
+//! Creates a macOS `utun` interface for routing IP packets through the tunnel.
+//! Requires root privileges.
+
+use tun::AbstractDevice;
+
+use crate::error::WgError;
+
+/// Create a new async TUN device.
+///
+/// On macOS, this creates a `utun` device with an auto-assigned name
+/// (e.g. `utun4`, `utun5`). Requires root privileges.
+///
+/// # Errors
+///
+/// Returns [`WgError::Tunnel`] if the device cannot be created
+/// (usually due to insufficient privileges).
+pub fn create_tun() -> Result<tun::AsyncDevice, WgError> {
+    let mut config = tun::Configuration::default();
+
+    config.tun_name("utun");
+
+    #[cfg(target_os = "macos")]
+    config.platform_config(|p| {
+        p.packet_information(true);
+    });
+
+    tun::create_as_async(&config)
+        .map_err(|e| WgError::Tunnel(format!("failed to create TUN device: {e}")))
+}
+
+/// Get the kernel-assigned name of a TUN device (e.g. `utun4`).
+///
+/// # Errors
+///
+/// Returns [`WgError::Tunnel`] if the name cannot be retrieved.
+pub fn get_tun_name(device: &tun::AsyncDevice) -> Result<String, WgError> {
+    device
+        .tun_name()
+        .map_err(|e| WgError::Tunnel(format!("failed to get TUN name: {e}")))
+}
