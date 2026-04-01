@@ -71,7 +71,10 @@ pub struct PeerConfig {
     pub persistent_keepalive: u16,
 }
 
-/// A full `WireGuard` configuration file (interface + peers).
+/// A single `WireGuard` connection (interface + peers).
+///
+/// Each connection has its own private key and can connect to one or more
+/// peers. This maps 1:1 to a `wg-quick` `.conf` file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WgConfig {
     /// Interface (our side) configuration.
@@ -101,6 +104,66 @@ impl WgConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// Top-level application config: a map of named connections.
+///
+/// Each connection has its own interface (private key, addresses) and peers.
+/// This allows managing multiple datacenter VPNs that each issued their own
+/// `WireGuard` identity.
+///
+/// ```toml
+/// [connections.mia]
+/// interface = { private_key = "...", ... }
+/// peers = [{ name = "mia-dc", ... }]
+///
+/// [connections.tus1]
+/// interface = { private_key = "...", ... }
+/// peers = [{ name = "tus1-dc", ... }]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppConfig {
+    /// Named connections, keyed by connection name (e.g. "mia", "tus1").
+    #[serde(default)]
+    pub connections: std::collections::BTreeMap<String, WgConfig>,
+}
+
+impl AppConfig {
+    /// Validate all connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first validation error found, prefixed with the
+    /// connection name.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.connections.is_empty() {
+            return Err(ConfigError::MissingField("connections"));
+        }
+        for (name, conn) in &self.connections {
+            conn.validate().map_err(|e| ConfigError::InvalidValue {
+                field: "connections",
+                reason: format!("{name}: {e}"),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Get a connection by name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&WgConfig> {
+        self.connections.get(name)
+    }
+
+    /// List all connection names.
+    #[must_use]
+    pub fn connection_names(&self) -> Vec<&str> {
+        self.connections.keys().map(String::as_str).collect()
+    }
+
+    /// Insert or replace a named connection.
+    pub fn insert(&mut self, name: String, config: WgConfig) {
+        self.connections.insert(name, config);
     }
 }
 

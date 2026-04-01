@@ -42,10 +42,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Load config.
-    let config = ferro_wg_core::config::toml::load_from_file(&cli.config)?;
+    let config = ferro_wg_core::config::toml::load_app_config(&cli.config)?;
     tracing::info!(
-        "Loaded config with {} peer(s) from {}",
-        config.peers.len(),
+        "Loaded config with {} connection(s) from {}",
+        config.connections.len(),
         cli.config.display()
     );
 

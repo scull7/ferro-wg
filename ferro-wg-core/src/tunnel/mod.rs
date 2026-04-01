@@ -1,7 +1,7 @@
 //! Tunnel manager — owns TUN devices, UDP sockets, and `WireGuard` backends.
 //!
 //! The [`TunnelManager`] runs as part of the privileged daemon process,
-//! creating per-peer packet loops that encrypt/decrypt traffic through
+//! creating per-connection packet loops that encrypt/decrypt traffic through
 //! the configured [`WgBackend`](crate::backend::WgBackend).
 
 pub mod route;
@@ -16,7 +16,7 @@ use tokio::time::{self, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::backend::{self, PacketAction, TunnelConfig, WgBackend};
-use crate::config::WgConfig;
+use crate::config::AppConfig;
 use crate::error::{BackendKind, WgError};
 use crate::ipc::PeerStatus;
 use crate::stats::TunnelStats;
@@ -27,14 +27,14 @@ const BUF_SIZE: usize = 65536;
 /// Timer tick interval for keepalives and rekey.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Manages active `WireGuard` tunnels for all configured peers.
+/// Manages active `WireGuard` tunnels for all configured connections.
 pub struct TunnelManager {
-    config: WgConfig,
-    peers: HashMap<String, PeerTunnel>,
+    config: AppConfig,
+    connections: HashMap<String, ActiveConnection>,
 }
 
-/// A single active peer tunnel.
-struct PeerTunnel {
+/// A single active connection tunnel.
+struct ActiveConnection {
     /// Signal to shut down the packet loop task.
     shutdown_tx: oneshot::Sender<()>,
     /// Receive stats updates from the packet loop.
@@ -43,21 +43,21 @@ struct PeerTunnel {
     backend_kind: BackendKind,
     /// The TUN interface name (e.g. `utun4`).
     tun_name: String,
-    /// The peer's endpoint string (stored for future re-resolution).
-    _endpoint: Option<String>,
+    /// The peer's endpoint string.
+    endpoint: Option<String>,
 }
 
 impl TunnelManager {
     /// Create a new tunnel manager from the given config.
     #[must_use]
-    pub fn new(config: WgConfig) -> Self {
+    pub fn new(config: AppConfig) -> Self {
         Self {
             config,
-            peers: HashMap::new(),
+            connections: HashMap::new(),
         }
     }
 
-    /// Bring up a peer's tunnel.
+    /// Bring up a named connection.
     ///
     /// Creates a TUN device, resolves the endpoint, starts the packet loop.
     ///
@@ -65,23 +65,30 @@ impl TunnelManager {
     ///
     /// Returns an error if TUN creation, endpoint resolution, or backend
     /// construction fails.
-    pub async fn up(&mut self, peer_name: &str, backend_kind: BackendKind) -> Result<(), WgError> {
-        if self.peers.contains_key(peer_name) {
-            return Err(WgError::Tunnel(format!("peer {peer_name} is already up")));
+    pub async fn up(&mut self, conn_name: &str, backend_kind: BackendKind) -> Result<(), WgError> {
+        if self.connections.contains_key(conn_name) {
+            return Err(WgError::Tunnel(format!(
+                "connection {conn_name} is already up"
+            )));
         }
 
-        let peer_config = self
+        let wg_config = self
             .config
+            .get(conn_name)
+            .ok_or_else(|| WgError::Tunnel(format!("connection {conn_name} not found in config")))?
+            .clone();
+
+        // Use the first peer (each wg-quick import has one peer).
+        let peer_config = wg_config
             .peers
-            .iter()
-            .find(|p| p.name == peer_name)
-            .ok_or_else(|| WgError::Tunnel(format!("peer {peer_name} not found in config")))?
+            .first()
+            .ok_or_else(|| WgError::Tunnel(format!("connection {conn_name} has no peers")))?
             .clone();
 
         let endpoint_str = peer_config
             .endpoint
             .as_deref()
-            .ok_or_else(|| WgError::Tunnel(format!("peer {peer_name} has no endpoint")))?;
+            .ok_or_else(|| WgError::Tunnel(format!("connection {conn_name} has no endpoint")))?;
 
         // Resolve hostname to SocketAddr.
         let endpoint = udp::resolve_endpoint(endpoint_str).await?;
@@ -93,7 +100,7 @@ impl TunnelManager {
         info!("Created TUN device: {tun_name}");
 
         // Configure interface address and routes.
-        for addr in &self.config.interface.addresses {
+        for addr in &wg_config.interface.addresses {
             route::set_interface_addr(&tun_name, addr)?;
         }
         for cidr in &peer_config.allowed_ips {
@@ -101,15 +108,15 @@ impl TunnelManager {
         }
 
         // Create UDP socket.
-        let udp_socket = udp::create_udp_socket(self.config.interface.listen_port).await?;
+        let udp_socket = udp::create_udp_socket(wg_config.interface.listen_port).await?;
         info!(
             "Bound UDP socket on port {}",
-            self.config.interface.listen_port
+            wg_config.interface.listen_port
         );
 
         // Create WireGuard backend.
         let tunnel_config = TunnelConfig {
-            private_key: self.config.interface.private_key.clone(),
+            private_key: wg_config.interface.private_key.clone(),
             peer_public_key: peer_config.public_key.clone(),
             preshared_key: peer_config.preshared_key.clone(),
             persistent_keepalive: if peer_config.persistent_keepalive == 0 {
@@ -126,77 +133,84 @@ impl TunnelManager {
         let (stats_tx, stats_rx) = watch::channel(TunnelStats::default());
 
         // Spawn the packet loop.
-        let peer_name_owned = peer_name.to_owned();
+        let name_owned = conn_name.to_owned();
         tokio::spawn(async move {
             if let Err(e) =
                 packet_loop(tun, udp_socket, backend, endpoint, stats_tx, shutdown_rx).await
             {
-                error!("Packet loop for {peer_name_owned} exited with error: {e}");
+                error!("Packet loop for {name_owned} exited with error: {e}");
             } else {
-                info!("Packet loop for {peer_name_owned} shut down cleanly");
+                info!("Packet loop for {name_owned} shut down cleanly");
             }
         });
 
-        self.peers.insert(
-            peer_name.to_owned(),
-            PeerTunnel {
+        self.connections.insert(
+            conn_name.to_owned(),
+            ActiveConnection {
                 shutdown_tx,
                 stats_rx,
                 backend_kind,
                 tun_name,
-                _endpoint: peer_config.endpoint.clone(),
+                endpoint: peer_config.endpoint.clone(),
             },
         );
 
-        info!("Peer {peer_name} is up via {backend_kind}");
+        info!("Connection {conn_name} is up via {backend_kind}");
         Ok(())
     }
 
-    /// Tear down a peer's tunnel.
+    /// Tear down a named connection.
     ///
     /// # Errors
     ///
-    /// Returns [`WgError::Tunnel`] if the peer is not currently up.
-    pub fn down(&mut self, peer_name: &str) -> Result<(), WgError> {
-        let tunnel = self
-            .peers
-            .remove(peer_name)
-            .ok_or_else(|| WgError::Tunnel(format!("peer {peer_name} is not up")))?;
+    /// Returns [`WgError::Tunnel`] if the connection is not currently up.
+    pub fn down(&mut self, conn_name: &str) -> Result<(), WgError> {
+        let conn = self
+            .connections
+            .remove(conn_name)
+            .ok_or_else(|| WgError::Tunnel(format!("connection {conn_name} is not up")))?;
 
         // Signal the packet loop to stop.
-        let _ = tunnel.shutdown_tx.send(());
+        let _ = conn.shutdown_tx.send(());
 
         // Remove routes.
-        if let Some(peer_config) = self.config.peers.iter().find(|p| p.name == peer_name) {
-            for cidr in &peer_config.allowed_ips {
-                if let Err(e) = route::remove_route(cidr) {
-                    warn!("Failed to remove route {cidr}: {e}");
+        if let Some(wg_config) = self.config.get(conn_name) {
+            for peer in &wg_config.peers {
+                for cidr in &peer.allowed_ips {
+                    if let Err(e) = route::remove_route(cidr) {
+                        warn!("Failed to remove route {cidr}: {e}");
+                    }
                 }
             }
         }
 
-        info!("Peer {peer_name} is down");
+        info!("Connection {conn_name} is down");
         Ok(())
     }
 
-    /// Bring up all configured peers.
+    /// Bring up all configured connections.
     ///
     /// # Errors
     ///
-    /// Returns the first error encountered; peers that were already up are skipped.
+    /// Returns the first error encountered; connections already up are skipped.
     pub async fn up_all(&mut self, backend_kind: BackendKind) -> Result<(), WgError> {
-        let names: Vec<String> = self.config.peers.iter().map(|p| p.name.clone()).collect();
+        let names: Vec<String> = self
+            .config
+            .connection_names()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
         for name in &names {
-            if !self.peers.contains_key(name) {
+            if !self.connections.contains_key(name) {
                 self.up(name, backend_kind).await?;
             }
         }
         Ok(())
     }
 
-    /// Tear down all active peers.
+    /// Tear down all active connections.
     pub fn down_all(&mut self) {
-        let names: Vec<String> = self.peers.keys().cloned().collect();
+        let names: Vec<String> = self.connections.keys().cloned().collect();
         for name in &names {
             if let Err(e) = self.down(name) {
                 warn!("Failed to bring down {name}: {e}");
@@ -204,22 +218,25 @@ impl TunnelManager {
         }
     }
 
-    /// Get the current status of all configured peers.
+    /// Get the current status of all configured connections.
     #[must_use]
     pub fn status(&self) -> Vec<PeerStatus> {
         self.config
-            .peers
+            .connections
             .iter()
-            .map(|pc| {
-                let active = self.peers.get(&pc.name);
+            .map(|(name, wg_config)| {
+                let active = self.connections.get(name);
+                let first_peer = wg_config.peers.first();
                 PeerStatus {
-                    name: pc.name.clone(),
+                    name: name.clone(),
                     connected: active.is_some(),
-                    backend: active.map_or(BackendKind::Boringtun, |t| t.backend_kind),
+                    backend: active.map_or(BackendKind::Boringtun, |c| c.backend_kind),
                     stats: active
-                        .map_or_else(TunnelStats::default, |t| t.stats_rx.borrow().clone()),
-                    endpoint: pc.endpoint.clone(),
-                    interface: active.map(|t| t.tun_name.clone()),
+                        .map_or_else(TunnelStats::default, |c| c.stats_rx.borrow().clone()),
+                    endpoint: active
+                        .and_then(|c| c.endpoint.clone())
+                        .or_else(|| first_peer.and_then(|p| p.endpoint.clone())),
+                    interface: active.map(|c| c.tun_name.clone()),
                 }
             })
             .collect()
@@ -232,7 +249,7 @@ impl Drop for TunnelManager {
     }
 }
 
-/// The per-peer packet loop: TUN <-> `WgBackend` <-> UDP.
+/// The per-connection packet loop: TUN <-> `WgBackend` <-> UDP.
 async fn packet_loop(
     tun: tun::AsyncDevice,
     udp: tokio::net::UdpSocket,

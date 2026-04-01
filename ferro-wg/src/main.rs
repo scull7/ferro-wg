@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{Cli, Command};
 use ferro_wg_core::config;
+use ferro_wg_core::config::AppConfig;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, SOCKET_PATH};
 use ferro_wg_core::key::PrivateKey;
@@ -20,7 +21,6 @@ use ferro_wg_core::key::PrivateKey;
 fn main() {
     let cli = Cli::parse();
 
-    // Configure logging based on verbosity.
     let filter = match cli.verbose {
         0 => "warn",
         1 => "info",
@@ -52,7 +52,7 @@ fn main() {
     }
 }
 
-/// Default config file location: `~/.config/ferro-wg/config.toml`.
+/// Default config file location.
 fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -85,9 +85,17 @@ fn daemon_command(cmd: &DaemonCommand) -> Result<DaemonResponse, Box<dyn std::er
 fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "tui")]
     {
-        let wg_config = load_config(config_path)?;
+        let app_config = load_app_config(config_path)?;
+        // For the TUI, create a combined view from the first connection.
+        // TODO: update TUI to support multiple connections natively.
+        let first = app_config
+            .connections
+            .values()
+            .next()
+            .ok_or("no connections configured")?
+            .clone();
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(tui::run(wg_config))?;
+        rt.block_on(tui::run(first))?;
         Ok(())
     }
     #[cfg(not(feature = "tui"))]
@@ -107,7 +115,7 @@ fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 
     match response {
         DaemonResponse::Ok => {
-            let target = peer.unwrap_or("all peers");
+            let target = peer.unwrap_or("all connections");
             println!("Brought up: {target}");
             Ok(())
         }
@@ -125,7 +133,7 @@ fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 
     match response {
         DaemonResponse::Ok => {
-            let target = peer.unwrap_or("all peers");
+            let target = peer.unwrap_or("all connections");
             println!("Tore down: {target}");
             Ok(())
         }
@@ -141,7 +149,7 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     match response {
         DaemonResponse::Status(peers) => {
             if peers.is_empty() {
-                println!("No peers configured.");
+                println!("No connections configured.");
                 return Ok(());
             }
             for peer in &peers {
@@ -153,7 +161,7 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
                 let iface = peer.interface.as_deref().unwrap_or("-");
                 let endpoint = peer.endpoint.as_deref().unwrap_or("-");
 
-                println!("peer: {}", peer.name);
+                println!("connection: {}", peer.name);
                 println!("  status: {status}");
                 println!("  backend: {}", peer.backend);
                 println!("  endpoint: {endpoint}");
@@ -188,17 +196,19 @@ fn cmd_daemon(
         return cmd_daemon_background(config_path);
     }
 
-    // Foreground mode — run the daemon server directly.
-    let wg_config = load_config(config_path)?;
+    // Foreground mode.
+    let app_config = load_app_config(config_path)?;
     let socket_path = PathBuf::from(SOCKET_PATH);
 
+    let conn_names = app_config.connection_names();
     println!("Starting ferro-wg daemon (foreground)...");
     println!("Config: {}", config_path.display());
     println!("Socket: {}", socket_path.display());
+    println!("Connections: {}", conn_names.join(", "));
     println!("Press Ctrl+C to stop.\n");
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(ferro_wg_core::daemon::run(wg_config, &socket_path))?;
+    rt.block_on(ferro_wg_core::daemon::run(app_config, &socket_path))?;
     Ok(())
 }
 
@@ -220,7 +230,6 @@ fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_daemon_background(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
 
-    // Spawn: `sudo <exe> daemon -c <config>` detached.
     let child = std::process::Command::new("sudo")
         .arg(&exe)
         .arg("daemon")
@@ -236,99 +245,57 @@ fn cmd_daemon_background(config_path: &Path) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Import a `wg-quick` config, merging peers into the existing config.
+/// Import a `wg-quick` config as a named connection.
 ///
-/// Each wg-quick file may have a different interface private key. Since
-/// `WireGuard` peers are identified by their public key, we merge by:
-/// - If no config exists yet, use the imported interface as-is
-/// - If a config exists, add new peers (skip duplicates by public key)
-/// - Warn if the imported interface has a different private key
+/// Each import creates a named connection with its own interface (private key)
+/// and peer(s). The name is derived from the filename.
 fn cmd_import(src_path: &Path, dst_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut imported = config::wg_quick::load_from_file(src_path)?;
+    let mut wg_config = config::wg_quick::load_from_file(src_path)?;
 
-    // Derive peer names from the filename.
-    let base_name = src_path
+    // Derive a connection name from the filename.
+    let conn_name = src_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("peer");
+        .unwrap_or("default")
+        .to_owned();
 
-    let peer_count = imported.peers.len();
-    for (i, peer) in imported.peers.iter_mut().enumerate() {
+    // Name the peers within this connection.
+    let peer_count = wg_config.peers.len();
+    for (i, peer) in wg_config.peers.iter_mut().enumerate() {
         if peer.name.is_empty() {
             peer.name = if peer_count == 1 {
-                base_name.to_owned()
+                conn_name.clone()
             } else {
-                format!("{base_name}-{i}")
+                format!("{conn_name}-{i}")
             };
         }
     }
 
-    // Merge into existing config if one exists.
-    let final_config = if dst_path.exists() {
-        let mut existing = config::toml::load_from_file(dst_path)?;
-
-        // Check for private key mismatch.
-        let existing_pub = existing.interface.private_key.public_key().to_base64();
-        let imported_pub = imported.interface.private_key.public_key().to_base64();
-        if existing_pub != imported_pub {
-            eprintln!(
-                "Note: imported config has a different private key.\n\
-                 Using the existing interface key. The peer will be added\n\
-                 with the endpoint from the imported file.\n"
-            );
-        }
-
-        // Add peers that aren't already present (by public key).
-        let mut added = 0u32;
-        let mut skipped = 0u32;
-        for new_peer in imported.peers {
-            let new_pk = new_peer.public_key.to_base64();
-            let exists = existing
-                .peers
-                .iter()
-                .any(|p| p.public_key.to_base64() == new_pk);
-
-            if exists {
-                eprintln!("  Skipping {} (already configured)", new_peer.name);
-                skipped += 1;
-            } else {
-                println!(
-                    "  {} -> {}",
-                    new_peer.name,
-                    new_peer.endpoint.as_deref().unwrap_or("-")
-                );
-                existing.peers.push(new_peer);
-                added += 1;
-            }
-        }
-
-        println!(
-            "Merged from {}: {added} added, {skipped} skipped",
-            src_path.display()
-        );
-        existing
+    // Load or create the AppConfig.
+    let mut app_config = if dst_path.exists() {
+        config::toml::load_app_config(dst_path)?
     } else {
-        // No existing config — use the imported one directly.
-        println!(
-            "Imported {} peer(s) from {}",
-            imported.peers.len(),
-            src_path.display()
-        );
-        for peer in &imported.peers {
-            let endpoint = peer.endpoint.as_deref().unwrap_or("-");
-            println!("  {} -> {}", peer.name, endpoint);
-        }
-        imported
+        AppConfig::default()
     };
 
-    // Validate before saving.
-    final_config
-        .validate()
-        .map_err(|e| format!("validation: {e}"))?;
+    // Check for existing connection with same name.
+    if app_config.connections.contains_key(&conn_name) {
+        eprintln!("Replacing existing connection: {conn_name}");
+    }
 
-    config::toml::save_to_file(&final_config, dst_path)?;
+    // Insert the connection.
+    let endpoint = wg_config
+        .peers
+        .first()
+        .and_then(|p| p.endpoint.as_deref())
+        .unwrap_or("-");
+    println!("  {conn_name} -> {endpoint}");
+
+    app_config.insert(conn_name, wg_config);
+
+    config::toml::save_app_config(&app_config, dst_path)?;
     println!("Saved to {}", dst_path.display());
-    println!("Total peers: {}", final_config.peers.len());
+    println!("Total connections: {}", app_config.connections.len());
     Ok(())
 }
 
@@ -340,8 +307,8 @@ fn cmd_genkey() {
     println!("public key:  {}", public.to_base64());
 }
 
-/// Load the `WireGuard` configuration from disk.
-fn load_config(path: &Path) -> Result<ferro_wg_core::config::WgConfig, Box<dyn std::error::Error>> {
+/// Load the [`AppConfig`] from disk.
+fn load_app_config(path: &Path) -> Result<AppConfig, Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!(
             "config not found: {}\n\n\
@@ -351,6 +318,6 @@ fn load_config(path: &Path) -> Result<ferro_wg_core::config::WgConfig, Box<dyn s
         )
         .into());
     }
-    let cfg = config::toml::load_from_file(path)?;
+    let cfg = config::toml::load_app_config(path)?;
     Ok(cfg)
 }

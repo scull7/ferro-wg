@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{info, warn};
 
-use crate::config::WgConfig;
+use crate::config::AppConfig;
 use crate::ipc::{self, DaemonCommand, DaemonResponse};
 use crate::tunnel::TunnelManager;
 
@@ -23,7 +23,7 @@ use crate::tunnel::TunnelManager;
 /// # Errors
 ///
 /// Returns an error if the socket cannot be bound.
-pub async fn run(config: WgConfig, socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(config: AppConfig, socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Remove stale socket file.
     if socket_path.exists() {
         std::fs::remove_file(socket_path)?;
