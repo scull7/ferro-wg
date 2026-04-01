@@ -123,13 +123,39 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Import a `wg-quick` config into native TOML format.
+///
+/// Derives peer names from the source filename when the `wg-quick`
+/// format doesn't include one (which is always — `wg-quick` has no name field).
 fn cmd_import(src_path: &Path, dst_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let wg_config = config::wg_quick::load_from_file(src_path)?;
+    let mut wg_config = config::wg_quick::load_from_file(src_path)?;
+
+    // Derive a base name from the filename (e.g. "MIA_nathan_tensorwave_com").
+    let base_name = src_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("peer");
+
+    // Assign names to unnamed peers.
+    let peer_count = wg_config.peers.len();
+    for (i, peer) in wg_config.peers.iter_mut().enumerate() {
+        if peer.name.is_empty() {
+            peer.name = if peer_count == 1 {
+                base_name.to_owned()
+            } else {
+                format!("{base_name}-{i}")
+            };
+        }
+    }
+
     println!(
         "Imported {} peer(s) from {}",
         wg_config.peers.len(),
         src_path.display()
     );
+    for peer in &wg_config.peers {
+        let endpoint = peer.endpoint.as_deref().unwrap_or("-");
+        println!("  {} -> {}", peer.name, endpoint);
+    }
     config::toml::save_to_file(&wg_config, dst_path)?;
     println!("Saved to {}", dst_path.display());
     Ok(())
