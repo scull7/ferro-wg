@@ -19,7 +19,8 @@ use crate::error::WgError;
 pub fn create_tun() -> Result<tun::AsyncDevice, WgError> {
     let mut config = tun::Configuration::default();
 
-    config.tun_name("utun");
+    // On macOS, don't set a name — the kernel auto-assigns utunN.
+    // Setting "utun" without a number causes a parse error in the tun crate.
 
     #[cfg(target_os = "macos")]
     config.platform_config(|p| {
