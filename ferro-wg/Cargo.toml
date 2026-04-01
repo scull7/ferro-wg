@@ -1,0 +1,45 @@
+[package]
+name = "ferro-wg"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WireGuard TUI and CLI with swappable backends for performance comparison"
+
+[[bin]]
+name = "ferro-wg"
+path = "src/main.rs"
+
+[features]
+default = ["tui", "boringtun", "neptun", "gotatun"]
+tui = ["dep:ratatui", "dep:crossterm"]
+boringtun = ["ferro-wg-core/boringtun"]
+neptun = ["ferro-wg-core/neptun"]
+gotatun = ["ferro-wg-core/gotatun"]
+
+[dependencies]
+ferro-wg-core = { path = "../ferro-wg-core" }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+dirs = "6"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TUI (feature-gated)
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
+
+[lints]
+workspace = true
