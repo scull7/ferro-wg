@@ -28,6 +28,14 @@ pub async fn run(config: WgConfig, socket_path: &Path) -> Result<(), Box<dyn std
     }
 
     let listener = UnixListener::bind(socket_path)?;
+
+    // Allow unprivileged users to connect to the daemon socket.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
+    }
+
     info!("Listening on {}", socket_path.display());
 
     let mut manager = TunnelManager::new(config);
