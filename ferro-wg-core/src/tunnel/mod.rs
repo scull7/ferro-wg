@@ -27,22 +27,6 @@ const BUF_SIZE: usize = 65536;
 /// Timer tick interval for keepalives and rekey.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-/// macOS utun packet information header length.
-/// When `packet_information(true)` is set, every TUN read/write has
-/// a 4-byte prefix: `[0, 0, 0, AF]` where AF is `AF_INET` (2) or
-/// `AF_INET6` (30).
-#[cfg(target_os = "macos")]
-const TUN_PI_HEADER_LEN: usize = 4;
-#[cfg(not(target_os = "macos"))]
-const TUN_PI_HEADER_LEN: usize = 0;
-
-/// `AF_INET` for the macOS utun packet information header.
-#[cfg(target_os = "macos")]
-const AF_INET: u8 = 2;
-/// `AF_INET6` for the macOS utun packet information header.
-#[cfg(target_os = "macos")]
-const AF_INET6: u8 = 30;
-
 /// Manages active `WireGuard` tunnels for all configured peers.
 pub struct TunnelManager {
     config: WgConfig,
@@ -280,17 +264,16 @@ async fn packet_loop(
     loop {
         tokio::select! {
             // TUN -> encrypt -> UDP (outgoing user traffic)
+            // Note: the `tun` crate handles PI header stripping internally
+            // when `packet_information(true)` is set.
             result = tun::AsyncDevice::recv(&tun, &mut tun_buf) => {
                 match result {
-                    Ok(n) if n > TUN_PI_HEADER_LEN => {
-                        // Strip the macOS 4-byte packet info header;
-                        // WgBackend expects a raw IP packet.
-                        let ip_packet = &tun_buf[TUN_PI_HEADER_LEN..n];
+                    Ok(n) if n > 0 => {
                         handle_outgoing(
-                            &mut backend, ip_packet, &mut wg_buf, &udp, endpoint
+                            &mut backend, &tun_buf[..n], &mut wg_buf, &udp, endpoint
                         ).await;
                     }
-                    Ok(_) => {} // too short or zero-length, ignore
+                    Ok(_) => {}
                     Err(e) => {
                         debug!("TUN read error: {e}");
                     }
@@ -367,30 +350,17 @@ async fn handle_incoming(
     udp: &tokio::net::UdpSocket,
     endpoint: SocketAddr,
 ) {
-    // Reserve space for the macOS PI header at the start of tun_buf.
-    // Decapsulate into tun_buf[PI_LEN..] so we can prepend the header.
-    let dst = &mut tun_buf[TUN_PI_HEADER_LEN..];
-    match backend.decapsulate(Some(src_addr), datagram, dst) {
+    // The `tun` crate handles PI header addition internally on send,
+    // so we pass raw IP packets directly.
+    match backend.decapsulate(Some(src_addr), datagram, tun_buf) {
         PacketAction::WriteToTun(len) => {
-            // Prepend macOS utun packet information header.
-            #[cfg(target_os = "macos")]
-            {
-                let ip_version = dst[0] >> 4;
-                let af = if ip_version == 6 { AF_INET6 } else { AF_INET };
-                tun_buf[0] = 0;
-                tun_buf[1] = 0;
-                tun_buf[2] = 0;
-                tun_buf[3] = af;
-            }
-            let total = TUN_PI_HEADER_LEN + len;
-            if let Err(e) = tun::AsyncDevice::send(tun, &tun_buf[..total]).await {
+            if let Err(e) = tun::AsyncDevice::send(tun, &tun_buf[..len]).await {
                 debug!("TUN write error: {e}");
             }
         }
         PacketAction::WriteToNetwork(len) => {
-            // Handshake response — decapsulate wrote to dst (tun_buf[PI_LEN..]).
-            let start = TUN_PI_HEADER_LEN;
-            let _ = udp.send_to(&tun_buf[start..start + len], endpoint).await;
+            // Handshake response — send back via UDP.
+            let _ = udp.send_to(&tun_buf[..len], endpoint).await;
         }
         PacketAction::Err(e) => debug!("Decapsulate error: {e}"),
         PacketAction::Done => {}
