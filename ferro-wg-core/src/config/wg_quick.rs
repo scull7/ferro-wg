@@ -4,7 +4,7 @@
 //! [`WgConfig`] type. Supports all standard `[Interface]` and `[Peer]`
 //! directives including `PreUp`/`PostUp`/`PreDown`/`PostDown`.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::path::Path;
 
 use crate::config::{InterfaceConfig, PeerConfig, WgConfig};
@@ -146,7 +146,7 @@ pub fn export_to_string(config: &WgConfig) -> String {
         if let Some(psk) = &peer.preshared_key {
             let _ = writeln!(out, "PresharedKey = {}", psk.to_base64());
         }
-        if let Some(ep) = peer.endpoint {
+        if let Some(ep) = &peer.endpoint {
             let _ = writeln!(out, "Endpoint = {ep}");
         }
         if !peer.allowed_ips.is_empty() {
@@ -211,7 +211,7 @@ struct PeerBuilder {
     name: String,
     public_key: Option<PublicKey>,
     preshared_key: Option<PresharedKey>,
-    endpoint: Option<SocketAddr>,
+    endpoint: Option<String>,
     allowed_ips: Vec<String>,
     persistent_keepalive: u16,
 }
@@ -321,10 +321,7 @@ fn parse_peer_kv(
                 );
         }
         "endpoint" => {
-            peer.endpoint = Some(value.parse().map_err(|e| ConfigError::WgQuickParse {
-                line: line_num,
-                reason: format!("Endpoint: {e}"),
-            })?);
+            peer.endpoint = Some(value.to_owned());
         }
         "allowedips" => {
             for ip in value.split(',') {

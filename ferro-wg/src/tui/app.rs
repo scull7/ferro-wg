@@ -223,7 +223,8 @@ impl App {
                 || p.config.name.to_lowercase().contains(&query)
                 || p.config
                     .endpoint
-                    .is_some_and(|ep| ep.to_string().contains(&query))
+                    .as_ref()
+                    .is_some_and(|ep| ep.to_lowercase().contains(&query))
         })
     }
 }
@@ -253,7 +254,7 @@ mod tests {
                     name: "dc-sjc01".into(),
                     public_key: PrivateKey::generate().public_key(),
                     preshared_key: None,
-                    endpoint: Some("198.51.100.1:51820".parse().expect("endpoint")),
+                    endpoint: Some("198.51.100.1:51820".into()),
                     allowed_ips: vec!["10.100.0.0/16".into()],
                     persistent_keepalive: 25,
                 },
@@ -261,7 +262,7 @@ mod tests {
                     name: "dc-ord01".into(),
                     public_key: PrivateKey::generate().public_key(),
                     preshared_key: None,
-                    endpoint: Some("198.51.100.2:51820".parse().expect("endpoint")),
+                    endpoint: Some("198.51.100.2:51820".into()),
                     allowed_ips: vec!["10.200.0.0/16".into()],
                     persistent_keepalive: 25,
                 },

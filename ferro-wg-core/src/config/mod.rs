@@ -7,7 +7,7 @@
 pub mod toml;
 pub mod wg_quick;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
@@ -59,9 +59,10 @@ pub struct PeerConfig {
     /// Optional preshared key for additional symmetric encryption.
     #[serde(default)]
     pub preshared_key: Option<PresharedKey>,
-    /// The peer's endpoint (`host:port`). `None` for receive-only peers.
+    /// The peer's endpoint (`host:port`). Supports both IP addresses and
+    /// hostnames (resolved at connection time). `None` for receive-only peers.
     #[serde(default)]
-    pub endpoint: Option<SocketAddr>,
+    pub endpoint: Option<String>,
     /// IP ranges to route through this peer (CIDR notation).
     #[serde(default)]
     pub allowed_ips: Vec<String>,
@@ -125,7 +126,7 @@ mod tests {
                 name: "tw-dc-sjc01".into(),
                 public_key: PrivateKey::generate().public_key(),
                 preshared_key: None,
-                endpoint: Some("198.51.100.1:51820".parse().expect("endpoint")),
+                endpoint: Some("198.51.100.1:51820".into()),
                 allowed_ips: vec!["10.100.0.0/16".into()],
                 persistent_keepalive: 25,
             }],

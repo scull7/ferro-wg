@@ -128,10 +128,7 @@ fn draw_status_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(Color::DarkGray)
             };
             let name = p.config.name.clone();
-            let endpoint = p
-                .config
-                .endpoint
-                .map_or_else(|| "-".to_owned(), |ep| ep.to_string());
+            let endpoint = p.config.endpoint.clone().unwrap_or_else(|| "-".into());
             let hs = p
                 .stats
                 .last_handshake
@@ -194,10 +191,7 @@ fn draw_peers_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let pk = p.config.public_key.to_base64();
             let short_pk = format!("{}...", &pk[..10]);
             let name = p.config.name.clone();
-            let endpoint = p
-                .config
-                .endpoint
-                .map_or_else(|| "-".to_owned(), |ep| ep.to_string());
+            let endpoint = p.config.endpoint.clone().unwrap_or_else(|| "-".into());
             let allowed = p.config.allowed_ips.join(", ");
             let keepalive = format!("{}s", p.config.persistent_keepalive);
             let backend = p.backend.to_string();

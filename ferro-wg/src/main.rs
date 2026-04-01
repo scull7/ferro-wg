@@ -112,7 +112,7 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         };
         println!("peer: {name}");
         println!("  public key: {}", peer.public_key.to_base64());
-        if let Some(ep) = peer.endpoint {
+        if let Some(ep) = &peer.endpoint {
             println!("  endpoint: {ep}");
         }
         println!("  allowed ips: {}", peer.allowed_ips.join(", "));
