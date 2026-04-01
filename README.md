@@ -13,7 +13,7 @@ cd ferro-wg
 ./install.sh
 
 # Import a WireGuard config
-ferro-wg import ~/Downloads/MIA_datacenter.conf
+ferro-wg import ~/Downloads/BAR_datacenter.conf
 
 # Start the daemon (needs root for TUN devices)
 sudo ferro-wg daemon
@@ -100,25 +100,25 @@ Config is stored at `~/.config/ferro-wg/config.toml` (macOS: `~/Library/Applicat
 Each imported wg-quick file becomes a named connection:
 
 ```toml
-[connections.MIA_datacenter.interface]
+[connections.BAR_datacenter.interface]
 private_key = "base64..."
 addresses = ["172.31.250.32/32"]
 
-[[connections.MIA_datacenter.peers]]
-name = "MIA_datacenter"
+[[connections.BAR_datacenter.peers]]
+name = "BAR_datacenter"
 public_key = "base64..."
 preshared_key = "base64..."
-endpoint = "wireguard.vpn.mia.example.com:51821"
+endpoint = "wireguard.vpn.bar.example.com:51821"
 allowed_ips = ["10.21.0.0/16"]
 
-[connections.TUS_datacenter.interface]
+[connections.FOO_datacenter.interface]
 private_key = "base64..."
 addresses = ["172.31.255.18/32"]
 
-[[connections.TUS_datacenter.peers]]
-name = "TUS_datacenter"
+[[connections.FOO_datacenter.peers]]
+name = "FOO_datacenter"
 public_key = "base64..."
-endpoint = "wireguard.vpn.tus.example.com:51821"
+endpoint = "wireguard.vpn.foo.example.com:51821"
 allowed_ips = ["10.32.0.0/16"]
 ```
 
@@ -128,7 +128,7 @@ allowed_ips = ["10.32.0.0/16"]
 
 ```
 $ ferro-wg status
-connection: TUS_datacenter
+connection: YOUR_datacenter
   tx: 28140 bytes
   rx: 0 bytes
   warning: sending but not receiving — server may not have this public key
