@@ -212,6 +212,27 @@ endpoint = "5.6.7.8:51820"
     }
 
     #[test]
+    fn dns_search_roundtrip() {
+        let toml_with_search = r#"
+[interface]
+private_key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+dns = ["1.1.1.1"]
+dns_search = ["corp.internal"]
+
+[[peers]]
+name = "dc1"
+public_key = "HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw="
+endpoint = "198.51.100.1:51820"
+allowed_ips = ["10.100.0.0/16"]
+"#;
+        let config = load_from_str(toml_with_search).expect("parse");
+        assert_eq!(config.interface.dns_search, vec!["corp.internal"]);
+        let serialized = save_to_string(&config).expect("serialize");
+        let reparsed = load_from_str(&serialized).expect("reparse");
+        assert_eq!(reparsed.interface.dns_search, vec!["corp.internal"]);
+    }
+
+    #[test]
     fn app_config_roundtrip() {
         let mut app = AppConfig::default();
         app.insert("mia".into(), load_from_str(SAMPLE_TOML).expect("parse"));

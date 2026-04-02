@@ -1,7 +1,9 @@
-//! macOS network configuration: interface addresses, routes, and DNS.
+//! macOS network configuration: interface addresses and routes.
 //!
 //! These functions shell out to `ifconfig` and `route` to configure the
 //! network stack. They require root privileges.
+//!
+//! DNS configuration is handled by [`super::dns`].
 
 use std::process::Command;
 
@@ -96,39 +98,4 @@ pub fn remove_route(cidr: &str) -> Result<(), WgError> {
             )))
         }
     }
-}
-
-/// Configure DNS servers for the tunnel (macOS-specific).
-///
-/// Creates a resolver file at `/etc/resolver/{domain}` that directs
-/// DNS queries for the given domain through the specified servers.
-///
-/// # Errors
-///
-/// Returns [`WgError::Tunnel`] if the file cannot be written.
-pub fn set_dns_resolver(domain: &str, nameservers: &[std::net::IpAddr]) -> Result<(), WgError> {
-    use std::fmt::Write;
-
-    if nameservers.is_empty() {
-        return Ok(());
-    }
-
-    let resolver_dir = std::path::Path::new("/etc/resolver");
-    if !resolver_dir.exists() {
-        std::fs::create_dir_all(resolver_dir)
-            .map_err(|e| WgError::Tunnel(format!("mkdir /etc/resolver: {e}")))?;
-    }
-
-    let mut content = String::new();
-    for ns in nameservers {
-        let _ = writeln!(content, "nameserver {ns}");
-    }
-    let _ = writeln!(content, "search_order 1");
-
-    let path = resolver_dir.join(domain);
-    std::fs::write(&path, &content)
-        .map_err(|e| WgError::Tunnel(format!("write {}: {e}", path.display())))?;
-
-    debug!("Configured DNS resolver for {domain}");
-    Ok(())
 }
