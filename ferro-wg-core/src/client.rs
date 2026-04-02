@@ -65,7 +65,12 @@ pub async fn send_command_to(
 ) -> Result<DaemonResponse, DaemonClientError> {
     let stream = UnixStream::connect(socket_path)
         .await
-        .map_err(|_| DaemonClientError::NotRunning)?;
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                DaemonClientError::NotRunning
+            }
+            _ => DaemonClientError::Io(e),
+        })?;
 
     let (reader, mut writer) = stream.into_split();
 
