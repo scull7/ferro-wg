@@ -317,9 +317,17 @@ mod imp {
         },
     }
 
-    /// Returns `true` if `resolvectl` is available at its canonical path.
+    /// Returns `true` if `resolvectl` is functional.
+    ///
+    /// Probes by running `resolvectl --version` rather than testing file
+    /// existence — this also verifies the binary is executable, not merely
+    /// present, and correctly handles environments where the file exists but
+    /// systemd-resolved is disabled or broken.
     fn resolvectl_available() -> bool {
-        std::path::Path::new(RESOLVECTL).exists()
+        Command::new(RESOLVECTL)
+            .arg("--version")
+            .output()
+            .map_or(false, |o| o.status.success())
     }
 
     /// Apply DNS via `resolvectl` (systemd-resolved).
