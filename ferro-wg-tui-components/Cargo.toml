@@ -1,0 +1,26 @@
+[package]
+name = "ferro-wg-tui-components"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TUI components for ferro-wg: Status, Peers, Compare, Config, Logs"
+
+[features]
+default = []
+boringtun = []
+neptun = []
+gotatun = []
+
+[dependencies]
+ferro-wg-tui-core = { path = "../ferro-wg-tui-core" }
+ferro-wg-core = { path = "../ferro-wg-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+
+[dev-dependencies]
+ferro-wg-core = { path = "../ferro-wg-core" }
+
+[lints]
+workspace = true
