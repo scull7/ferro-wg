@@ -92,6 +92,13 @@ mod imp {
             .args(["-n", "get", "default"])
             .output()?;
 
+        if !route_out.status.success() {
+            return Err(DnsError::ServiceDetection(format!(
+                "route -n get default failed: {}",
+                String::from_utf8_lossy(&route_out.stderr).trim()
+            )));
+        }
+
         let route_stdout = String::from_utf8_lossy(&route_out.stdout);
         let iface = route_stdout
             .lines()
