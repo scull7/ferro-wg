@@ -28,6 +28,12 @@ pub struct InterfaceConfig {
     /// DNS servers to use when the tunnel is active.
     #[serde(default)]
     pub dns: Vec<IpAddr>,
+    /// DNS search domains when the tunnel is active.
+    ///
+    /// Non-IP entries from a `wg-quick` `DNS = ...` line land here (e.g.
+    /// `DNS = 1.1.1.1, corp.internal` → `dns_search = ["corp.internal"]`).
+    #[serde(default)]
+    pub dns_search: Vec<String>,
     /// Maximum transmission unit (0 = auto).
     #[serde(default)]
     pub mtu: u16,
@@ -178,6 +184,7 @@ mod tests {
                 listen_port: 51820,
                 addresses: vec!["10.0.0.2/24".into()],
                 dns: vec!["1.1.1.1".parse().expect("dns")],
+                dns_search: Vec::new(),
                 mtu: 1420,
                 fwmark: 0,
                 pre_up: Vec::new(),

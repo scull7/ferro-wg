@@ -4,6 +4,7 @@
 //! creating per-connection packet loops that encrypt/decrypt traffic through
 //! the configured [`WgBackend`](crate::backend::WgBackend).
 
+mod dns;
 pub mod route;
 pub mod tun_device;
 pub mod udp;
@@ -45,6 +46,8 @@ struct ActiveConnection {
     tun_name: String,
     /// The peer's endpoint string.
     endpoint: Option<String>,
+    /// DNS state applied during `up()`; used to revert on `down()`.
+    dns_state: Option<dns::DnsState>,
 }
 
 impl TunnelManager {
@@ -119,6 +122,18 @@ impl TunnelManager {
             route::add_route(cidr, &tun_name)?;
         }
 
+        // Apply DNS configuration (non-fatal: a failure logs a warning but
+        // does not abort the tunnel bring-up).
+        let dns_state = dns::apply_dns(
+            &tun_name,
+            &wg_config.interface.dns,
+            &wg_config.interface.dns_search,
+        )
+        .unwrap_or_else(|e| {
+            warn!("Failed to apply DNS for {conn_name}: {e}");
+            None
+        });
+
         // Create UDP socket.
         let udp_socket = udp::create_udp_socket(wg_config.interface.listen_port).await?;
         info!(
@@ -164,6 +179,7 @@ impl TunnelManager {
                 backend_kind,
                 tun_name,
                 endpoint: peer_config.endpoint.clone(),
+                dns_state,
             },
         );
 
@@ -193,6 +209,22 @@ impl TunnelManager {
                         warn!("Failed to remove route {cidr}: {e}");
                     }
                 }
+            }
+        }
+
+        // Revert DNS configuration — but only when no other active connection
+        // has DNS applied.  DNS is system-wide on macOS (bound to the primary
+        // network service) and global on Linux (/etc/resolv.conf fallback), so
+        // reverting while another tunnel is still up would break its DNS.
+        if let Some(state) = conn.dns_state {
+            let other_dns_active = self.connections.values().any(|c| c.dns_state.is_some());
+            if other_dns_active {
+                warn!(
+                    "Skipping DNS revert for {conn_name}: \
+                     another active connection has DNS applied"
+                );
+            } else if let Err(e) = dns::remove_dns(state) {
+                warn!("Failed to remove DNS for {conn_name}: {e}");
             }
         }
 

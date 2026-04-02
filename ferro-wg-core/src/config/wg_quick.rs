@@ -112,14 +112,15 @@ pub fn export_to_string(config: &WgConfig) -> String {
     for addr in &config.interface.addresses {
         let _ = writeln!(out, "Address = {addr}");
     }
-    if !config.interface.dns.is_empty() {
-        let dns_str: Vec<String> = config
+    if !config.interface.dns.is_empty() || !config.interface.dns_search.is_empty() {
+        let mut dns_entries: Vec<String> = config
             .interface
             .dns
             .iter()
             .map(ToString::to_string)
             .collect();
-        let _ = writeln!(out, "DNS = {}", dns_str.join(", "));
+        dns_entries.extend(config.interface.dns_search.iter().cloned());
+        let _ = writeln!(out, "DNS = {}", dns_entries.join(", "));
     }
     if config.interface.mtu != 0 {
         let _ = writeln!(out, "MTU = {}", config.interface.mtu);
@@ -178,6 +179,7 @@ struct InterfaceBuilder {
     listen_port: u16,
     addresses: Vec<String>,
     dns: Vec<IpAddr>,
+    dns_search: Vec<String>,
     mtu: u16,
     fwmark: u32,
     pre_up: Vec<String>,
@@ -195,6 +197,7 @@ impl InterfaceBuilder {
             listen_port: self.listen_port,
             addresses: self.addresses,
             dns: self.dns,
+            dns_search: self.dns_search,
             mtu: self.mtu,
             fwmark: self.fwmark,
             pre_up: self.pre_up,
@@ -260,12 +263,16 @@ fn parse_interface_kv(
             }
         }
         "dns" => {
-            for dns in value.split(',') {
-                let ip: IpAddr = dns.trim().parse().map_err(|e| ConfigError::WgQuickParse {
-                    line: line_num,
-                    reason: format!("DNS: {e}"),
-                })?;
-                iface.dns.push(ip);
+            for token in value.split(',') {
+                let token = token.trim();
+                if token.is_empty() {
+                    continue;
+                }
+                if let Ok(ip) = token.parse::<IpAddr>() {
+                    iface.dns.push(ip);
+                } else {
+                    iface.dns_search.push(token.to_owned());
+                }
             }
         }
         "mtu" => {
@@ -483,6 +490,59 @@ AllowedIPs = 0.0.0.0/0
             reparsed.peers[0].persistent_keepalive,
             config.peers[0].persistent_keepalive
         );
+    }
+
+    #[test]
+    fn dns_search_domains_parsed() {
+        let private = PrivateKey::generate();
+        let pub1 = PrivateKey::generate().public_key();
+        let input = format!(
+            "[Interface]\nPrivateKey = {}\nDNS = 1.1.1.1, 8.8.8.8, corp.internal\n\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0\n",
+            private.to_base64(),
+            pub1.to_base64(),
+        );
+        let config = load_from_str(&input).expect("parse");
+        assert_eq!(config.interface.dns.len(), 2);
+        assert_eq!(config.interface.dns_search, vec!["corp.internal"]);
+    }
+
+    #[test]
+    fn dns_empty_tokens_skipped() {
+        let private = PrivateKey::generate();
+        let pub1 = PrivateKey::generate().public_key();
+        // Trailing comma and extra spaces should not push empty strings.
+        let input = format!(
+            "[Interface]\nPrivateKey = {}\nDNS = 1.1.1.1, 8.8.8.8, \n\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0\n",
+            private.to_base64(),
+            pub1.to_base64(),
+        );
+        let config = load_from_str(&input).expect("parse");
+        assert_eq!(config.interface.dns.len(), 2);
+        assert!(config.interface.dns_search.is_empty());
+    }
+
+    #[test]
+    fn dns_all_ips_no_search() {
+        let config = load_from_str(SAMPLE_WG_QUICK).expect("parse");
+        assert_eq!(config.interface.dns.len(), 2);
+        assert!(config.interface.dns_search.is_empty());
+    }
+
+    #[test]
+    fn dns_export_with_search_domains() {
+        let private = PrivateKey::generate();
+        let pub1 = PrivateKey::generate().public_key();
+        let input = format!(
+            "[Interface]\nPrivateKey = {}\nDNS = 1.1.1.1, corp.internal\n\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0\n",
+            private.to_base64(),
+            pub1.to_base64(),
+        );
+        let config = load_from_str(&input).expect("parse");
+        let exported = export_to_string(&config);
+        assert!(exported.contains("DNS = 1.1.1.1, corp.internal"));
+        // Round-trip: re-parse and verify search domain survives.
+        let reparsed = load_from_str(&exported).expect("reparse");
+        assert_eq!(reparsed.interface.dns_search, vec!["corp.internal"]);
     }
 
     #[test]
