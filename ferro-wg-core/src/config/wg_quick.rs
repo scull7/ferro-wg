@@ -265,6 +265,9 @@ fn parse_interface_kv(
         "dns" => {
             for token in value.split(',') {
                 let token = token.trim();
+                if token.is_empty() {
+                    continue;
+                }
                 if let Ok(ip) = token.parse::<IpAddr>() {
                     iface.dns.push(ip);
                 } else {
@@ -501,6 +504,21 @@ AllowedIPs = 0.0.0.0/0
         let config = load_from_str(&input).expect("parse");
         assert_eq!(config.interface.dns.len(), 2);
         assert_eq!(config.interface.dns_search, vec!["corp.internal"]);
+    }
+
+    #[test]
+    fn dns_empty_tokens_skipped() {
+        let private = PrivateKey::generate();
+        let pub1 = PrivateKey::generate().public_key();
+        // Trailing comma and extra spaces should not push empty strings.
+        let input = format!(
+            "[Interface]\nPrivateKey = {}\nDNS = 1.1.1.1, 8.8.8.8, \n\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0\n",
+            private.to_base64(),
+            pub1.to_base64(),
+        );
+        let config = load_from_str(&input).expect("parse");
+        assert_eq!(config.interface.dns.len(), 2);
+        assert!(config.interface.dns_search.is_empty());
     }
 
     #[test]
