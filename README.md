@@ -30,7 +30,7 @@ ferro-wg status
 - **wg-quick import** — reads standard `.conf` files, supports hostnames
 - **Privileged daemon** — creates TUN devices as root, CLI/TUI connects over Unix socket
 - **Auto-reload** — import new configs without restarting the daemon
-- **Terminal UI** — ratatui-based with Status, Peers, Compare, Config, and Logs tabs
+- **Terminal UI** — ratatui-based with Status, Peers, Compare, Config, and Logs tabs ([roadmap](docs/tui-roadmap.md))
 - **Diagnostic tools** — `ferro-wg routes` shows active tunnel routing, `ferro-wg status` warns when a server isn't responding
 
 ## Commands
