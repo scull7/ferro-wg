@@ -4,13 +4,15 @@
 //! [`AppState`](crate::state::AppState) processes them in `dispatch()`,
 //! then components receive the action again via `update()`.
 
+use ferro_wg_core::ipc::PeerStatus;
+
 use crate::app::Tab;
 
 /// An action that can be dispatched through the TUI state machine.
 ///
 /// All state changes flow through this enum — components never mutate
 /// shared state directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Quit the application.
     Quit,
@@ -36,4 +38,20 @@ pub enum Action {
     SearchBackspace,
     /// Periodic tick for background refresh.
     Tick,
+
+    // -- Daemon integration actions --
+    /// Update peer state from a daemon status response.
+    UpdatePeers(Vec<PeerStatus>),
+    /// Bring up the selected connection by name.
+    ConnectPeer(String),
+    /// Tear down the selected connection by name.
+    DisconnectPeer(String),
+    /// Cycle the backend for the selected connection.
+    CyclePeerBackend(String),
+    /// Daemon returned an error message.
+    DaemonError(String),
+    /// Daemon command succeeded with a description.
+    DaemonOk(String),
+    /// Daemon connectivity changed (true = reachable).
+    DaemonConnectivityChanged(bool),
 }

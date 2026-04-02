@@ -19,6 +19,6 @@ pub mod util;
 pub use action::Action;
 pub use app::{InputMode, Tab};
 pub use component::Component;
-pub use state::{AppState, PeerState};
+pub use state::{AppState, Feedback, PeerState};
 pub use theme::Theme;
 pub use util::format_bytes;

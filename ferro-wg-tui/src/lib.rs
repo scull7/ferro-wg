@@ -5,9 +5,12 @@
 //! It wires together types from [`ferro_wg_tui_core`] and component
 //! implementations from [`ferro_wg_tui_components`].
 
+mod client;
 mod event;
 
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -15,8 +18,11 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
+use tokio::sync::mpsc;
 
 use ferro_wg_core::config::WgConfig;
+use ferro_wg_core::error::BackendKind;
+use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
 use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, LogsComponent, PeersComponent, StatusBarComponent,
     StatusComponent, TabBarComponent,
@@ -24,6 +30,18 @@ use ferro_wg_tui_components::{
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
 use event::{AppEvent, EventHandler};
+
+/// Messages sent from background daemon tasks to the event loop.
+enum DaemonMessage {
+    /// Status poll returned peer statuses.
+    StatusUpdate(Vec<PeerStatus>),
+    /// A command completed successfully.
+    CommandOk(String),
+    /// A command failed with an error message.
+    CommandError(String),
+    /// Daemon is unreachable.
+    Unreachable,
+}
 
 /// Run the interactive TUI.
 ///
@@ -74,7 +92,34 @@ async fn event_loop(
 
     let mut events = EventHandler::new(Duration::from_millis(250));
 
+    // Channel for receiving daemon responses from background tasks.
+    let (daemon_tx, mut daemon_rx) = mpsc::unbounded_channel::<DaemonMessage>();
+
+    // Guard to prevent multiple concurrent status polls.
+    let poll_in_flight = Arc::new(AtomicBool::new(false));
+
     while state.running {
+        // Drain daemon messages (non-blocking).
+        while let Ok(msg) = daemon_rx.try_recv() {
+            let action = match msg {
+                DaemonMessage::StatusUpdate(peers) => Action::UpdatePeers(peers),
+                DaemonMessage::CommandOk(msg) => Action::DaemonOk(msg),
+                DaemonMessage::CommandError(msg) => Action::DaemonError(msg),
+                DaemonMessage::Unreachable => Action::DaemonConnectivityChanged(false),
+            };
+            dispatch_all(
+                &mut state,
+                &action,
+                &mut components,
+                &mut tab_bar,
+                &mut status_bar,
+            );
+        }
+
+        // Clear expired feedback.
+        state.clear_expired_feedback();
+
+        // Render.
         terminal.draw(|frame| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -100,22 +145,42 @@ async fn event_loop(
                 };
 
                 if let Some(ref action) = action {
-                    state.dispatch(action);
-                    for comp in &mut components {
-                        comp.update(action, &state);
-                    }
-                    tab_bar.update(action, &state);
-                    status_bar.update(action, &state);
+                    dispatch_all(
+                        &mut state,
+                        action,
+                        &mut components,
+                        &mut tab_bar,
+                        &mut status_bar,
+                    );
+
+                    // Spawn daemon commands for peer actions.
+                    maybe_spawn_command(action, &daemon_tx);
                 }
             }
             Some(AppEvent::Tick) => {
-                // Future: refresh stats from daemon here.
+                spawn_status_poll(&daemon_tx, &poll_in_flight);
             }
             None => break,
         }
     }
 
     Ok(())
+}
+
+/// Dispatch an action to `AppState` and all components.
+fn dispatch_all(
+    state: &mut AppState,
+    action: &Action,
+    components: &mut [Box<dyn Component>],
+    tab_bar: &mut TabBarComponent,
+    status_bar: &mut StatusBarComponent,
+) {
+    state.dispatch(action);
+    for comp in components.iter_mut() {
+        comp.update(action, state);
+    }
+    tab_bar.update(action, state);
+    status_bar.update(action, state);
 }
 
 /// Handle global key events that apply regardless of which component
@@ -137,4 +202,68 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('/') => Some(Action::EnterSearch),
         _ => None,
     }
+}
+
+/// Spawn a background status poll if none is already in-flight.
+fn spawn_status_poll(tx: &mpsc::UnboundedSender<DaemonMessage>, in_flight: &Arc<AtomicBool>) {
+    if in_flight.swap(true, Ordering::SeqCst) {
+        // A poll is already in-flight; skip this tick.
+        return;
+    }
+
+    let tx = tx.clone();
+    let in_flight = Arc::clone(in_flight);
+
+    tokio::spawn(async move {
+        match client::send_command(&DaemonCommand::Status).await {
+            Ok(DaemonResponse::Status(peers)) => {
+                let _ = tx.send(DaemonMessage::StatusUpdate(peers));
+            }
+            Err(_) => {
+                let _ = tx.send(DaemonMessage::Unreachable);
+            }
+            Ok(_) => {}
+        }
+        in_flight.store(false, Ordering::SeqCst);
+    });
+}
+
+/// If the action is a peer command, spawn a background daemon task.
+fn maybe_spawn_command(action: &Action, tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    let (cmd, description) = match action {
+        Action::ConnectPeer(name) => (
+            DaemonCommand::Up {
+                peer_name: Some(name.clone()),
+                backend: BackendKind::Boringtun,
+            },
+            format!("Brought up: {name}"),
+        ),
+        Action::DisconnectPeer(name) => (
+            DaemonCommand::Down {
+                peer_name: Some(name.clone()),
+            },
+            format!("Tore down: {name}"),
+        ),
+        Action::CyclePeerBackend(name) => (
+            DaemonCommand::SwitchBackend {
+                peer_name: name.clone(),
+                backend: BackendKind::Neptun, // TODO: cycle through available backends
+            },
+            format!("Switched backend: {name}"),
+        ),
+        _ => return,
+    };
+
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        match client::send_command(&cmd).await {
+            Ok(DaemonResponse::Ok) => {
+                let _ = tx.send(DaemonMessage::CommandOk(description));
+            }
+            Ok(DaemonResponse::Error(e)) | Err(e) => {
+                let _ = tx.send(DaemonMessage::CommandError(e));
+            }
+            Ok(DaemonResponse::Status(_)) => {}
+        }
+    });
 }

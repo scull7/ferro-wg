@@ -5,6 +5,8 @@
 //! receive `&AppState` for read-only access during rendering and key
 //! handling.
 
+use std::time::{Duration, Instant};
+
 use ferro_wg_core::config::{PeerConfig, WgConfig};
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::stats::TunnelStats;
@@ -12,6 +14,9 @@ use ferro_wg_core::stats::TunnelStats;
 use crate::action::Action;
 use crate::app::{InputMode, Tab};
 use crate::theme::Theme;
+
+/// How long feedback messages are displayed before expiring.
+const FEEDBACK_DURATION: Duration = Duration::from_secs(3);
 
 /// Per-peer runtime state shown in the TUI.
 #[derive(Debug, Clone)]
@@ -24,6 +29,45 @@ pub struct PeerState {
     pub stats: TunnelStats,
     /// Which backend is active for this peer.
     pub backend: BackendKind,
+}
+
+/// A transient feedback message shown in the status bar.
+#[derive(Debug, Clone)]
+pub struct Feedback {
+    /// The message text.
+    pub message: String,
+    /// Whether this is an error (`true`) or success (`false`).
+    pub is_error: bool,
+    /// When this feedback expires and should be hidden.
+    pub expires_at: Instant,
+}
+
+impl Feedback {
+    /// Create a success feedback message.
+    #[must_use]
+    pub fn success(message: String) -> Self {
+        Self {
+            message,
+            is_error: false,
+            expires_at: Instant::now() + FEEDBACK_DURATION,
+        }
+    }
+
+    /// Create an error feedback message.
+    #[must_use]
+    pub fn error(message: String) -> Self {
+        Self {
+            message,
+            is_error: true,
+            expires_at: Instant::now() + FEEDBACK_DURATION,
+        }
+    }
+
+    /// Whether this feedback has expired.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
 }
 
 /// Centralized application state.
@@ -50,6 +94,11 @@ pub struct AppState {
 
     /// Active color theme.
     pub theme: Theme,
+
+    /// Whether the daemon is currently reachable.
+    pub daemon_connected: bool,
+    /// Transient feedback message (success or error) with expiry.
+    pub feedback: Option<Feedback>,
 }
 
 impl AppState {
@@ -76,6 +125,8 @@ impl AppState {
             peers,
             log_lines: Vec::new(),
             theme: Theme::mocha(),
+            daemon_connected: false,
+            feedback: None,
         }
     }
 
@@ -103,9 +154,42 @@ impl AppState {
             Action::SearchBackspace => {
                 self.search_query.pop();
             }
-            // Row navigation and tick are handled by components or
-            // the event loop, not by shared state.
-            Action::NextRow | Action::PrevRow | Action::Tick => {}
+            // -- Daemon integration --
+            Action::UpdatePeers(statuses) => {
+                self.daemon_connected = true;
+                for status in statuses {
+                    if let Some(peer) = self.peers.iter_mut().find(|p| p.config.name == status.name)
+                    {
+                        peer.connected = status.connected;
+                        peer.stats = status.stats.clone();
+                        peer.backend = status.backend;
+                    }
+                }
+            }
+            Action::DaemonConnectivityChanged(connected) => {
+                self.daemon_connected = *connected;
+            }
+            Action::DaemonOk(msg) => {
+                self.feedback = Some(Feedback::success(msg.clone()));
+            }
+            Action::DaemonError(msg) => {
+                self.feedback = Some(Feedback::error(msg.clone()));
+            }
+            // Row navigation, tick, and peer commands are handled by
+            // components or the event loop, not by shared state.
+            Action::NextRow
+            | Action::PrevRow
+            | Action::Tick
+            | Action::ConnectPeer(_)
+            | Action::DisconnectPeer(_)
+            | Action::CyclePeerBackend(_) => {}
+        }
+    }
+
+    /// Clear expired feedback messages. Called on each tick.
+    pub fn clear_expired_feedback(&mut self) {
+        if self.feedback.as_ref().is_some_and(Feedback::is_expired) {
+            self.feedback = None;
         }
     }
 
@@ -250,5 +334,85 @@ mod tests {
             assert!(!peer.connected);
             assert_eq!(peer.stats.tx_bytes, 0);
         }
+    }
+
+    #[test]
+    fn dispatch_update_peers() {
+        use ferro_wg_core::ipc::PeerStatus;
+
+        let mut state = test_state();
+        assert!(!state.daemon_connected);
+
+        let statuses = vec![PeerStatus {
+            name: "dc-sjc01".into(),
+            connected: true,
+            backend: BackendKind::Neptun,
+            stats: TunnelStats {
+                tx_bytes: 1000,
+                rx_bytes: 2000,
+                ..TunnelStats::default()
+            },
+            endpoint: Some("198.51.100.1:51820".into()),
+            interface: Some("utun4".into()),
+        }];
+
+        state.dispatch(&Action::UpdatePeers(statuses));
+        assert!(state.daemon_connected);
+
+        let sjc = &state.peers[0];
+        assert!(sjc.connected);
+        assert_eq!(sjc.stats.tx_bytes, 1000);
+        assert_eq!(sjc.stats.rx_bytes, 2000);
+        assert_eq!(sjc.backend, BackendKind::Neptun);
+
+        // Unmatched peer stays disconnected.
+        let ord = &state.peers[1];
+        assert!(!ord.connected);
+    }
+
+    #[test]
+    fn dispatch_daemon_connectivity() {
+        let mut state = test_state();
+        state.dispatch(&Action::DaemonConnectivityChanged(true));
+        assert!(state.daemon_connected);
+        state.dispatch(&Action::DaemonConnectivityChanged(false));
+        assert!(!state.daemon_connected);
+    }
+
+    #[test]
+    fn dispatch_daemon_feedback() {
+        let mut state = test_state();
+
+        state.dispatch(&Action::DaemonOk("tunnel up".into()));
+        assert!(state.feedback.is_some());
+        let fb = state.feedback.as_ref().unwrap();
+        assert!(!fb.is_error);
+        assert_eq!(fb.message, "tunnel up");
+        assert!(!fb.is_expired());
+
+        state.dispatch(&Action::DaemonError("not found".into()));
+        let fb = state.feedback.as_ref().unwrap();
+        assert!(fb.is_error);
+        assert_eq!(fb.message, "not found");
+    }
+
+    #[test]
+    fn clear_expired_feedback_removes_old() {
+        let mut state = test_state();
+        state.feedback = Some(Feedback {
+            message: "old".into(),
+            is_error: false,
+            expires_at: Instant::now() - Duration::from_secs(1),
+        });
+        state.clear_expired_feedback();
+        assert!(state.feedback.is_none());
+    }
+
+    #[test]
+    fn clear_expired_feedback_keeps_fresh() {
+        let mut state = test_state();
+        state.dispatch(&Action::DaemonOk("fresh".into()));
+        state.clear_expired_feedback();
+        assert!(state.feedback.is_some());
     }
 }

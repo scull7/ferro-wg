@@ -53,30 +53,60 @@ impl Component for StatusBarComponent {
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
 
-        let content = match state.input_mode {
-            InputMode::Search => Line::from(vec![
-                Span::styled(" /", Style::default().fg(theme.warning)),
-                Span::raw(&state.search_query),
-                Span::styled("_", Style::default().fg(theme.muted)),
-            ]),
-            InputMode::Normal => {
-                let hotkey = theme.hotkey_style();
-                Line::from(vec![
-                    Span::styled(" q", hotkey),
-                    Span::raw(" quit  "),
-                    Span::styled("/", hotkey),
-                    Span::raw(" search  "),
-                    Span::styled("1-5", hotkey),
-                    Span::raw(" tabs  "),
-                    Span::styled("j/k", hotkey),
-                    Span::raw(" navigate"),
-                ])
+        let content = if let Some(fb) = &state.feedback {
+            // Show feedback message (success or error).
+            let (indicator, style) = if fb.is_error {
+                ("x ", Style::default().fg(theme.error))
+            } else {
+                ("* ", Style::default().fg(theme.success))
+            };
+            let daemon_dot = daemon_indicator(state, theme);
+            Line::from(vec![
+                daemon_dot,
+                Span::styled(indicator, style),
+                Span::styled(&fb.message, style),
+            ])
+        } else {
+            match state.input_mode {
+                InputMode::Search => Line::from(vec![
+                    Span::styled(" /", Style::default().fg(theme.warning)),
+                    Span::raw(&state.search_query),
+                    Span::styled("_", Style::default().fg(theme.muted)),
+                ]),
+                InputMode::Normal => {
+                    let hotkey = theme.hotkey_style();
+                    let daemon_dot = daemon_indicator(state, theme);
+                    Line::from(vec![
+                        daemon_dot,
+                        Span::styled("q", hotkey),
+                        Span::raw(" quit  "),
+                        Span::styled("/", hotkey),
+                        Span::raw(" search  "),
+                        Span::styled("u", hotkey),
+                        Span::raw(" up  "),
+                        Span::styled("d", hotkey),
+                        Span::raw(" down  "),
+                        Span::styled("b", hotkey),
+                        Span::raw(" backend  "),
+                        Span::styled("j/k", hotkey),
+                        Span::raw(" nav"),
+                    ])
+                }
             }
         };
 
         let block = Block::default().borders(Borders::ALL);
         let paragraph = Paragraph::new(content).block(block);
         frame.render_widget(paragraph, area);
+    }
+}
+
+/// Create a daemon connectivity indicator span.
+fn daemon_indicator<'a>(state: &AppState, theme: &ferro_wg_tui_core::Theme) -> Span<'a> {
+    if state.daemon_connected {
+        Span::styled(" [*] ", Style::default().fg(theme.success))
+    } else {
+        Span::styled(" [o] ", Style::default().fg(theme.muted))
     }
 }
 
