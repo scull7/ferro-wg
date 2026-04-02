@@ -441,20 +441,30 @@ mod imp {
 
     /// Apply DNS configuration for the given interface.
     ///
+    /// Attempts `resolvectl` first. If `resolvectl` is available but fails at
+    /// runtime (e.g. systemd-resolved is running but refuses the request),
+    /// falls back to directly editing `/etc/resolv.conf` rather than
+    /// propagating the error.
+    ///
     /// # Errors
     ///
     /// Returns [`DnsError`] if both `resolvectl` and `/etc/resolv.conf`
     /// modification fail.
     pub fn apply(iface: &str, servers: &[IpAddr], search: &[String]) -> Result<DnsState, DnsError> {
         if resolvectl_available() {
-            apply_resolvectl(iface, servers, search)?;
-            Ok(DnsState::Resolved {
-                iface: iface.to_owned(),
-            })
-        } else {
-            let backup = apply_resolv_conf(servers, search)?;
-            Ok(DnsState::ResolvConf { backup })
+            match apply_resolvectl(iface, servers, search) {
+                Ok(()) => {
+                    return Ok(DnsState::Resolved {
+                        iface: iface.to_owned(),
+                    });
+                }
+                Err(e) => {
+                    debug!("resolvectl failed ({e}), falling back to /etc/resolv.conf");
+                }
+            }
         }
+        let backup = apply_resolv_conf(servers, search)?;
+        Ok(DnsState::ResolvConf { backup })
     }
 
     /// Revert DNS configuration to the state captured in [`DnsState`].
