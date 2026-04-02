@@ -213,6 +213,12 @@ mod imp {
             let dns_out = Command::new(NETWORKSETUP)
                 .args(["-getdnsservers", &service_name])
                 .output()?;
+            if !dns_out.status.success() {
+                return Err(DnsError::NetworkSetup(format!(
+                    "-getdnsservers failed: {}",
+                    String::from_utf8_lossy(&dns_out.stderr).trim()
+                )));
+            }
             let prior = parse_networksetup_dns(&String::from_utf8_lossy(&dns_out.stdout));
 
             let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
