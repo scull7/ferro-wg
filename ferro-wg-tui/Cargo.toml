@@ -1,0 +1,25 @@
+[package]
+name = "ferro-wg-tui"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI for ferro-wg: event loop, terminal management, component wiring"
+
+[features]
+default = []
+boringtun = ["ferro-wg-tui-components/boringtun"]
+neptun = ["ferro-wg-tui-components/neptun"]
+gotatun = ["ferro-wg-tui-components/gotatun"]
+
+[dependencies]
+ferro-wg-tui-core = { path = "../ferro-wg-tui-core" }
+ferro-wg-tui-components = { path = "../ferro-wg-tui-components" }
+ferro-wg-core = { path = "../ferro-wg-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

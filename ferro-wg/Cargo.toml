@@ -13,10 +13,10 @@ path = "src/main.rs"
 
 [features]
 default = ["tui", "boringtun", "neptun", "gotatun"]
-tui = ["dep:ratatui", "dep:crossterm"]
-boringtun = ["ferro-wg-core/boringtun"]
-neptun = ["ferro-wg-core/neptun"]
-gotatun = ["ferro-wg-core/gotatun"]
+tui = ["dep:ferro-wg-tui"]
+boringtun = ["ferro-wg-core/boringtun", "ferro-wg-tui?/boringtun"]
+neptun = ["ferro-wg-core/neptun", "ferro-wg-tui?/neptun"]
+gotatun = ["ferro-wg-core/gotatun", "ferro-wg-tui?/gotatun"]
 
 [dependencies]
 ferro-wg-core = { path = "../ferro-wg-core" }
@@ -38,8 +38,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # TUI (feature-gated)
-ratatui = { version = "0.29", optional = true }
-crossterm = { version = "0.28", optional = true }
+ferro-wg-tui = { path = "../ferro-wg-tui", optional = true }
 
 [lints]
 workspace = true
