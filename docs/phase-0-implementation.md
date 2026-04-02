@@ -1,22 +1,177 @@
-# Phase 0: TUI Component Architecture Refactor
+# Phase 0: Extract TUI into Three Crates + Component Architecture
 
 ## Context
 
 The ferro-wg TUI (~911 LoC, 4 files) is monolithic: a single `App` struct holds
 all state, key handling is a big match block, and rendering dispatches through
-free functions. This works but blocks Phase 1+ — daemon integration, multi-connection,
+free functions. This blocks Phase 1+ — daemon integration, multi-connection,
 and log streaming all need isolated component state and async action dispatch.
 
 Phase 0 restructures to a [tursotui](https://github.com/mikeleppane/tursotui)-inspired
-component architecture: `Component` trait, `Action` enum, centralized `AppState`,
-and per-tab components with their own `TableState`.
+component architecture **and** extracts the TUI into three dedicated crates.
+The TUI currently has zero cross-dependencies with CLI/client code and depends
+on only 5 types from `ferro-wg-core`, making extraction clean.
 
 **Goal:** Identical visual output and keybindings after refactor. No new features.
 
-## Architecture
+## Crate Architecture
 
 ```
-Event Loop (mod.rs)
+ferro-wg-core               (existing — unchanged)
+    ↑
+ferro-wg-tui-core            (Component trait, Action, AppState, Theme)
+    ↑
+ferro-wg-tui-components      (StatusComponent, PeersComponent, etc.)
+    ↑
+ferro-wg-tui                 (event loop, terminal, wiring)
+    ↑
+ferro-wg                     (binary — CLI + optional TUI)
+```
+
+**Key decisions:**
+
+| Decision | Choice | Why |
+|---|---|---|
+| Crate split | Three TUI crates (core, components, shell) | Maximum separation; core types reusable, components independently testable |
+| Component storage | `Vec<Box<dyn Component>>` separate from `AppState` | Avoids `&mut component` + `&state` split-borrow |
+| Shared data | Components receive `&AppState` (read-only) | Single source of truth, no data duplication |
+| Table state | Per-component | Independent scroll positions per tab |
+| Search query | Lives in `AppState`; components call `state.filtered_peers()` | Search affects Status + Peers uniformly |
+| Theme | `AppState.theme`; passed via `&AppState` | Single instance, consistent styling |
+| Key routing | Search mode → `StatusBarComponent`; Normal → global keys first, then active component | Matches existing behavior exactly |
+
+## Target Structure
+
+```
+ferro-wg-tui-core/
+  Cargo.toml
+  src/
+    lib.rs             ← re-exports
+    action.rs          ← Action enum
+    state.rs           ← AppState, PeerState, dispatch()
+    theme.rs           ← Theme (Catppuccin Mocha/Latte)
+    component.rs       ← Component trait, panel_block(), overlay_block()
+    app.rs             ← Tab, InputMode enums
+    util.rs            ← format_bytes()
+
+ferro-wg-tui-components/
+  Cargo.toml
+  src/
+    lib.rs             ← re-exports
+    status.rs          ← StatusComponent
+    peers.rs           ← PeersComponent
+    compare.rs         ← CompareComponent
+    config.rs          ← ConfigComponent
+    logs.rs            ← LogsComponent
+    tab_bar.rs         ← TabBarComponent
+    status_bar.rs      ← StatusBarComponent
+
+ferro-wg-tui/
+  Cargo.toml
+  src/
+    lib.rs             ← pub async fn run(), event loop, terminal setup
+    event.rs           ← EventHandler (crossterm polling)
+```
+
+## Cargo.toml Specifications
+
+### ferro-wg-tui-core/Cargo.toml
+
+```toml
+[package]
+name = "ferro-wg-tui-core"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types for the ferro-wg TUI: Component trait, Action, AppState, Theme"
+
+[dependencies]
+ferro-wg-core = { path = "../ferro-wg-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+
+[lints]
+workspace = true
+```
+
+### ferro-wg-tui-components/Cargo.toml
+
+```toml
+[package]
+name = "ferro-wg-tui-components"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TUI components for ferro-wg: Status, Peers, Compare, Config, Logs"
+
+[dependencies]
+ferro-wg-tui-core = { path = "../ferro-wg-tui-core" }
+ferro-wg-core = { path = "../ferro-wg-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+
+[lints]
+workspace = true
+```
+
+### ferro-wg-tui/Cargo.toml
+
+```toml
+[package]
+name = "ferro-wg-tui"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI for ferro-wg: event loop, terminal management, component wiring"
+
+[dependencies]
+ferro-wg-tui-core = { path = "../ferro-wg-tui-core" }
+ferro-wg-tui-components = { path = "../ferro-wg-tui-components" }
+ferro-wg-core = { path = "../ferro-wg-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true
+```
+
+### ferro-wg/Cargo.toml changes
+
+```toml
+[features]
+tui = ["dep:ferro-wg-tui"]
+# Remove: dep:ratatui, dep:crossterm
+
+[dependencies]
+ferro-wg-tui = { path = "../ferro-wg-tui", optional = true }
+# Remove: ratatui, crossterm
+```
+
+### Workspace Cargo.toml
+
+```toml
+[workspace]
+members = [
+    "ferro-wg-core",
+    "ferro-wg-tui-core",
+    "ferro-wg-tui-components",
+    "ferro-wg-tui",
+    "ferro-wg",
+    "ferro-wg-daemon",
+]
+```
+
+## Event Loop Architecture
+
+```
+Event Loop (ferro-wg-tui/src/lib.rs)
   │
   ├─ crossterm key → handle_global_key() or active_component.handle_key()
   │                    returns Option<Action>
@@ -25,147 +180,22 @@ Event Loop (mod.rs)
   │         → component.update(&action)   ← Phase 2: component notification
   │
   └─ Render: tab_bar.render(), components[active].render(), status_bar.render()
-             each receives &AppState for shared data, &Theme for styling
+             each receives &AppState for shared data
 ```
-
-**Key decisions:**
-
-| Decision | Choice | Why |
-|---|---|---|
-| Component storage | `Vec<Box<dyn Component>>` separate from `AppState` | Avoids `&mut component` + `&state` split-borrow |
-| Shared data | Components receive `&AppState` (read-only) | Single source of truth, no data duplication |
-| Table state | Per-component | Independent scroll positions per tab |
-| Search query | Lives in `AppState`; components call `state.filtered_peers()` | Search affects Status + Peers uniformly |
-| Theme | `AppState.theme`; passed via `&AppState` | Single instance, consistent styling |
-| Key routing | Search mode → `StatusBarComponent`; Normal → global keys first, then active component | Matches existing behavior exactly |
-
-## Target File Structure
-
-```
-ferro-wg/src/tui/
-  mod.rs              ← event loop rewritten to use components
-  event.rs            ← unchanged
-  action.rs           ← NEW: Action enum
-  state.rs            ← NEW: AppState (from App) + dispatch()
-  theme.rs            ← NEW: Theme with Catppuccin Mocha/Latte
-  component.rs        ← NEW: Component trait + panel_block/overlay_block helpers
-  components/
-    mod.rs            ← re-exports
-    status.rs         ← StatusComponent (from draw_status_view)
-    peers.rs          ← PeersComponent (from draw_peers_view)
-    compare.rs        ← CompareComponent (from draw_compare_view)
-    config.rs         ← ConfigComponent (from draw_config_view)
-    logs.rs           ← LogsComponent (from draw_logs_view)
-    tab_bar.rs        ← TabBarComponent (from draw_tabs)
-    status_bar.rs     ← StatusBarComponent (from draw_status_bar)
-  app.rs              ← slim: Tab, InputMode, PeerState only
-  ui.rs               ← slim: format_bytes utility only
-```
-
-## Implementation Steps
-
-### Step 1: `Action` enum + `Component` trait (~90 lines)
-
-**Create:** `action.rs`, `component.rs`
-**Modify:** `mod.rs` (add module declarations)
 
 ```rust
-// action.rs
-pub enum Action {
-    Quit, NextTab, PrevTab, SelectTab(Tab),
-    NextRow, PrevRow,
-    EnterSearch, ExitSearch, ClearSearch,
-    SearchInput(char), SearchBackspace, Tick,
-}
+// ferro-wg-tui/src/lib.rs
+pub async fn run(wg_config: WgConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // Terminal setup...
 
-// component.rs
-pub trait Component {
-    fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action>;
-    fn update(&mut self, action: &Action, state: &AppState);
-    fn render(&mut self, frame: &mut Frame, area: Rect, focused: bool, state: &AppState);
-}
-
-pub fn panel_block(title: &str, theme: &Theme) -> Block { ... }
-pub fn overlay_block(title: &str, theme: &Theme) -> Block { ... }
-```
-
-**Tests:** Compilation only — pure type definitions.
-
-### Step 2: `Theme` module (~140 lines)
-
-**Create:** `theme.rs`
-
-```rust
-pub struct Theme {
-    pub base, surface, text, subtext, accent, success, error, warning, muted, highlight_bg: Color,
-}
-impl Theme {
-    pub fn mocha() -> Self { /* maps to current hardcoded colors */ }
-    pub fn latte() -> Self { ... }
-    pub fn header_style(&self) -> Style { ... }
-    pub fn highlight_style(&self) -> Style { ... }
-}
-```
-
-Phase 0 maps to identical Color values (Cyan, Green, DarkGray, etc.).
-True Catppuccin hex values swap in during Phase 7.
-
-**Tests:** Assert `Theme::mocha()` colors match current hardcoded values.
-
-### Step 3: Extract `AppState` from `App` (~200 lines)
-
-**Create:** `state.rs`
-**Modify:** `app.rs` — `App` wraps `AppState` internally so existing tests pass unchanged
-
-`AppState` contains: `running`, `active_tab`, `input_mode`, `search_query`,
-`wg_config`, `peers`, `log_lines`, `theme`. Plus `dispatch(&mut self, action)`
-and `filtered_peers()`.
-
-`App` becomes a thin wrapper delegating to `AppState`. All 11 existing `app.rs`
-tests pass without modification.
-
-**Tests:** Existing tests pass. New tests for `AppState::dispatch` (Quit, tab nav, search).
-
-### Step 4: `StatusComponent` + `PeersComponent` (~240 lines)
-
-**Create:** `components/mod.rs`, `components/status.rs`, `components/peers.rs`
-
-Each component:
-- Owns its own `TableState`
-- `render()` contains logic extracted from `draw_status_view` / `draw_peers_view`
-- `handle_key()` returns `Action::NextRow` / `Action::PrevRow` for j/k/arrows
-- `update()` handles row clamping and resets selection on tab change
-- Uses `state.filtered_peers()` and `theme.header_style()`
-
-**Tests:** `handle_key` returns correct Actions. `update` resets selection. Row clamping.
-
-### Step 5: `CompareComponent`, `ConfigComponent`, `LogsComponent` (~200 lines)
-
-**Create:** `components/compare.rs`, `components/config.rs`, `components/logs.rs`
-
-- Compare: fixed 3-row backend table (fixes latent bug — currently uses `peers.len()`)
-- Config: Paragraph rendering, no table state
-- Logs: Paragraph rendering, no table state (future: scroll)
-
-**Tests:** Compare row clamping (3 rows). Render doesn't panic with empty state.
-
-### Step 6: `TabBarComponent` + `StatusBarComponent` (~120 lines)
-
-**Create:** `components/tab_bar.rs`, `components/status_bar.rs`
-
-- TabBar: render-only (tab switching handled globally)
-- StatusBar: in Search mode, emits `SearchInput(char)` / `SearchBackspace` / `ExitSearch`; in Normal mode, render-only help text
-
-**Tests:** StatusBarComponent emits correct search actions.
-
-### Step 7: Wire components into event loop (~200 lines)
-
-**Modify:** `mod.rs` (rewrite `event_loop`), `ui.rs` (simplify or inline `draw`)
-
-```rust
-async fn event_loop(...) {
     let mut state = AppState::new(wg_config);
-    let mut components: Vec<Box<dyn Component>> = vec![...];
+    let mut components: Vec<Box<dyn Component>> = vec![
+        Box::new(StatusComponent::new()),
+        Box::new(PeersComponent::new()),
+        Box::new(CompareComponent::new()),
+        Box::new(ConfigComponent::new()),
+        Box::new(LogsComponent::new()),
+    ];
     let mut tab_bar = TabBarComponent::new();
     let mut status_bar = StatusBarComponent::new();
 
@@ -194,27 +224,91 @@ async fn event_loop(...) {
             None => break,
         }
     }
+
+    // Terminal teardown...
 }
 ```
 
-**Tests:** Compilation + existing `format_bytes` test. Manual visual verification.
+## Core Type Definitions
 
-### Step 8: Remove legacy `App`, migrate tests, clean up (~200 lines, mostly deletions)
+### Component Trait (ferro-wg-tui-core)
 
-**Modify:** `app.rs` — remove `App` struct, keep `Tab`, `InputMode`, `PeerState`
+```rust
+pub trait Component {
+    fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action>;
+    fn update(&mut self, action: &Action, state: &AppState);
+    fn render(&mut self, frame: &mut Frame, area: Rect, focused: bool, state: &AppState);
+}
+```
 
-- Tab tests stay in `app.rs`
-- State/dispatch/filter tests move to `state.rs`
-- Row navigation tests move to component tests
-- `ui.rs` retains only `format_bytes` as `pub(crate)`
-- Doc comments on all public items
-- `cargo clippy` clean, `cargo fmt` clean
+### Action Enum (ferro-wg-tui-core)
 
-**Tests:** All original tests pass in new locations. Total test count higher than the original 12.
+```rust
+pub enum Action {
+    Quit,
+    NextTab,
+    PrevTab,
+    SelectTab(Tab),
+    NextRow,
+    PrevRow,
+    EnterSearch,
+    ExitSearch,
+    ClearSearch,
+    SearchInput(char),
+    SearchBackspace,
+    Tick,
+}
+```
+
+## Implementation Steps
+
+### Step 1: Create `ferro-wg-tui-core` (~350 lines)
+
+**Create:** entire `ferro-wg-tui-core/` crate
+
+Contains: `Action` enum, `Tab`/`InputMode` enums (from `app.rs`), `Component`
+trait + `panel_block()`/`overlay_block()`, `Theme` struct with `mocha()`/`latte()`,
+`AppState` + `PeerState` + `dispatch()` + `filtered_peers()` (from `App`),
+`format_bytes()` utility.
+
+Phase 0 theme maps to identical Color values currently hardcoded (Cyan, Green,
+DarkGray). True Catppuccin hex values swap in during Phase 7.
+
+**Tests:** Tab enum tests, AppState dispatch tests, Theme color assertions,
+format_bytes test. All migrated from existing `app.rs` and `ui.rs` tests.
+
+### Step 2: Create `ferro-wg-tui-components` (~500 lines)
+
+**Create:** entire `ferro-wg-tui-components/` crate
+
+Seven components, each implementing `Component`:
+
+- **StatusComponent** — owns `TableState`, renders peer status table (Peer, Endpoint, Status, Rx, Tx, Handshake)
+- **PeersComponent** — owns `TableState`, renders peer config table (Peer, PubKey, Endpoint, AllowedIPs, Keepalive, Backend)
+- **CompareComponent** — owns `TableState`, renders backend comparison (fixed 3-row; fixes latent bug where `peers.len()` was used for row count)
+- **ConfigComponent** — no table state, renders interface config Paragraph
+- **LogsComponent** — no table state, renders log lines Paragraph
+- **TabBarComponent** — render-only, tab switching handled globally
+- **StatusBarComponent** — in Search mode emits `SearchInput`/`SearchBackspace`/`ExitSearch`; in Normal mode renders help text
+
+**Tests:** `handle_key` → Action mapping, row clamping, search action emission, render-doesn't-panic with empty state.
+
+### Step 3: Create `ferro-wg-tui` + rewire binary (~220 lines)
+
+**Create:** `ferro-wg-tui/` crate with `event.rs` (from existing) and `lib.rs` (event loop + terminal setup/teardown)
+
+**Modify:**
+- `Cargo.toml` (workspace) — add 3 new members
+- `ferro-wg/Cargo.toml` — replace ratatui/crossterm deps with `ferro-wg-tui`
+- `ferro-wg/src/main.rs` — `use ferro_wg_tui::run` instead of `mod tui`
+
+**Delete:** `ferro-wg/src/tui/` directory (all 4 files)
+
+**Tests:** Full workspace `cargo test`, `cargo build`, `cargo clippy`, `cargo fmt`.
 
 ## Verification
 
-After all 8 steps:
+After all steps:
 
 ```bash
 cargo test --workspace --features boringtun,neptun,gotatun
@@ -223,18 +317,34 @@ cargo clippy --workspace --features boringtun,neptun,gotatun -- -W clippy::pedan
 cargo fmt --all --check
 ```
 
-- Visual output identical (run `cargo run --features tui -- tui` and compare)
-- All keybindings work: q, Esc, Ctrl+C, Tab, Shift+Tab, Left/Right, 1-5, j/k, Up/Down, /
+Individual crate builds:
+```bash
+cargo build -p ferro-wg-tui-core         # core types only
+cargo build -p ferro-wg-tui-components   # components + core
+cargo build -p ferro-wg-tui              # full TUI
+cargo build -p ferro-wg --no-default-features  # CLI-only, no TUI
+```
+
+- Visual output identical to current TUI
+- All keybindings preserved: q, Esc, Ctrl+C, Tab, Shift+Tab, Left/Right, 1-5, j/k, Up/Down, /
 - Search filters peers in Status and Peers tabs
-- New component can be added by: implementing `Component`, adding a `Tab` variant, pushing to the `Vec`
+- New component added by: implementing `Component` in `ferro-wg-tui-components`, adding `Tab` variant, pushing to component `Vec`
 
-## Critical Files
+## File Migration Map
 
-| File | Role |
+| Current file | Destination |
 |---|---|
-| `ferro-wg/src/tui/app.rs` | Source of Tab/InputMode/PeerState + all current tests |
-| `ferro-wg/src/tui/ui.rs` | Source of all rendering logic to extract |
-| `ferro-wg/src/tui/mod.rs` | Event loop to rewrite |
-| `ferro-wg/src/tui/event.rs` | EventHandler — unchanged but critical to wiring |
-| `ferro-wg/Cargo.toml` | ratatui 0.29, crossterm 0.28 deps |
-| `Cargo.toml` (workspace) | Already has `unsafe_code = "forbid"` |
+| `ferro-wg/src/tui/app.rs` — Tab, InputMode | `ferro-wg-tui-core/src/app.rs` |
+| `ferro-wg/src/tui/app.rs` — PeerState, App | `ferro-wg-tui-core/src/state.rs` |
+| `ferro-wg/src/tui/ui.rs` — draw_status_view | `ferro-wg-tui-components/src/status.rs` |
+| `ferro-wg/src/tui/ui.rs` — draw_peers_view | `ferro-wg-tui-components/src/peers.rs` |
+| `ferro-wg/src/tui/ui.rs` — draw_compare_view | `ferro-wg-tui-components/src/compare.rs` |
+| `ferro-wg/src/tui/ui.rs` — draw_config_view | `ferro-wg-tui-components/src/config.rs` |
+| `ferro-wg/src/tui/ui.rs` — draw_logs_view | `ferro-wg-tui-components/src/logs.rs` |
+| `ferro-wg/src/tui/ui.rs` — draw_tabs | `ferro-wg-tui-components/src/tab_bar.rs` |
+| `ferro-wg/src/tui/ui.rs` — draw_status_bar | `ferro-wg-tui-components/src/status_bar.rs` |
+| `ferro-wg/src/tui/ui.rs` — format_bytes | `ferro-wg-tui-core/src/util.rs` |
+| `ferro-wg/src/tui/mod.rs` — run, event_loop | `ferro-wg-tui/src/lib.rs` |
+| `ferro-wg/src/tui/event.rs` — EventHandler | `ferro-wg-tui/src/event.rs` |
+| `ferro-wg/src/main.rs` — run_tui() | Modified in place |
+| `Cargo.toml` (workspace) | Add 3 new members |
