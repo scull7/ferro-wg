@@ -239,6 +239,12 @@ mod imp {
             let search_out = Command::new(NETWORKSETUP)
                 .args(["-getsearchdomains", &service_name])
                 .output()?;
+            if !search_out.status.success() {
+                return Err(DnsError::NetworkSetup(format!(
+                    "-getsearchdomains failed: {}",
+                    String::from_utf8_lossy(&search_out.stderr).trim()
+                )));
+            }
             let prior = parse_networksetup_search(&String::from_utf8_lossy(&search_out.stdout));
 
             let mut sargs = vec!["-setsearchdomains".to_owned(), service_name.clone()];
