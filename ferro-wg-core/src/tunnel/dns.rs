@@ -20,36 +20,23 @@ use crate::error::WgError;
 /// Errors that can occur while applying or reverting tunnel DNS configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum DnsError {
-    /// A required external command failed to launch.
-    #[error("failed to run {cmd}: {source}")]
-    Exec {
-        /// The command that could not be executed.
-        cmd: &'static str,
-        /// The underlying I/O error.
-        #[source]
-        source: std::io::Error,
-    },
+    /// An I/O error occurred launching a command or accessing a system file.
+    ///
+    /// `#[from]` allows using `?` directly on [`std::io::Result`] values
+    /// without any `.map_err()` boilerplate.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 
-    /// An external command exited with a non-zero status.
-    #[error("{cmd} failed: {stderr}")]
-    Command {
-        /// The command that exited non-zero.
-        cmd: &'static str,
-        /// Captured stderr.
-        stderr: String,
-    },
+    /// `networksetup` exited with a non-zero status (macOS).
+    #[error("networksetup failed: {0}")]
+    NetworkSetup(String),
 
-    /// Could not read or write a system file.
-    #[error("file I/O error for {path}: {source}")]
-    Io {
-        /// The file path involved.
-        path: &'static str,
-        /// The underlying I/O error.
-        #[source]
-        source: std::io::Error,
-    },
+    /// `resolvectl` exited with a non-zero status (Linux).
+    #[error("resolvectl failed: {0}")]
+    Resolvectl(String),
 
-    /// The default-route interface could not be mapped to a network service.
+    /// The default-route interface could not be mapped to a network service
+    /// (macOS).
     #[error("cannot determine primary network service: {0}")]
     ServiceDetection(String),
 }
@@ -103,11 +90,7 @@ mod imp {
         // 1. Find the interface used by the default route.
         let route_out = Command::new(ROUTE)
             .args(["-n", "get", "default"])
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "route -n get default",
-                source: e,
-            })?;
+            .output()?;
 
         let route_stdout = String::from_utf8_lossy(&route_out.stdout);
         let iface = route_stdout
@@ -127,11 +110,7 @@ mod imp {
         //   (Hardware Port: Wi-Fi, Device: en0)
         let ns_out = Command::new(NETWORKSETUP)
             .args(["-listnetworkserviceorder"])
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "networksetup -listnetworkserviceorder",
-                source: e,
-            })?;
+            .output()?;
 
         let ns_stdout = String::from_utf8_lossy(&ns_out.stdout);
         let mut service_name: Option<String> = None;
@@ -212,56 +191,34 @@ mod imp {
         // Save current DNS.
         let dns_out = Command::new(NETWORKSETUP)
             .args(["-getdnsservers", &service_name])
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "networksetup -getdnsservers",
-                source: e,
-            })?;
+            .output()?;
         let prior_dns = parse_networksetup_dns(&String::from_utf8_lossy(&dns_out.stdout));
 
         // Save current search domains.
         let search_out = Command::new(NETWORKSETUP)
             .args(["-getsearchdomains", &service_name])
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "networksetup -getsearchdomains",
-                source: e,
-            })?;
+            .output()?;
         let prior_search = parse_networksetup_search(&String::from_utf8_lossy(&search_out.stdout));
 
         // Set new DNS servers.
         let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
         args.extend(servers.iter().map(IpAddr::to_string));
-        let out = Command::new(NETWORKSETUP)
-            .args(&args)
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "networksetup -setdnsservers",
-                source: e,
-            })?;
+        let out = Command::new(NETWORKSETUP).args(&args).output()?;
         if !out.status.success() {
-            return Err(DnsError::Command {
-                cmd: "networksetup -setdnsservers",
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            });
+            return Err(DnsError::NetworkSetup(
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ));
         }
 
         // Set search domains if provided.
         if !search.is_empty() {
             let mut sargs = vec!["-setsearchdomains".to_owned(), service_name.clone()];
             sargs.extend(search.iter().cloned());
-            let sout = Command::new(NETWORKSETUP)
-                .args(&sargs)
-                .output()
-                .map_err(|e| DnsError::Exec {
-                    cmd: "networksetup -setsearchdomains",
-                    source: e,
-                })?;
+            let sout = Command::new(NETWORKSETUP).args(&sargs).output()?;
             if !sout.status.success() {
-                return Err(DnsError::Command {
-                    cmd: "networksetup -setsearchdomains",
-                    stderr: String::from_utf8_lossy(&sout.stderr).into_owned(),
-                });
+                return Err(DnsError::NetworkSetup(
+                    String::from_utf8_lossy(&sout.stderr).into_owned(),
+                ));
             }
         }
 
@@ -297,18 +254,11 @@ mod imp {
         } else {
             args.extend(original.dns.iter().map(IpAddr::to_string));
         }
-        let out = Command::new(NETWORKSETUP)
-            .args(&args)
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "networksetup -setdnsservers (revert)",
-                source: e,
-            })?;
+        let out = Command::new(NETWORKSETUP).args(&args).output()?;
         if !out.status.success() {
-            return Err(DnsError::Command {
-                cmd: "networksetup -setdnsservers (revert)",
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            });
+            return Err(DnsError::NetworkSetup(
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ));
         }
 
         // Restore search domains.
@@ -318,18 +268,11 @@ mod imp {
         } else {
             sargs.extend(original.search);
         }
-        let sout = Command::new(NETWORKSETUP)
-            .args(&sargs)
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "networksetup -setsearchdomains (revert)",
-                source: e,
-            })?;
+        let sout = Command::new(NETWORKSETUP).args(&sargs).output()?;
         if !sout.status.success() {
-            return Err(DnsError::Command {
-                cmd: "networksetup -setsearchdomains (revert)",
-                stderr: String::from_utf8_lossy(&sout.stderr).into_owned(),
-            });
+            return Err(DnsError::NetworkSetup(
+                String::from_utf8_lossy(&sout.stderr).into_owned(),
+            ));
         }
 
         debug!("Reverted DNS on service '{service_name}'");
@@ -381,36 +324,22 @@ mod imp {
         // Set DNS servers on the interface.
         let mut args = vec!["dns".to_owned(), iface.to_owned()];
         args.extend(servers.iter().map(IpAddr::to_string));
-        let out = Command::new(RESOLVECTL)
-            .args(&args)
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "resolvectl dns",
-                source: e,
-            })?;
+        let out = Command::new(RESOLVECTL).args(&args).output()?;
         if !out.status.success() {
-            return Err(DnsError::Command {
-                cmd: "resolvectl dns",
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            });
+            return Err(DnsError::Resolvectl(
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ));
         }
 
         // Set domain routing: ~. catches all queries; append explicit search
         // domains if provided.
         let mut dargs = vec!["domain".to_owned(), iface.to_owned(), "~.".to_owned()];
         dargs.extend(search.iter().cloned());
-        let dout = Command::new(RESOLVECTL)
-            .args(&dargs)
-            .output()
-            .map_err(|e| DnsError::Exec {
-                cmd: "resolvectl domain",
-                source: e,
-            })?;
+        let dout = Command::new(RESOLVECTL).args(&dargs).output()?;
         if !dout.status.success() {
-            return Err(DnsError::Command {
-                cmd: "resolvectl domain",
-                stderr: String::from_utf8_lossy(&dout.stderr).into_owned(),
-            });
+            return Err(DnsError::Resolvectl(
+                String::from_utf8_lossy(&dout.stderr).into_owned(),
+            ));
         }
 
         debug!("Applied DNS via resolvectl on {iface}");
@@ -423,10 +352,7 @@ mod imp {
     /// avoid a window where `/etc/resolv.conf` is truncated but not yet
     /// written (race condition visible to concurrent DNS resolvers).
     fn apply_resolv_conf(servers: &[IpAddr], search: &[String]) -> Result<String, DnsError> {
-        let backup = std::fs::read_to_string("/etc/resolv.conf").map_err(|e| DnsError::Io {
-            path: "/etc/resolv.conf",
-            source: e,
-        })?;
+        let backup = std::fs::read_to_string("/etc/resolv.conf")?;
 
         let mut prepend = String::new();
         for ip in servers {
@@ -440,14 +366,8 @@ mod imp {
 
         // Write atomically: temp file → rename.
         let tmp_path = "/etc/resolv.conf.ferro-wg.tmp";
-        std::fs::write(tmp_path, &new_contents).map_err(|e| DnsError::Io {
-            path: "/etc/resolv.conf.ferro-wg.tmp",
-            source: e,
-        })?;
-        std::fs::rename(tmp_path, "/etc/resolv.conf").map_err(|e| DnsError::Io {
-            path: "/etc/resolv.conf",
-            source: e,
-        })?;
+        std::fs::write(tmp_path, &new_contents)?;
+        std::fs::rename(tmp_path, "/etc/resolv.conf")?;
 
         debug!("Applied DNS via /etc/resolv.conf (atomic replace)");
         Ok(backup)
@@ -480,32 +400,19 @@ mod imp {
     pub fn revert(state: DnsState) -> Result<(), DnsError> {
         match state {
             DnsState::Resolved { iface } => {
-                let out = Command::new(RESOLVECTL)
-                    .args(["revert", &iface])
-                    .output()
-                    .map_err(|e| DnsError::Exec {
-                        cmd: "resolvectl revert",
-                        source: e,
-                    })?;
+                let out = Command::new(RESOLVECTL).args(["revert", &iface]).output()?;
                 if !out.status.success() {
-                    return Err(DnsError::Command {
-                        cmd: "resolvectl revert",
-                        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                    });
+                    return Err(DnsError::Resolvectl(
+                        String::from_utf8_lossy(&out.stderr).into_owned(),
+                    ));
                 }
                 debug!("Reverted DNS via resolvectl on {iface}");
             }
             DnsState::ResolvConf { backup } => {
                 // Restore atomically.
                 let tmp_path = "/etc/resolv.conf.ferro-wg.tmp";
-                std::fs::write(tmp_path, &backup).map_err(|e| DnsError::Io {
-                    path: "/etc/resolv.conf.ferro-wg.tmp",
-                    source: e,
-                })?;
-                std::fs::rename(tmp_path, "/etc/resolv.conf").map_err(|e| DnsError::Io {
-                    path: "/etc/resolv.conf",
-                    source: e,
-                })?;
+                std::fs::write(tmp_path, &backup)?;
+                std::fs::rename(tmp_path, "/etc/resolv.conf")?;
                 debug!("Restored /etc/resolv.conf from backup (atomic replace)");
             }
         }
