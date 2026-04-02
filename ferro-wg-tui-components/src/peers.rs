@@ -130,6 +130,7 @@ mod tests {
                 listen_port: 51820,
                 addresses: vec!["10.0.0.2/24".into()],
                 dns: Vec::new(),
+                dns_search: Vec::new(),
                 mtu: 1420,
                 fwmark: 0,
                 pre_up: Vec::new(),

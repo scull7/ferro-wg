@@ -133,6 +133,7 @@ mod tests {
                 listen_port: 51820,
                 addresses: Vec::new(),
                 dns: Vec::new(),
+                dns_search: Vec::new(),
                 mtu: 1420,
                 fwmark: 0,
                 pre_up: Vec::new(),
