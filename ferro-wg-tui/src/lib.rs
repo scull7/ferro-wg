@@ -5,7 +5,6 @@
 //! It wires together types from [`ferro_wg_tui_core`] and component
 //! implementations from [`ferro_wg_tui_components`].
 
-mod client;
 mod event;
 
 use std::io;
@@ -19,7 +18,9 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
+use ferro_wg_core::client;
 use ferro_wg_core::config::WgConfig;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
@@ -98,6 +99,9 @@ async fn event_loop(
     // Guard to prevent multiple concurrent status polls.
     let poll_in_flight = Arc::new(AtomicBool::new(false));
 
+    // Track background tasks for clean shutdown.
+    let mut tasks = JoinSet::new();
+
     while state.running {
         // Drain daemon messages (non-blocking).
         while let Ok(msg) = daemon_rx.try_recv() {
@@ -152,17 +156,18 @@ async fn event_loop(
                         &mut tab_bar,
                         &mut status_bar,
                     );
-
-                    // Spawn daemon commands for peer actions.
-                    maybe_spawn_command(action, &daemon_tx);
+                    maybe_spawn_command(action, &daemon_tx, &mut tasks);
                 }
             }
             Some(AppEvent::Tick) => {
-                spawn_status_poll(&daemon_tx, &poll_in_flight);
+                spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks);
             }
             None => break,
         }
     }
+
+    // Abort remaining background tasks on exit.
+    tasks.abort_all();
 
     Ok(())
 }
@@ -185,9 +190,6 @@ fn dispatch_all(
 
 /// Handle global key events that apply regardless of which component
 /// is focused.
-///
-/// Returns `Some(Action)` if the key was handled, `None` otherwise
-/// (to fall through to the active component).
 fn handle_global_key(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
@@ -205,31 +207,39 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
 }
 
 /// Spawn a background status poll if none is already in-flight.
-fn spawn_status_poll(tx: &mpsc::UnboundedSender<DaemonMessage>, in_flight: &Arc<AtomicBool>) {
+fn spawn_status_poll(
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    in_flight: &Arc<AtomicBool>,
+    tasks: &mut JoinSet<()>,
+) {
     if in_flight.swap(true, Ordering::SeqCst) {
-        // A poll is already in-flight; skip this tick.
         return;
     }
 
     let tx = tx.clone();
     let in_flight = Arc::clone(in_flight);
 
-    tokio::spawn(async move {
-        match client::send_command(&DaemonCommand::Status).await {
-            Ok(DaemonResponse::Status(peers)) => {
-                let _ = tx.send(DaemonMessage::StatusUpdate(peers));
+    tasks.spawn(async move {
+        let msg = match client::send_command(&DaemonCommand::Status).await {
+            Ok(DaemonResponse::Status(peers)) => DaemonMessage::StatusUpdate(peers),
+            Err(e) if e.is_not_running() => DaemonMessage::Unreachable,
+            Err(e) => DaemonMessage::CommandError(e.to_string()),
+            Ok(_) => {
+                in_flight.store(false, Ordering::SeqCst);
+                return;
             }
-            Err(_) => {
-                let _ = tx.send(DaemonMessage::Unreachable);
-            }
-            Ok(_) => {}
-        }
+        };
+        let _ = tx.send(msg);
         in_flight.store(false, Ordering::SeqCst);
     });
 }
 
 /// If the action is a peer command, spawn a background daemon task.
-fn maybe_spawn_command(action: &Action, tx: &mpsc::UnboundedSender<DaemonMessage>) {
+fn maybe_spawn_command(
+    action: &Action,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
     let (cmd, description) = match action {
         Action::ConnectPeer(name) => (
             DaemonCommand::Up {
@@ -255,15 +265,13 @@ fn maybe_spawn_command(action: &Action, tx: &mpsc::UnboundedSender<DaemonMessage
     };
 
     let tx = tx.clone();
-    tokio::spawn(async move {
-        match client::send_command(&cmd).await {
-            Ok(DaemonResponse::Ok) => {
-                let _ = tx.send(DaemonMessage::CommandOk(description));
-            }
-            Ok(DaemonResponse::Error(e)) | Err(e) => {
-                let _ = tx.send(DaemonMessage::CommandError(e));
-            }
-            Ok(DaemonResponse::Status(_)) => {}
-        }
+    tasks.spawn(async move {
+        let msg = match client::send_command(&cmd).await {
+            Ok(DaemonResponse::Ok) => DaemonMessage::CommandOk(description),
+            Ok(DaemonResponse::Error(e)) => DaemonMessage::CommandError(e),
+            Err(e) => DaemonMessage::CommandError(e.to_string()),
+            Ok(DaemonResponse::Status(_)) => return,
+        };
+        let _ = tx.send(msg);
     });
 }
