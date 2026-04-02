@@ -44,6 +44,19 @@ enum DaemonMessage {
     Unreachable,
 }
 
+/// Convert a daemon client error into a [`DaemonMessage`].
+///
+/// Centralizes the boundary between typed errors and UI-facing
+/// string messages. `NotRunning` maps to `Unreachable`; all other
+/// errors are displayed as `CommandError`.
+fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
+    if err.is_not_running() {
+        DaemonMessage::Unreachable
+    } else {
+        DaemonMessage::CommandError(err.to_string())
+    }
+}
+
 /// Run the interactive TUI.
 ///
 /// Sets up the terminal, creates the component tree and application
@@ -222,8 +235,7 @@ fn spawn_status_poll(
     tasks.spawn(async move {
         let msg = match client::send_command(&DaemonCommand::Status).await {
             Ok(DaemonResponse::Status(peers)) => DaemonMessage::StatusUpdate(peers),
-            Err(e) if e.is_not_running() => DaemonMessage::Unreachable,
-            Err(e) => DaemonMessage::CommandError(e.to_string()),
+            Err(e) => error_to_message(&e),
             Ok(_) => {
                 in_flight.store(false, Ordering::SeqCst);
                 return;
@@ -269,7 +281,7 @@ fn maybe_spawn_command(
         let msg = match client::send_command(&cmd).await {
             Ok(DaemonResponse::Ok) => DaemonMessage::CommandOk(description),
             Ok(DaemonResponse::Error(e)) => DaemonMessage::CommandError(e),
-            Err(e) => DaemonMessage::CommandError(e.to_string()),
+            Err(e) => error_to_message(&e),
             Ok(DaemonResponse::Status(_)) => return,
         };
         let _ = tx.send(msg);

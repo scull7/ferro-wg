@@ -81,3 +81,40 @@ pub async fn send_command_to(
 
     ipc::decode_message(&line).map_err(DaemonClientError::Decode)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_running_is_not_running() {
+        assert!(DaemonClientError::NotRunning.is_not_running());
+    }
+
+    #[test]
+    fn other_errors_are_not_not_running() {
+        assert!(!DaemonClientError::NoResponse.is_not_running());
+        let io_err = DaemonClientError::Io(std::io::Error::other("test"));
+        assert!(!io_err.is_not_running());
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            DaemonClientError::NotRunning.to_string(),
+            "daemon is not running"
+        );
+        assert_eq!(
+            DaemonClientError::NoResponse.to_string(),
+            "daemon closed connection without response"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_nonexistent_socket_returns_not_running() {
+        let result =
+            send_command_to(&DaemonCommand::Status, Path::new("/tmp/nonexistent.sock")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_not_running());
+    }
+}
