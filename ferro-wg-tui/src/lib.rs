@@ -118,19 +118,24 @@ async fn event_loop(
     while state.running {
         // Drain daemon messages (non-blocking).
         while let Ok(msg) = daemon_rx.try_recv() {
-            let action = match msg {
-                DaemonMessage::StatusUpdate(peers) => Action::UpdatePeers(peers),
-                DaemonMessage::CommandOk(msg) => Action::DaemonOk(msg),
-                DaemonMessage::CommandError(msg) => Action::DaemonError(msg),
-                DaemonMessage::Unreachable => Action::DaemonConnectivityChanged(false),
+            let actions: Vec<Action> = match msg {
+                DaemonMessage::StatusUpdate(peers) => vec![Action::UpdatePeers(peers)],
+                DaemonMessage::CommandOk(msg) => vec![Action::DaemonOk(msg)],
+                DaemonMessage::CommandError(msg) => vec![Action::DaemonError(msg)],
+                DaemonMessage::Unreachable => vec![
+                    Action::DaemonConnectivityChanged(false),
+                    Action::DaemonError("daemon is not running".into()),
+                ],
             };
-            dispatch_all(
-                &mut state,
-                &action,
-                &mut components,
-                &mut tab_bar,
-                &mut status_bar,
-            );
+            for action in &actions {
+                dispatch_all(
+                    &mut state,
+                    action,
+                    &mut components,
+                    &mut tab_bar,
+                    &mut status_bar,
+                );
+            }
         }
 
         // Clear expired feedback.
