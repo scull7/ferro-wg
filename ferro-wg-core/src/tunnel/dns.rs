@@ -123,6 +123,13 @@ mod imp {
             .args(["-listnetworkserviceorder"])
             .output()?;
 
+        if !ns_out.status.success() {
+            return Err(DnsError::ServiceDetection(format!(
+                "networksetup -listnetworkserviceorder failed: {}",
+                String::from_utf8_lossy(&ns_out.stderr).trim()
+            )));
+        }
+
         let ns_stdout = String::from_utf8_lossy(&ns_out.stdout);
         let mut service_name: Option<String> = None;
         let mut last_service: Option<String> = None;
