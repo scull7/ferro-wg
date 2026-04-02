@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use ferro_wg_tui_core::{Action, AppState, Component, InputMode};
+use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
 /// Bottom-of-screen bar that displays help text in normal mode or a
 /// search input field in search mode.
@@ -76,21 +76,25 @@ impl Component for StatusBarComponent {
                 InputMode::Normal => {
                     let hotkey = theme.hotkey_style();
                     let daemon_dot = daemon_indicator(state, theme);
-                    Line::from(vec![
+                    let mut spans = vec![
                         daemon_dot,
                         Span::styled("q", hotkey),
                         Span::raw(" quit  "),
                         Span::styled("/", hotkey),
                         Span::raw(" search  "),
-                        Span::styled("u", hotkey),
-                        Span::raw(" up  "),
-                        Span::styled("d", hotkey),
-                        Span::raw(" down  "),
-                        Span::styled("b", hotkey),
-                        Span::raw(" backend  "),
-                        Span::styled("j/k", hotkey),
-                        Span::raw(" nav"),
-                    ])
+                    ];
+                    if state.active_tab == Tab::Status {
+                        spans.extend([
+                            Span::styled("u", hotkey),
+                            Span::raw(" up  "),
+                            Span::styled("d", hotkey),
+                            Span::raw(" down  "),
+                            Span::styled("b", hotkey),
+                            Span::raw(" backend  "),
+                        ]);
+                    }
+                    spans.extend([Span::styled("j/k", hotkey), Span::raw(" nav")]);
+                    Line::from(spans)
                 }
             }
         };
