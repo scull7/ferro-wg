@@ -13,6 +13,7 @@
 //! - `gotatun` — Mullvad's rewrite with owned packet types
 
 pub mod backend;
+pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod error;

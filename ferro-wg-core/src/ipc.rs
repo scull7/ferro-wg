@@ -50,7 +50,7 @@ pub enum DaemonResponse {
 }
 
 /// Runtime status of a single peer, reported by the daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerStatus {
     /// The peer's configured name.
     pub name: String,

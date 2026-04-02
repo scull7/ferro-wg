@@ -28,6 +28,15 @@ impl StatusComponent {
     fn row_count(state: &AppState) -> usize {
         state.filtered_peers().count()
     }
+
+    /// Get the name of the currently selected peer, if any.
+    fn selected_peer_name(&self, state: &AppState) -> Option<String> {
+        let idx = self.table_state.selected()?;
+        state
+            .filtered_peers()
+            .nth(idx)
+            .map(|p| p.config.name.clone())
+    }
 }
 
 impl Default for StatusComponent {
@@ -37,10 +46,15 @@ impl Default for StatusComponent {
 }
 
 impl Component for StatusComponent {
-    fn handle_key(&mut self, key: KeyEvent, _state: &AppState) -> Option<Action> {
+    fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => Some(Action::NextRow),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::PrevRow),
+            KeyCode::Enter | KeyCode::Char('u') => {
+                self.selected_peer_name(state).map(Action::ConnectPeer)
+            }
+            KeyCode::Char('d') => self.selected_peer_name(state).map(Action::DisconnectPeer),
+            KeyCode::Char('b') => self.selected_peer_name(state).map(Action::CyclePeerBackend),
             _ => None,
         }
     }

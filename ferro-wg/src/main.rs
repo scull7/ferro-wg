@@ -65,7 +65,7 @@ fn default_config_path() -> PathBuf {
 fn daemon_command(cmd: &DaemonCommand) -> Result<DaemonResponse, Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(client::send_command(cmd)).map_err(|e| {
-        if client::is_not_running(&e) {
+        if e.is_not_running() {
             "daemon is not running.\n\n\
              Start it with:\n  \
              sudo ferro-wg daemon\n\n\
@@ -73,7 +73,7 @@ fn daemon_command(cmd: &DaemonCommand) -> Result<DaemonResponse, Box<dyn std::er
              sudo ferro-wg daemon --daemonize"
                 .into()
         } else {
-            e.into()
+            Box::new(e) as Box<dyn std::error::Error>
         }
     })
 }
