@@ -2,8 +2,6 @@
 
 mod cli;
 mod client;
-#[cfg(feature = "tui")]
-mod tui;
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -96,7 +94,7 @@ fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("no connections configured")?
             .clone();
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(tui::run(first))?;
+        rt.block_on(ferro_wg_tui::run(first))?;
         Ok(())
     }
     #[cfg(not(feature = "tui"))]
