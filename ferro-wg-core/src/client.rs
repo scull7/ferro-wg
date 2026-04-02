@@ -15,8 +15,8 @@ use crate::ipc::{self, DaemonCommand, DaemonResponse, SOCKET_PATH};
 /// This is the shared IPC error type used by both the CLI binary and
 /// the TUI crate. Each variant represents a distinct failure mode in
 /// the one-shot Unix socket protocol (connect → send → read → close).
-/// At the TUI layer, these are converted to [`DaemonMessage`](crate)
-/// variants via a centralized boundary helper.
+/// At the TUI layer, these errors are converted into the UI's own
+/// message type via a centralized boundary helper.
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonClientError {
     /// The daemon is not running (socket connection refused).
