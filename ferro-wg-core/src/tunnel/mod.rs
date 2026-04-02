@@ -212,9 +212,18 @@ impl TunnelManager {
             }
         }
 
-        // Revert DNS configuration.
+        // Revert DNS configuration — but only when no other active connection
+        // has DNS applied.  DNS is system-wide on macOS (bound to the primary
+        // network service) and global on Linux (/etc/resolv.conf fallback), so
+        // reverting while another tunnel is still up would break its DNS.
         if let Some(state) = conn.dns_state {
-            if let Err(e) = dns::remove_dns(state) {
+            let other_dns_active = self.connections.values().any(|c| c.dns_state.is_some());
+            if other_dns_active {
+                warn!(
+                    "Skipping DNS revert for {conn_name}: \
+                     another active connection has DNS applied"
+                );
+            } else if let Err(e) = dns::remove_dns(state) {
                 warn!("Failed to remove DNS for {conn_name}: {e}");
             }
         }
