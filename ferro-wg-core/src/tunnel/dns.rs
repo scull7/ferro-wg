@@ -15,6 +15,51 @@ use tracing::debug;
 
 use crate::error::WgError;
 
+// ── Error type ───────────────────────────────────────────────────────────────
+
+/// Errors that can occur while applying or reverting tunnel DNS configuration.
+#[derive(Debug, thiserror::Error)]
+pub enum DnsError {
+    /// A required external command failed to launch.
+    #[error("failed to run {cmd}: {source}")]
+    Exec {
+        /// The command that could not be executed.
+        cmd: &'static str,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// An external command exited with a non-zero status.
+    #[error("{cmd} failed: {stderr}")]
+    Command {
+        /// The command that exited non-zero.
+        cmd: &'static str,
+        /// Captured stderr.
+        stderr: String,
+    },
+
+    /// Could not read or write a system file.
+    #[error("file I/O error for {path}: {source}")]
+    Io {
+        /// The file path involved.
+        path: &'static str,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The default-route interface could not be mapped to a network service.
+    #[error("cannot determine primary network service: {0}")]
+    ServiceDetection(String),
+}
+
+impl From<DnsError> for WgError {
+    fn from(e: DnsError) -> Self {
+        Self::Tunnel(e.to_string())
+    }
+}
+
 // ── macOS ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
@@ -24,29 +69,45 @@ mod imp {
 
     use tracing::debug;
 
-    use crate::error::WgError;
+    use super::DnsError;
+
+    // Full paths for security in a root daemon context.
+    const NETWORKSETUP: &str = "/usr/sbin/networksetup";
+    const ROUTE: &str = "/sbin/route";
+
+    /// The DNS configuration that was active on the primary network service
+    /// before the tunnel was brought up.
+    ///
+    /// Stored inside [`DnsState`](super::DnsState) and used to restore the
+    /// previous state when the tunnel is torn down.
+    pub struct OriginalDnsConfig {
+        pub(super) dns: Vec<IpAddr>,
+        pub(super) search: Vec<String>,
+    }
 
     /// DNS state captured at tunnel bring-up; used to restore the previous
     /// configuration when the tunnel is torn down.
     pub struct DnsState {
         pub(super) service_name: String,
-        pub(super) prior_dns: Vec<IpAddr>,
-        pub(super) prior_search: Vec<String>,
+        pub(super) original: OriginalDnsConfig,
     }
 
     /// Detect the primary macOS network service name by correlating the
-    /// default-route interface with `networksetup -listallnetworkservices`.
+    /// default-route interface with `networksetup -listnetworkserviceorder`.
     ///
     /// # Errors
     ///
-    /// Returns [`WgError::Tunnel`] if either shell command fails or the
-    /// default-route interface cannot be mapped to a network service.
-    pub fn detect_primary_service() -> Result<String, WgError> {
+    /// Returns [`DnsError::ServiceDetection`] if the default-route interface
+    /// cannot be determined or mapped to a registered network service.
+    pub fn detect_primary_service() -> Result<String, DnsError> {
         // 1. Find the interface used by the default route.
-        let route_out = Command::new("route")
+        let route_out = Command::new(ROUTE)
             .args(["-n", "get", "default"])
             .output()
-            .map_err(|e| WgError::Tunnel(format!("route get default: {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "route -n get default",
+                source: e,
+            })?;
 
         let route_stdout = String::from_utf8_lossy(&route_out.stdout);
         let iface = route_stdout
@@ -55,17 +116,22 @@ mod imp {
                 let l = l.trim();
                 l.strip_prefix("interface:").map(str::trim)
             })
-            .ok_or_else(|| WgError::Tunnel("could not parse default route interface".into()))?
+            .ok_or_else(|| {
+                DnsError::ServiceDetection("could not parse default route interface".into())
+            })?
             .to_owned();
 
         // 2. Map the interface name to a network service.
         // `networksetup -listnetworkserviceorder` emits lines like:
         //   (1) Wi-Fi
         //   (Hardware Port: Wi-Fi, Device: en0)
-        let ns_out = Command::new("networksetup")
+        let ns_out = Command::new(NETWORKSETUP)
             .args(["-listnetworkserviceorder"])
             .output()
-            .map_err(|e| WgError::Tunnel(format!("networksetup -listnetworkserviceorder: {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "networksetup -listnetworkserviceorder",
+                source: e,
+            })?;
 
         let ns_stdout = String::from_utf8_lossy(&ns_out.stdout);
         let mut service_name: Option<String> = None;
@@ -92,7 +158,7 @@ mod imp {
         }
 
         service_name.ok_or_else(|| {
-            WgError::Tunnel(format!(
+            DnsError::ServiceDetection(format!(
                 "interface {iface} not found in networksetup service list"
             ))
         })
@@ -134,40 +200,69 @@ mod imp {
     ///
     /// # Errors
     ///
-    /// Returns [`WgError::Tunnel`] if `networksetup` cannot be invoked.
-    pub fn apply(_iface: &str, servers: &[IpAddr], search: &[String]) -> Result<DnsState, WgError> {
+    /// Returns [`DnsError`] if `networksetup` cannot be invoked or exits
+    /// non-zero.
+    pub fn apply(
+        _iface: &str,
+        servers: &[IpAddr],
+        search: &[String],
+    ) -> Result<DnsState, DnsError> {
         let service_name = detect_primary_service()?;
 
         // Save current DNS.
-        let dns_out = Command::new("networksetup")
+        let dns_out = Command::new(NETWORKSETUP)
             .args(["-getdnsservers", &service_name])
             .output()
-            .map_err(|e| WgError::Tunnel(format!("networksetup -getdnsservers: {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "networksetup -getdnsservers",
+                source: e,
+            })?;
         let prior_dns = parse_networksetup_dns(&String::from_utf8_lossy(&dns_out.stdout));
 
         // Save current search domains.
-        let search_out = Command::new("networksetup")
+        let search_out = Command::new(NETWORKSETUP)
             .args(["-getsearchdomains", &service_name])
             .output()
-            .map_err(|e| WgError::Tunnel(format!("networksetup -getsearchdomains: {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "networksetup -getsearchdomains",
+                source: e,
+            })?;
         let prior_search = parse_networksetup_search(&String::from_utf8_lossy(&search_out.stdout));
 
         // Set new DNS servers.
         let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
         args.extend(servers.iter().map(IpAddr::to_string));
-        Command::new("networksetup")
+        let out = Command::new(NETWORKSETUP)
             .args(&args)
             .output()
-            .map_err(|e| WgError::Tunnel(format!("networksetup -setdnsservers: {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "networksetup -setdnsservers",
+                source: e,
+            })?;
+        if !out.status.success() {
+            return Err(DnsError::Command {
+                cmd: "networksetup -setdnsservers",
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
 
         // Set search domains if provided.
         if !search.is_empty() {
             let mut sargs = vec!["-setsearchdomains".to_owned(), service_name.clone()];
             sargs.extend(search.iter().cloned());
-            Command::new("networksetup")
+            let sout = Command::new(NETWORKSETUP)
                 .args(&sargs)
                 .output()
-                .map_err(|e| WgError::Tunnel(format!("networksetup -setsearchdomains: {e}")))?;
+                .map_err(|e| DnsError::Exec {
+                    cmd: "networksetup -setsearchdomains",
+                    source: e,
+                })?;
+            if !sout.status.success() {
+                return Err(DnsError::Command {
+                    cmd: "networksetup -setsearchdomains",
+                    stderr: String::from_utf8_lossy(&sout.stderr).into_owned(),
+                });
+            }
         }
 
         debug!(
@@ -176,48 +271,66 @@ mod imp {
         );
         Ok(DnsState {
             service_name,
-            prior_dns,
-            prior_search,
+            original: OriginalDnsConfig {
+                dns: prior_dns,
+                search: prior_search,
+            },
         })
     }
 
-    /// Revert DNS configuration to the state captured in `DnsState`.
+    /// Revert DNS configuration to the state captured in [`DnsState`].
     ///
     /// # Errors
     ///
-    /// Returns [`WgError::Tunnel`] if `networksetup` cannot be invoked.
-    pub fn revert(state: DnsState) -> Result<(), WgError> {
+    /// Returns [`DnsError`] if `networksetup` cannot be invoked or exits
+    /// non-zero.
+    pub fn revert(state: DnsState) -> Result<(), DnsError> {
         let DnsState {
             service_name,
-            prior_dns,
-            prior_search,
+            original,
         } = state;
 
         // Restore DNS servers (or clear them).
         let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
-        if prior_dns.is_empty() {
+        if original.dns.is_empty() {
             args.push("empty".to_owned());
         } else {
-            args.extend(prior_dns.iter().map(IpAddr::to_string));
+            args.extend(original.dns.iter().map(IpAddr::to_string));
         }
-        Command::new("networksetup")
+        let out = Command::new(NETWORKSETUP)
             .args(&args)
             .output()
-            .map_err(|e| WgError::Tunnel(format!("networksetup -setdnsservers (revert): {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "networksetup -setdnsservers (revert)",
+                source: e,
+            })?;
+        if !out.status.success() {
+            return Err(DnsError::Command {
+                cmd: "networksetup -setdnsservers (revert)",
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
 
         // Restore search domains.
         let mut sargs = vec!["-setsearchdomains".to_owned(), service_name.clone()];
-        if prior_search.is_empty() {
+        if original.search.is_empty() {
             sargs.push("empty".to_owned());
         } else {
-            sargs.extend(prior_search);
+            sargs.extend(original.search);
         }
-        Command::new("networksetup")
+        let sout = Command::new(NETWORKSETUP)
             .args(&sargs)
             .output()
-            .map_err(|e| {
-                WgError::Tunnel(format!("networksetup -setsearchdomains (revert): {e}"))
+            .map_err(|e| DnsError::Exec {
+                cmd: "networksetup -setsearchdomains (revert)",
+                source: e,
             })?;
+        if !sout.status.success() {
+            return Err(DnsError::Command {
+                cmd: "networksetup -setsearchdomains (revert)",
+                stderr: String::from_utf8_lossy(&sout.stderr).into_owned(),
+            });
+        }
 
         debug!("Reverted DNS on service '{service_name}'");
         Ok(())
@@ -233,7 +346,10 @@ mod imp {
 
     use tracing::debug;
 
-    use crate::error::WgError;
+    use super::DnsError;
+
+    // Full path for security in a root daemon context.
+    const RESOLVECTL: &str = "/usr/bin/resolvectl";
 
     /// DNS state captured at tunnel bring-up; used to restore the previous
     /// configuration when the tunnel is torn down.
@@ -251,41 +367,66 @@ mod imp {
         },
     }
 
-    /// Returns `true` if `resolvectl` is available on `$PATH`.
+    /// Returns `true` if `resolvectl` is available at its canonical path.
     fn resolvectl_available() -> bool {
-        Command::new("which")
-            .arg("resolvectl")
-            .output()
-            .map_or(false, |o| o.status.success())
+        std::path::Path::new(RESOLVECTL).exists()
     }
 
     /// Apply DNS via `resolvectl` (systemd-resolved).
-    fn apply_resolvectl(iface: &str, servers: &[IpAddr], search: &[String]) -> Result<(), WgError> {
+    fn apply_resolvectl(
+        iface: &str,
+        servers: &[IpAddr],
+        search: &[String],
+    ) -> Result<(), DnsError> {
         // Set DNS servers on the interface.
         let mut args = vec!["dns".to_owned(), iface.to_owned()];
         args.extend(servers.iter().map(IpAddr::to_string));
-        Command::new("resolvectl")
+        let out = Command::new(RESOLVECTL)
             .args(&args)
             .output()
-            .map_err(|e| WgError::Tunnel(format!("resolvectl dns: {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "resolvectl dns",
+                source: e,
+            })?;
+        if !out.status.success() {
+            return Err(DnsError::Command {
+                cmd: "resolvectl dns",
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
 
         // Set domain routing: ~. catches all queries; append explicit search
         // domains if provided.
         let mut dargs = vec!["domain".to_owned(), iface.to_owned(), "~.".to_owned()];
         dargs.extend(search.iter().cloned());
-        Command::new("resolvectl")
+        let dout = Command::new(RESOLVECTL)
             .args(&dargs)
             .output()
-            .map_err(|e| WgError::Tunnel(format!("resolvectl domain: {e}")))?;
+            .map_err(|e| DnsError::Exec {
+                cmd: "resolvectl domain",
+                source: e,
+            })?;
+        if !dout.status.success() {
+            return Err(DnsError::Command {
+                cmd: "resolvectl domain",
+                stderr: String::from_utf8_lossy(&dout.stderr).into_owned(),
+            });
+        }
 
         debug!("Applied DNS via resolvectl on {iface}");
         Ok(())
     }
 
-    /// Apply DNS by prepending entries to `/etc/resolv.conf`.
-    fn apply_resolv_conf(servers: &[IpAddr], search: &[String]) -> Result<String, WgError> {
-        let backup = std::fs::read_to_string("/etc/resolv.conf")
-            .map_err(|e| WgError::Tunnel(format!("read /etc/resolv.conf: {e}")))?;
+    /// Apply DNS by atomically replacing `/etc/resolv.conf`.
+    ///
+    /// Writes to a temp file in the same directory and renames into place to
+    /// avoid a window where `/etc/resolv.conf` is truncated but not yet
+    /// written (race condition visible to concurrent DNS resolvers).
+    fn apply_resolv_conf(servers: &[IpAddr], search: &[String]) -> Result<String, DnsError> {
+        let backup = std::fs::read_to_string("/etc/resolv.conf").map_err(|e| DnsError::Io {
+            path: "/etc/resolv.conf",
+            source: e,
+        })?;
 
         let mut prepend = String::new();
         for ip in servers {
@@ -296,10 +437,19 @@ mod imp {
         }
 
         let new_contents = format!("{prepend}{backup}");
-        std::fs::write("/etc/resolv.conf", &new_contents)
-            .map_err(|e| WgError::Tunnel(format!("write /etc/resolv.conf: {e}")))?;
 
-        debug!("Applied DNS via /etc/resolv.conf prepend");
+        // Write atomically: temp file → rename.
+        let tmp_path = "/etc/resolv.conf.ferro-wg.tmp";
+        std::fs::write(tmp_path, &new_contents).map_err(|e| DnsError::Io {
+            path: "/etc/resolv.conf.ferro-wg.tmp",
+            source: e,
+        })?;
+        std::fs::rename(tmp_path, "/etc/resolv.conf").map_err(|e| DnsError::Io {
+            path: "/etc/resolv.conf",
+            source: e,
+        })?;
+
+        debug!("Applied DNS via /etc/resolv.conf (atomic replace)");
         Ok(backup)
     }
 
@@ -307,9 +457,9 @@ mod imp {
     ///
     /// # Errors
     ///
-    /// Returns [`WgError::Tunnel`] if both `resolvectl` and `/etc/resolv.conf`
+    /// Returns [`DnsError`] if both `resolvectl` and `/etc/resolv.conf`
     /// modification fail.
-    pub fn apply(iface: &str, servers: &[IpAddr], search: &[String]) -> Result<DnsState, WgError> {
+    pub fn apply(iface: &str, servers: &[IpAddr], search: &[String]) -> Result<DnsState, DnsError> {
         if resolvectl_available() {
             apply_resolvectl(iface, servers, search)?;
             Ok(DnsState::Resolved {
@@ -321,24 +471,42 @@ mod imp {
         }
     }
 
-    /// Revert DNS configuration to the state captured in `DnsState`.
+    /// Revert DNS configuration to the state captured in [`DnsState`].
     ///
     /// # Errors
     ///
-    /// Returns [`WgError::Tunnel`] if the revert command fails.
-    pub fn revert(state: DnsState) -> Result<(), WgError> {
+    /// Returns [`DnsError`] if the revert command fails or the file cannot be
+    /// restored.
+    pub fn revert(state: DnsState) -> Result<(), DnsError> {
         match state {
             DnsState::Resolved { iface } => {
-                Command::new("resolvectl")
+                let out = Command::new(RESOLVECTL)
                     .args(["revert", &iface])
                     .output()
-                    .map_err(|e| WgError::Tunnel(format!("resolvectl revert: {e}")))?;
+                    .map_err(|e| DnsError::Exec {
+                        cmd: "resolvectl revert",
+                        source: e,
+                    })?;
+                if !out.status.success() {
+                    return Err(DnsError::Command {
+                        cmd: "resolvectl revert",
+                        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                    });
+                }
                 debug!("Reverted DNS via resolvectl on {iface}");
             }
             DnsState::ResolvConf { backup } => {
-                std::fs::write("/etc/resolv.conf", &backup)
-                    .map_err(|e| WgError::Tunnel(format!("restore /etc/resolv.conf: {e}")))?;
-                debug!("Restored /etc/resolv.conf from backup");
+                // Restore atomically.
+                let tmp_path = "/etc/resolv.conf.ferro-wg.tmp";
+                std::fs::write(tmp_path, &backup).map_err(|e| DnsError::Io {
+                    path: "/etc/resolv.conf.ferro-wg.tmp",
+                    source: e,
+                })?;
+                std::fs::rename(tmp_path, "/etc/resolv.conf").map_err(|e| DnsError::Io {
+                    path: "/etc/resolv.conf",
+                    source: e,
+                })?;
+                debug!("Restored /etc/resolv.conf from backup (atomic replace)");
             }
         }
         Ok(())
@@ -351,7 +519,7 @@ mod imp {
 mod imp {
     use std::net::IpAddr;
 
-    use crate::error::WgError;
+    use super::DnsError;
 
     /// No-op DNS state for unsupported platforms.
     pub struct DnsState;
@@ -360,11 +528,11 @@ mod imp {
         _iface: &str,
         _servers: &[IpAddr],
         _search: &[String],
-    ) -> Result<DnsState, WgError> {
+    ) -> Result<DnsState, DnsError> {
         Ok(DnsState)
     }
 
-    pub fn revert(_state: DnsState) -> Result<(), WgError> {
+    pub fn revert(_state: DnsState) -> Result<(), DnsError> {
         Ok(())
     }
 }
@@ -373,23 +541,33 @@ mod imp {
 
 /// Opaque handle capturing the DNS state applied during tunnel bring-up.
 ///
-/// Must be passed to [`remove_dns`] on teardown for an accurate revert.
+/// This is an explicit teardown token — call [`remove_dns`] with this value
+/// when the tunnel comes down to revert all DNS changes. If `remove_dns` is
+/// not called (e.g. process crash), the system DNS remains in the tunnel
+/// state; a future bring-up of the same tunnel will overwrite and restore it
+/// correctly.
+///
+/// # RAII note
+///
+/// There is intentionally no `Drop` impl: DNS revert is fallible and requires
+/// logging, neither of which is appropriate inside `drop`. Always call
+/// [`remove_dns`] explicitly in the teardown path.
 pub struct DnsState(imp::DnsState);
 
 /// Apply DNS servers and search domains for the given tunnel interface.
 ///
 /// Returns `Ok(None)` when `servers` is empty — no system changes are made.
-/// On platform-level failure the error is returned so the caller can decide
-/// whether to treat it as fatal (typically: warn and continue).
+/// Returns `Err(DnsError)` on platform-level failure so the caller can decide
+/// whether to treat it as fatal.
 ///
 /// # Errors
 ///
-/// Returns [`WgError::Tunnel`] if the platform DNS command fails.
+/// Returns [`DnsError`] if the platform DNS command fails.
 pub fn apply_dns(
     iface: &str,
     servers: &[IpAddr],
     search: &[String],
-) -> Result<Option<DnsState>, WgError> {
+) -> Result<Option<DnsState>, DnsError> {
     if servers.is_empty() {
         debug!("No DNS servers configured for {iface}, skipping");
         return Ok(None);
@@ -397,7 +575,7 @@ pub fn apply_dns(
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        warn!("DNS configuration is not supported on this platform");
+        tracing::warn!("DNS configuration is not supported on this platform");
         let _ = (iface, servers, search);
         return Ok(None);
     }
@@ -413,8 +591,8 @@ pub fn apply_dns(
 ///
 /// # Errors
 ///
-/// Returns [`WgError::Tunnel`] if the platform revert command fails.
-pub fn remove_dns(state: DnsState) -> Result<(), WgError> {
+/// Returns [`DnsError`] if the platform revert command fails.
+pub fn remove_dns(state: DnsState) -> Result<(), DnsError> {
     imp::revert(state.0)
 }
 
