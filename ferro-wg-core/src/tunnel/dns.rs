@@ -65,11 +65,15 @@ mod imp {
     /// The DNS configuration that was active on the primary network service
     /// before the tunnel was brought up.
     ///
-    /// Stored inside [`DnsState`](super::DnsState) and used to restore the
-    /// previous state when the tunnel is torn down.
+    /// Each field is `Some` only when the corresponding setting was actually
+    /// changed by `apply`; `revert` skips fields that are `None` to avoid
+    /// touching settings that were not modified (e.g. a search-only config
+    /// leaves `dns` as `None` and only restores search domains).
     pub struct OriginalDnsConfig {
-        pub(super) dns: Vec<IpAddr>,
-        pub(super) search: Vec<String>,
+        /// Prior DNS servers, `Some` only if we called `-setdnsservers`.
+        pub(super) dns: Option<Vec<IpAddr>>,
+        /// Prior search domains, `Some` only if we called `-setsearchdomains`.
+        pub(super) search: Option<Vec<String>>,
     }
 
     /// DNS state captured at tunnel bring-up; used to restore the previous
@@ -195,30 +199,35 @@ mod imp {
     ) -> Result<DnsState, DnsError> {
         let service_name = detect_primary_service()?;
 
-        // Save current DNS.
-        let dns_out = Command::new(NETWORKSETUP)
-            .args(["-getdnsservers", &service_name])
-            .output()?;
-        let prior_dns = parse_networksetup_dns(&String::from_utf8_lossy(&dns_out.stdout));
+        // Apply DNS servers only when provided; save prior state for revert.
+        let prior_dns = if servers.is_empty() {
+            None
+        } else {
+            let dns_out = Command::new(NETWORKSETUP)
+                .args(["-getdnsservers", &service_name])
+                .output()?;
+            let prior = parse_networksetup_dns(&String::from_utf8_lossy(&dns_out.stdout));
 
-        // Save current search domains.
-        let search_out = Command::new(NETWORKSETUP)
-            .args(["-getsearchdomains", &service_name])
-            .output()?;
-        let prior_search = parse_networksetup_search(&String::from_utf8_lossy(&search_out.stdout));
+            let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
+            args.extend(servers.iter().map(IpAddr::to_string));
+            let out = Command::new(NETWORKSETUP).args(&args).output()?;
+            if !out.status.success() {
+                return Err(DnsError::NetworkSetup(
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                ));
+            }
+            Some(prior)
+        };
 
-        // Set new DNS servers.
-        let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
-        args.extend(servers.iter().map(IpAddr::to_string));
-        let out = Command::new(NETWORKSETUP).args(&args).output()?;
-        if !out.status.success() {
-            return Err(DnsError::NetworkSetup(
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            ));
-        }
+        // Apply search domains only when provided; save prior state for revert.
+        let prior_search = if search.is_empty() {
+            None
+        } else {
+            let search_out = Command::new(NETWORKSETUP)
+                .args(["-getsearchdomains", &service_name])
+                .output()?;
+            let prior = parse_networksetup_search(&String::from_utf8_lossy(&search_out.stdout));
 
-        // Set search domains if provided.
-        if !search.is_empty() {
             let mut sargs = vec!["-setsearchdomains".to_owned(), service_name.clone()];
             sargs.extend(search.iter().cloned());
             let sout = Command::new(NETWORKSETUP).args(&sargs).output()?;
@@ -227,7 +236,8 @@ mod imp {
                     String::from_utf8_lossy(&sout.stderr).into_owned(),
                 ));
             }
-        }
+            Some(prior)
+        };
 
         debug!(
             "Applied DNS {:?} search {:?} on service '{service_name}'",
@@ -254,32 +264,36 @@ mod imp {
             original,
         } = state;
 
-        // Restore DNS servers (or clear them).
-        let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
-        if original.dns.is_empty() {
-            args.push("empty".to_owned());
-        } else {
-            args.extend(original.dns.iter().map(IpAddr::to_string));
-        }
-        let out = Command::new(NETWORKSETUP).args(&args).output()?;
-        if !out.status.success() {
-            return Err(DnsError::NetworkSetup(
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            ));
+        // Restore DNS servers only if we changed them.
+        if let Some(prior_dns) = original.dns {
+            let mut args = vec!["-setdnsservers".to_owned(), service_name.clone()];
+            if prior_dns.is_empty() {
+                args.push("empty".to_owned());
+            } else {
+                args.extend(prior_dns.iter().map(IpAddr::to_string));
+            }
+            let out = Command::new(NETWORKSETUP).args(&args).output()?;
+            if !out.status.success() {
+                return Err(DnsError::NetworkSetup(
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                ));
+            }
         }
 
-        // Restore search domains.
-        let mut sargs = vec!["-setsearchdomains".to_owned(), service_name.clone()];
-        if original.search.is_empty() {
-            sargs.push("empty".to_owned());
-        } else {
-            sargs.extend(original.search);
-        }
-        let sout = Command::new(NETWORKSETUP).args(&sargs).output()?;
-        if !sout.status.success() {
-            return Err(DnsError::NetworkSetup(
-                String::from_utf8_lossy(&sout.stderr).into_owned(),
-            ));
+        // Restore search domains only if we changed them.
+        if let Some(prior_search) = original.search {
+            let mut sargs = vec!["-setsearchdomains".to_owned(), service_name.clone()];
+            if prior_search.is_empty() {
+                sargs.push("empty".to_owned());
+            } else {
+                sargs.extend(prior_search);
+            }
+            let sout = Command::new(NETWORKSETUP).args(&sargs).output()?;
+            if !sout.status.success() {
+                return Err(DnsError::NetworkSetup(
+                    String::from_utf8_lossy(&sout.stderr).into_owned(),
+                ));
+            }
         }
 
         debug!("Reverted DNS on service '{service_name}'");
@@ -336,25 +350,33 @@ mod imp {
         servers: &[IpAddr],
         search: &[String],
     ) -> Result<(), DnsError> {
-        // Set DNS servers on the interface.
-        let mut args = vec!["dns".to_owned(), iface.to_owned()];
-        args.extend(servers.iter().map(IpAddr::to_string));
-        let out = Command::new(RESOLVECTL).args(&args).output()?;
-        if !out.status.success() {
-            return Err(DnsError::Resolvectl(
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            ));
+        // Set DNS servers on the interface only when provided.
+        if !servers.is_empty() {
+            let mut args = vec!["dns".to_owned(), iface.to_owned()];
+            args.extend(servers.iter().map(IpAddr::to_string));
+            let out = Command::new(RESOLVECTL).args(&args).output()?;
+            if !out.status.success() {
+                return Err(DnsError::Resolvectl(
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                ));
+            }
         }
 
-        // Set domain routing: ~. catches all queries; append explicit search
-        // domains if provided.
-        let mut dargs = vec!["domain".to_owned(), iface.to_owned(), "~.".to_owned()];
-        dargs.extend(search.iter().cloned());
-        let dout = Command::new(RESOLVECTL).args(&dargs).output()?;
-        if !dout.status.success() {
-            return Err(DnsError::Resolvectl(
-                String::from_utf8_lossy(&dout.stderr).into_owned(),
-            ));
+        // Set domain routing.  `~.` routes all queries through this
+        // interface's DNS servers and is only meaningful when servers are set.
+        // Explicit search domains are applied regardless.
+        if !servers.is_empty() || !search.is_empty() {
+            let mut dargs = vec!["domain".to_owned(), iface.to_owned()];
+            if !servers.is_empty() {
+                dargs.push("~.".to_owned());
+            }
+            dargs.extend(search.iter().cloned());
+            let dout = Command::new(RESOLVECTL).args(&dargs).output()?;
+            if !dout.status.success() {
+                return Err(DnsError::Resolvectl(
+                    String::from_utf8_lossy(&dout.stderr).into_owned(),
+                ));
+            }
         }
 
         debug!("Applied DNS via resolvectl on {iface}");
@@ -478,7 +500,9 @@ pub struct DnsState(imp::DnsState);
 
 /// Apply DNS servers and search domains for the given tunnel interface.
 ///
-/// Returns `Ok(None)` when `servers` is empty — no system changes are made.
+/// Returns `Ok(None)` when both `servers` and `search` are empty — no system
+/// changes are made. A search-only config (e.g. `DNS = corp.internal`) applies
+/// just the search domain without modifying the system's DNS servers.
 /// Returns `Err(DnsError)` on platform-level failure so the caller can decide
 /// whether to treat it as fatal.
 ///
@@ -490,8 +514,8 @@ pub fn apply_dns(
     servers: &[IpAddr],
     search: &[String],
 ) -> Result<Option<DnsState>, DnsError> {
-    if servers.is_empty() {
-        debug!("No DNS servers configured for {iface}, skipping");
+    if servers.is_empty() && search.is_empty() {
+        debug!("No DNS configuration for {iface}, skipping");
         return Ok(None);
     }
 
@@ -525,8 +549,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dns_skipped_when_empty_servers() {
-        // Must not invoke any shell commands — safe to run anywhere.
+    fn dns_skipped_when_both_empty() {
+        // No servers AND no search domains — must not invoke any shell
+        // commands, safe to run anywhere.
         let result = apply_dns("utun0", &[], &[]);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
