@@ -181,10 +181,20 @@ mod imp {
     /// Domains" or similar.
     #[must_use]
     pub fn parse_networksetup_search(output: &str) -> Vec<String> {
+        // `networksetup -getsearchdomains` prints "There aren't any Search
+        // Domains set on <service>." when nothing is configured.  Match the
+        // exact prefix (case-insensitive) rather than a loose substring to
+        // avoid accidentally filtering a domain that happens to contain the
+        // word "there".
         output
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.to_ascii_lowercase().contains("there aren"))
+            .filter(|l| {
+                !l.is_empty()
+                    && !l
+                        .to_ascii_lowercase()
+                        .starts_with("there aren't any search domains")
+            })
             .map(ToOwned::to_owned)
             .collect()
     }
