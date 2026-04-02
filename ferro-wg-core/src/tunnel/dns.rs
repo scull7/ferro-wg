@@ -412,11 +412,30 @@ mod imp {
         Ok(())
     }
 
-    /// Apply DNS by atomically replacing `/etc/resolv.conf`.
+    /// Write `contents` to `/etc/resolv.conf`.
     ///
-    /// Writes to a temp file in the same directory and renames into place to
-    /// avoid a window where `/etc/resolv.conf` is truncated but not yet
-    /// written (race condition visible to concurrent DNS resolvers).
+    /// Uses an atomic temp-file rename for regular files to avoid a window
+    /// where the file is truncated but not yet written. When `/etc/resolv.conf`
+    /// is a symlink (e.g. managed by NetworkManager or systemd-resolved in
+    /// stub-listener mode), writes through the symlink directly — renaming
+    /// would replace the symlink with a regular file, breaking the owning
+    /// service.
+    fn write_resolv_conf(contents: &str) -> Result<(), DnsError> {
+        let is_symlink = std::fs::symlink_metadata("/etc/resolv.conf")
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+
+        if is_symlink {
+            std::fs::write("/etc/resolv.conf", contents)?;
+        } else {
+            let tmp_path = "/etc/resolv.conf.ferro-wg.tmp";
+            std::fs::write(tmp_path, contents)?;
+            std::fs::rename(tmp_path, "/etc/resolv.conf")?;
+        }
+        Ok(())
+    }
+
+    /// Apply DNS by prepending nameserver/search lines to `/etc/resolv.conf`.
     fn apply_resolv_conf(servers: &[IpAddr], search: &[String]) -> Result<String, DnsError> {
         let backup = std::fs::read_to_string("/etc/resolv.conf")?;
 
@@ -428,14 +447,8 @@ mod imp {
             prepend.push_str(&format!("search {}\n", search.join(" ")));
         }
 
-        let new_contents = format!("{prepend}{backup}");
-
-        // Write atomically: temp file → rename.
-        let tmp_path = "/etc/resolv.conf.ferro-wg.tmp";
-        std::fs::write(tmp_path, &new_contents)?;
-        std::fs::rename(tmp_path, "/etc/resolv.conf")?;
-
-        debug!("Applied DNS via /etc/resolv.conf (atomic replace)");
+        write_resolv_conf(&format!("{prepend}{backup}"))?;
+        debug!("Applied DNS via /etc/resolv.conf");
         Ok(backup)
     }
 
@@ -485,11 +498,8 @@ mod imp {
                 debug!("Reverted DNS via resolvectl on {iface}");
             }
             DnsState::ResolvConf { backup } => {
-                // Restore atomically.
-                let tmp_path = "/etc/resolv.conf.ferro-wg.tmp";
-                std::fs::write(tmp_path, &backup)?;
-                std::fs::rename(tmp_path, "/etc/resolv.conf")?;
-                debug!("Restored /etc/resolv.conf from backup (atomic replace)");
+                write_resolv_conf(&backup)?;
+                debug!("Restored /etc/resolv.conf from backup");
             }
         }
         Ok(())
