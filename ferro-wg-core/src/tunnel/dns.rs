@@ -442,10 +442,10 @@ mod imp {
 
         let mut prepend = String::new();
         for ip in servers {
-            let _ = write!(prepend, "nameserver {ip}\n");
+            let _ = writeln!(prepend, "nameserver {ip}");
         }
         if !search.is_empty() {
-            let _ = write!(prepend, "search {}\n", search.join(" "));
+            let _ = writeln!(prepend, "search {}", search.join(" "));
         }
 
         write_resolv_conf(&format!("{prepend}{backup}"))?;

@@ -26,13 +26,21 @@ Workflow requirements:
 
 ## Tooling Checklist (Before Committing)
 
+- [ ] `cargo fmt --all` — format first, then verify with `--check`
 - [ ] `cargo test --workspace --features boringtun,neptun,gotatun` — all tests pass
 - [ ] `cargo build --workspace` — no warnings
 - [ ] `cargo clippy --workspace --features boringtun,neptun,gotatun -- -W clippy::pedantic -D warnings` — clean
-- [ ] `cargo fmt --all --check` — formatted
 - [ ] All public items have doc comments
 - [ ] No commented-out code or debug statements
 - [ ] No hardcoded credentials
+
+## Platform-gated code (`#[cfg(target_os = ...)]`)
+
+macOS dev machines cannot lint Linux-gated code locally — faking the
+target with `RUSTFLAGS='--cfg target_os="linux"'` breaks `libc` and
+other system deps. **After any change inside a `#[cfg(target_os = "linux")]`
+block, wait for CI (Linux runner) to pass before declaring the work
+done.** Do not merge until the CI clippy step is green.
 
 ---
 
