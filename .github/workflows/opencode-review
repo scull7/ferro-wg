@@ -1,0 +1,33 @@
+name: opencode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ github.token }}
+          persist-credentials: true
+      - uses: anomalyco/opencode/github@latest
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: xai/grok-code-fast-1
+          use_github_token: true
+          prompt: |
+            Review this pull request:
+            - Use the rust-code-reviewer skill
+            - Be ruthless and unapologetic
+            - Check for code quality issues
+            - Look for potential bugs
+            - Suggest improvements
