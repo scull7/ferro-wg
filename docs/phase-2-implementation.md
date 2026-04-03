@@ -264,10 +264,10 @@ pub enum Action {
 - `SelectPrevConnection` — if `connections.is_empty()`, no-op; otherwise
   `selected_connection = selected_connection.checked_sub(1).unwrap_or(connections.len() - 1)`;
   clear `search_query`.
-- `SelectConnection(i)` — silently ignore if `i >= connections.len()`; otherwise `selected_connection = i`.
+- `SelectConnection(i)` — if `i >= connections.len()`, emit `warn!(i, len = connections.len(), "SelectConnection index out of bounds; ignoring")` and return; otherwise `selected_connection = i`.
 - `UpdatePeers(Vec<PeerStatus>)` — for each `PeerStatus`, find the matching
   `ConnectionView` by name using `connections.iter_mut().find(|c| c.name == s.name)`.
-  Unrecognised names are skipped. Set `daemon_connected = true`. Clamp
+  Unrecognised names emit `warn!(name, "UpdatePeers received status for unknown connection")` and are skipped — this indicates a config/daemon mismatch that is detectable in logs without crashing. Set `daemon_connected = true`. Clamp
   `selected_connection` to `connections.len().saturating_sub(1)` after the loop
   (defensive; connections are static in Phase 2 but the invariant must hold).
 - `NextRow` — on `active_connection_mut()`, increment `selected_peer_row`,
