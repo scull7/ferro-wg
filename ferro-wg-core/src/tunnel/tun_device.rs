@@ -17,15 +17,19 @@ use crate::error::WgError;
 /// Returns [`WgError::Tunnel`] if the device cannot be created
 /// (usually due to insufficient privileges).
 pub fn create_tun() -> Result<tun::AsyncDevice, WgError> {
-    let mut config = tun::Configuration::default();
-
     // On macOS, don't set a name — the kernel auto-assigns utunN.
     // Setting "utun" without a number causes a parse error in the tun crate.
-
     #[cfg(target_os = "macos")]
-    config.platform_config(|p| {
-        p.packet_information(true);
-    });
+    let config = {
+        let mut c = tun::Configuration::default();
+        c.platform_config(|p| {
+            p.packet_information(true);
+        });
+        c
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let config = tun::Configuration::default();
 
     tun::create_as_async(&config)
         .map_err(|e| WgError::Tunnel(format!("failed to create TUN device: {e}")))

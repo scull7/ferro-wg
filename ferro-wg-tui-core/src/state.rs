@@ -403,7 +403,7 @@ mod tests {
         state.feedback = Some(Feedback {
             message: "old".into(),
             is_error: false,
-            expires_at: Instant::now() - Duration::from_secs(1),
+            expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         });
         state.clear_expired_feedback();
         assert!(state.feedback.is_none());

@@ -334,6 +334,7 @@ mod imp {
 
 #[cfg(target_os = "linux")]
 mod imp {
+    use std::fmt::Write as _;
     use std::net::IpAddr;
     use std::process::Command;
 
@@ -370,7 +371,7 @@ mod imp {
         Command::new(RESOLVECTL)
             .arg("--version")
             .output()
-            .map_or(false, |o| o.status.success())
+            .is_ok_and(|o| o.status.success())
     }
 
     /// Apply DNS via `resolvectl` (systemd-resolved).
@@ -416,7 +417,7 @@ mod imp {
     ///
     /// Uses an atomic temp-file rename for regular files to avoid a window
     /// where the file is truncated but not yet written. When `/etc/resolv.conf`
-    /// is a symlink (e.g. managed by NetworkManager or systemd-resolved in
+    /// is a symlink (e.g. managed by `NetworkManager` or `systemd-resolved` in
     /// stub-listener mode), writes through the symlink directly — renaming
     /// would replace the symlink with a regular file, breaking the owning
     /// service.
@@ -441,10 +442,10 @@ mod imp {
 
         let mut prepend = String::new();
         for ip in servers {
-            prepend.push_str(&format!("nameserver {ip}\n"));
+            let _ = writeln!(prepend, "nameserver {ip}");
         }
         if !search.is_empty() {
-            prepend.push_str(&format!("search {}\n", search.join(" ")));
+            let _ = writeln!(prepend, "search {}", search.join(" "));
         }
 
         write_resolv_conf(&format!("{prepend}{backup}"))?;

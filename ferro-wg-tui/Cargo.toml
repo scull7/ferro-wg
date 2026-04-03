@@ -18,8 +18,11 @@ ferro-wg-tui-core = { path = "../ferro-wg-tui-core" }
 ferro-wg-tui-components = { path = "../ferro-wg-tui-components" }
 ferro-wg-core = { path = "../ferro-wg-core" }
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures = "0.3"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1.44"
 
 [lints]
 workspace = true

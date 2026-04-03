@@ -355,7 +355,7 @@ fn parse_peer_kv(
 mod tests {
     use super::*;
 
-    const SAMPLE_WG_QUICK: &str = r#"
+    const SAMPLE_WG_QUICK: &str = r"
 [Interface]
 PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
 ListenPort = 51820
@@ -368,7 +368,7 @@ PublicKey = HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw=
 Endpoint = 198.51.100.1:51820
 AllowedIPs = 10.100.0.0/16
 PersistentKeepalive = 25
-"#;
+";
 
     #[test]
     fn parse_standard_wg_quick() {
@@ -383,7 +383,7 @@ PersistentKeepalive = 25
 
     #[test]
     fn parse_comments_and_blank_lines() {
-        let input = r#"
+        let input = r"
 # This is a comment
 ; This is also a comment
 
@@ -394,7 +394,7 @@ PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
 # peer comment
 PublicKey = HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw=
 AllowedIPs = 0.0.0.0/0
-"#;
+";
         let config = load_from_str(input).expect("parse");
         assert_eq!(config.peers.len(), 1);
     }
@@ -406,7 +406,7 @@ AllowedIPs = 0.0.0.0/0
         let private = PrivateKey::generate();
 
         let input = format!(
-            r#"
+            r"
 [Interface]
 PrivateKey = {}
 
@@ -419,7 +419,7 @@ Endpoint = 1.2.3.4:51820
 PublicKey = {}
 AllowedIPs = 172.16.0.0/12
 Endpoint = 5.6.7.8:51820
-"#,
+",
             private.to_base64(),
             pub1.to_base64(),
             pub2.to_base64(),
@@ -435,7 +435,7 @@ Endpoint = 5.6.7.8:51820
         let pub1 = PrivateKey::generate().public_key();
 
         let input = format!(
-            r#"
+            r"
 [Interface]
 PrivateKey = {}
 PreUp = echo pre-up
@@ -446,7 +446,7 @@ PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
 [Peer]
 PublicKey = {}
 AllowedIPs = 0.0.0.0/0
-"#,
+",
             private.to_base64(),
             pub1.to_base64(),
         );
