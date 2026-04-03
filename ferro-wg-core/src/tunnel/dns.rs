@@ -370,7 +370,7 @@ mod imp {
         Command::new(RESOLVECTL)
             .arg("--version")
             .output()
-            .map_or(false, |o| o.status.success())
+            .is_ok_and(|o| o.status.success())
     }
 
     /// Apply DNS via `resolvectl` (systemd-resolved).
