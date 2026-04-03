@@ -1,6 +1,6 @@
 //! Connection bar: thin strip showing all connections with status indicators.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -81,8 +81,12 @@ impl Default for ConnectionBarComponent {
 }
 
 impl Component for ConnectionBarComponent {
-    fn handle_key(&mut self, _key: KeyEvent, _state: &AppState) -> Option<Action> {
-        None
+    fn handle_key(&mut self, key: KeyEvent, _state: &AppState) -> Option<Action> {
+        match key.code {
+            KeyCode::Char('[') => Some(Action::SelectPrevConnection),
+            KeyCode::Char(']') => Some(Action::SelectNextConnection),
+            _ => None,
+        }
     }
 
     fn update(&mut self, _action: &Action, _state: &AppState) {}
@@ -376,5 +380,37 @@ mod tests {
         // Even with a 1-char-wide terminal, rendering must not panic.
         let state = three_connection_state();
         render_bar(&state, 1);
+    }
+
+    // ── handle_key tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_key_bracket_right_emits_select_next() {
+        let mut comp = ConnectionBarComponent::new();
+        let state = three_connection_state();
+        let action = comp.handle_key(KeyEvent::from(KeyCode::Char(']')), &state);
+        assert_eq!(action, Some(Action::SelectNextConnection));
+    }
+
+    #[test]
+    fn handle_key_bracket_left_emits_select_prev() {
+        let mut comp = ConnectionBarComponent::new();
+        let state = three_connection_state();
+        let action = comp.handle_key(KeyEvent::from(KeyCode::Char('[')), &state);
+        assert_eq!(action, Some(Action::SelectPrevConnection));
+    }
+
+    #[test]
+    fn handle_key_other_keys_return_none() {
+        let mut comp = ConnectionBarComponent::new();
+        let state = three_connection_state();
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Enter), &state),
+            None
+        );
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('q')), &state),
+            None
+        );
     }
 }

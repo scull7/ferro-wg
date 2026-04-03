@@ -172,6 +172,7 @@ async fn event_loop(
                     status_bar.handle_key(key, &state)
                 } else {
                     handle_global_key(key)
+                        .or_else(|| connection_bar.handle_key(key, &state))
                         .or_else(|| components[state.active_tab.index()].handle_key(key, &state))
                 };
 
@@ -230,9 +231,6 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('4') => Some(Action::SelectTab(Tab::Compare)),
         KeyCode::Char('5') => Some(Action::SelectTab(Tab::Config)),
         KeyCode::Char('6') => Some(Action::SelectTab(Tab::Logs)),
-        // Connection selection.
-        KeyCode::Char('[') => Some(Action::SelectPrevConnection),
-        KeyCode::Char(']') => Some(Action::SelectNextConnection),
         KeyCode::Char('/') => Some(Action::EnterSearch),
         _ => None,
     }
