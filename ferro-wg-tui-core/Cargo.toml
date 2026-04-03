@@ -11,6 +11,7 @@ description = "Core types for the ferro-wg TUI: Component trait, Action, AppStat
 ferro-wg-core = { path = "../ferro-wg-core" }
 ratatui = "0.29"
 crossterm = "0.28"
+tracing = "0.1"
 
 [lints]
 workspace = true

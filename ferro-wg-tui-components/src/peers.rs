@@ -3,12 +3,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
+use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use ferro_wg_tui_core::{Action, AppState, Component};
 
 /// Peer configuration table showing public keys, endpoints, allowed
-/// IPs, keepalive intervals, and active backends.
+/// IPs, and keepalive intervals for the active connection.
 pub struct PeersComponent {
     /// Per-component table selection state.
     table_state: TableState,
@@ -23,7 +24,7 @@ impl PeersComponent {
         }
     }
 
-    /// Number of displayable rows (filtered peers).
+    /// Number of displayable rows (filtered peers of the active connection).
     fn row_count(state: &AppState) -> usize {
         state.filtered_peers().count()
     }
@@ -66,34 +67,38 @@ impl Component for PeersComponent {
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
 
+        let Some(_conn) = state.active_connection() else {
+            let para = ratatui::widgets::Paragraph::new("No connections configured.")
+                .block(theme.panel_block("Peers"))
+                .style(Style::default().fg(theme.muted));
+            frame.render_widget(para, area);
+            return;
+        };
+
         let header = Row::new(vec![
             "Peer",
             "Public Key",
             "Endpoint",
             "Allowed IPs",
             "Keepalive",
-            "Backend",
         ])
         .style(theme.header_style());
 
         let rows: Vec<Row<'static>> = state
             .filtered_peers()
             .map(|p| {
-                let pk = p.config.public_key.to_base64();
+                let pk = p.public_key.to_base64();
                 let short_pk = format!("{}...", &pk[..10]);
-                let name = p.config.name.clone();
-                let endpoint = p.config.endpoint.clone().unwrap_or_else(|| "-".into());
-                let allowed = p.config.allowed_ips.join(", ");
-                let keepalive = format!("{}s", p.config.persistent_keepalive);
-                let backend = p.backend.to_string();
+                let endpoint = p.endpoint.clone().unwrap_or_else(|| "-".into());
+                let allowed = p.allowed_ips.join(", ");
+                let keepalive = format!("{}s", p.persistent_keepalive);
 
                 Row::new(vec![
-                    Cell::from(name),
+                    Cell::from(p.name.clone()),
                     Cell::from(short_pk),
                     Cell::from(endpoint),
                     Cell::from(allowed),
                     Cell::from(keepalive),
-                    Cell::from(backend),
                 ])
             })
             .collect();
@@ -101,12 +106,11 @@ impl Component for PeersComponent {
         let table = Table::new(
             rows,
             [
+                Constraint::Percentage(18),
+                Constraint::Percentage(17),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
                 Constraint::Percentage(15),
-                Constraint::Percentage(15),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(10),
-                Constraint::Percentage(20),
             ],
         )
         .header(header)
@@ -119,34 +123,45 @@ impl Component for PeersComponent {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use ferro_wg_core::config::{InterfaceConfig, PeerConfig, WgConfig};
+    use ferro_wg_core::config::{AppConfig, InterfaceConfig, PeerConfig, WgConfig};
     use ferro_wg_core::key::PrivateKey;
 
-    fn test_state() -> AppState {
-        AppState::new(WgConfig {
-            interface: InterfaceConfig {
-                private_key: PrivateKey::generate(),
-                listen_port: 51820,
-                addresses: vec!["10.0.0.2/24".into()],
-                dns: Vec::new(),
-                dns_search: Vec::new(),
-                mtu: 1420,
-                fwmark: 0,
-                pre_up: Vec::new(),
-                post_up: Vec::new(),
-                pre_down: Vec::new(),
-                post_down: Vec::new(),
+    fn make_app_config_with_peers(peers: Vec<PeerConfig>) -> AppConfig {
+        let mut connections = BTreeMap::new();
+        connections.insert(
+            "test".to_string(),
+            WgConfig {
+                interface: InterfaceConfig {
+                    private_key: PrivateKey::generate(),
+                    listen_port: 51820,
+                    addresses: vec!["10.0.0.2/24".into()],
+                    dns: Vec::new(),
+                    dns_search: Vec::new(),
+                    mtu: 1420,
+                    fwmark: 0,
+                    pre_up: Vec::new(),
+                    post_up: Vec::new(),
+                    pre_down: Vec::new(),
+                    post_down: Vec::new(),
+                },
+                peers,
             },
-            peers: vec![PeerConfig {
-                name: "peer-a".into(),
-                public_key: PrivateKey::generate().public_key(),
-                preshared_key: None,
-                endpoint: Some("1.2.3.4:51820".into()),
-                allowed_ips: vec!["10.0.0.0/24".into()],
-                persistent_keepalive: 25,
-            }],
-        })
+        );
+        AppConfig { connections }
+    }
+
+    fn test_state() -> AppState {
+        AppState::new(make_app_config_with_peers(vec![PeerConfig {
+            name: "peer-a".into(),
+            public_key: PrivateKey::generate().public_key(),
+            preshared_key: None,
+            endpoint: Some("1.2.3.4:51820".into()),
+            allowed_ips: vec!["10.0.0.0/24".into()],
+            persistent_keepalive: 25,
+        }]))
     }
 
     #[test]

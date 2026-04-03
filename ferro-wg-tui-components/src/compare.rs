@@ -123,26 +123,10 @@ impl Component for CompareComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferro_wg_core::config::{InterfaceConfig, WgConfig};
-    use ferro_wg_core::key::PrivateKey;
+    use ferro_wg_core::config::AppConfig;
 
     fn test_state() -> AppState {
-        AppState::new(WgConfig {
-            interface: InterfaceConfig {
-                private_key: PrivateKey::generate(),
-                listen_port: 51820,
-                addresses: Vec::new(),
-                dns: Vec::new(),
-                dns_search: Vec::new(),
-                mtu: 1420,
-                fwmark: 0,
-                pre_up: Vec::new(),
-                post_up: Vec::new(),
-                pre_down: Vec::new(),
-                post_down: Vec::new(),
-            },
-            peers: Vec::new(),
-        })
+        AppState::new(AppConfig::default())
     }
 
     #[test]

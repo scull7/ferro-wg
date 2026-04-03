@@ -3,9 +3,11 @@
 /// Active tab in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    /// Active tunnel overview.
+    /// Aggregate health overview for all connections.
+    Overview,
+    /// Active tunnel overview (scoped to selected connection).
     Status,
-    /// All configured peers.
+    /// All configured peers (scoped to selected connection).
     Peers,
     /// Backend performance comparison.
     Compare,
@@ -17,7 +19,8 @@ pub enum Tab {
 
 impl Tab {
     /// All tabs in display order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::Overview,
         Self::Status,
         Self::Peers,
         Self::Compare,
@@ -29,6 +32,7 @@ impl Tab {
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
+            Self::Overview => "Overview",
             Self::Status => "Status",
             Self::Peers => "Peers",
             Self::Compare => "Compare",
@@ -41,11 +45,12 @@ impl Tab {
     #[must_use]
     pub fn index(self) -> usize {
         match self {
-            Self::Status => 0,
-            Self::Peers => 1,
-            Self::Compare => 2,
-            Self::Config => 3,
-            Self::Logs => 4,
+            Self::Overview => 0,
+            Self::Status => 1,
+            Self::Peers => 2,
+            Self::Compare => 3,
+            Self::Config => 4,
+            Self::Logs => 5,
         }
     }
 
@@ -77,6 +82,7 @@ mod tests {
 
     #[test]
     fn tab_titles() {
+        assert_eq!(Tab::Overview.title(), "Overview");
         assert_eq!(Tab::Status.title(), "Status");
         assert_eq!(Tab::Peers.title(), "Peers");
         assert_eq!(Tab::Compare.title(), "Compare");
@@ -93,13 +99,15 @@ mod tests {
 
     #[test]
     fn tab_next_wraps() {
+        assert_eq!(Tab::Overview.next(), Tab::Status);
         assert_eq!(Tab::Status.next(), Tab::Peers);
-        assert_eq!(Tab::Logs.next(), Tab::Status);
+        assert_eq!(Tab::Logs.next(), Tab::Overview);
     }
 
     #[test]
     fn tab_prev_wraps() {
-        assert_eq!(Tab::Status.prev(), Tab::Logs);
+        assert_eq!(Tab::Overview.prev(), Tab::Logs);
+        assert_eq!(Tab::Status.prev(), Tab::Overview);
         assert_eq!(Tab::Peers.prev(), Tab::Status);
     }
 }

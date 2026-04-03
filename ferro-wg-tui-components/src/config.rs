@@ -41,7 +41,16 @@ impl Component for ConfigComponent {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
-        let iface = &state.wg_config.interface;
+
+        let Some(conn) = state.active_connection() else {
+            let para = Paragraph::new("No connections configured.")
+                .block(theme.panel_block("Config"))
+                .style(Style::default().fg(theme.muted));
+            frame.render_widget(para, area);
+            return;
+        };
+
+        let iface = &conn.config.interface;
         let label_style = Style::default().fg(theme.accent);
 
         let public_key = iface.private_key.public_key().to_base64();
@@ -79,7 +88,7 @@ impl Component for ConfigComponent {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                format!("{} peer(s) configured", state.wg_config.peers.len()),
+                format!("{} peer(s) configured", conn.config.peers.len()),
                 Style::default().fg(theme.warning),
             )),
         ];

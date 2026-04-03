@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
-use ferro_wg_tui_core::{Action, AppState, Component, format_bytes};
+use ferro_wg_tui_core::{Action, AppState, Component, ConnectionState, format_bytes};
 
 /// Active tunnels overview showing connection state, traffic, and
 /// handshake age for each peer.
@@ -24,18 +24,14 @@ impl StatusComponent {
         }
     }
 
-    /// Number of displayable rows (filtered peers).
+    /// Number of displayable rows (filtered peers of the active connection).
     fn row_count(state: &AppState) -> usize {
         state.filtered_peers().count()
     }
 
-    /// Get the name of the currently selected peer, if any.
-    fn selected_peer_name(&self, state: &AppState) -> Option<String> {
-        let idx = self.table_state.selected()?;
-        state
-            .filtered_peers()
-            .nth(idx)
-            .map(|p| p.config.name.clone())
+    /// Get the name of the active connection, if any.
+    fn active_connection_name(state: &AppState) -> Option<String> {
+        state.active_connection().map(|c| c.name.clone())
     }
 }
 
@@ -51,10 +47,10 @@ impl Component for StatusComponent {
             KeyCode::Down | KeyCode::Char('j') => Some(Action::NextRow),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::PrevRow),
             KeyCode::Enter | KeyCode::Char('u') => {
-                self.selected_peer_name(state).map(Action::ConnectPeer)
+                Self::active_connection_name(state).map(Action::ConnectPeer)
             }
-            KeyCode::Char('d') => self.selected_peer_name(state).map(Action::DisconnectPeer),
-            KeyCode::Char('b') => self.selected_peer_name(state).map(Action::CyclePeerBackend),
+            KeyCode::Char('d') => Self::active_connection_name(state).map(Action::DisconnectPeer),
+            KeyCode::Char('b') => Self::active_connection_name(state).map(Action::CyclePeerBackend),
             _ => None,
         }
     }
@@ -81,38 +77,47 @@ impl Component for StatusComponent {
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
 
+        let Some(conn) = state.active_connection() else {
+            let para = ratatui::widgets::Paragraph::new("No connections configured.")
+                .block(theme.panel_block("Status"))
+                .style(Style::default().fg(theme.muted));
+            frame.render_widget(para, area);
+            return;
+        };
+
+        // Connection-level status and stats.
+        let (is_connected, hs, rx, tx) = conn.status.as_ref().map_or(
+            (false, "-".to_owned(), "-".to_owned(), "-".to_owned()),
+            |s| {
+                let hs = s
+                    .stats
+                    .last_handshake
+                    .map_or_else(|| "-".to_owned(), |d| format!("{}s ago", d.as_secs()));
+                let rx = format_bytes(s.stats.rx_bytes);
+                let tx = format_bytes(s.stats.tx_bytes);
+                (s.state == ConnectionState::Connected, hs, rx, tx)
+            },
+        );
+
         let header = Row::new(vec!["Peer", "Endpoint", "Status", "Rx", "Tx", "Handshake"])
             .style(theme.header_style());
 
         let rows: Vec<Row<'static>> = state
             .filtered_peers()
             .map(|p| {
-                let status_str: String = if p.connected {
-                    "connected".into()
+                let (status_str, status_style): (String, Style) = if is_connected {
+                    ("connected".into(), Style::default().fg(theme.success))
                 } else {
-                    "down".into()
+                    ("down".into(), Style::default().fg(theme.muted))
                 };
-                let status_style = if p.connected {
-                    Style::default().fg(theme.success)
-                } else {
-                    Style::default().fg(theme.muted)
-                };
-                let name = p.config.name.clone();
-                let endpoint = p.config.endpoint.clone().unwrap_or_else(|| "-".into());
-                let hs = p
-                    .stats
-                    .last_handshake
-                    .map_or_else(|| "-".to_owned(), |d| format!("{}s ago", d.as_secs()));
-                let rx = format_bytes(p.stats.rx_bytes);
-                let tx = format_bytes(p.stats.tx_bytes);
 
                 Row::new(vec![
-                    Cell::from(name),
-                    Cell::from(endpoint),
+                    Cell::from(p.name.clone()),
+                    Cell::from(p.endpoint.clone().unwrap_or_else(|| "-".into())),
                     Cell::from(status_str).style(status_style),
-                    Cell::from(rx),
-                    Cell::from(tx),
-                    Cell::from(hs),
+                    Cell::from(rx.clone()),
+                    Cell::from(tx.clone()),
+                    Cell::from(hs.clone()),
                 ])
             })
             .collect();
@@ -138,45 +143,56 @@ impl Component for StatusComponent {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use ferro_wg_core::config::{InterfaceConfig, PeerConfig, WgConfig};
+    use ferro_wg_core::config::{AppConfig, InterfaceConfig, PeerConfig, WgConfig};
     use ferro_wg_core::key::PrivateKey;
     use ferro_wg_tui_core::Tab;
 
-    fn test_state() -> AppState {
-        AppState::new(WgConfig {
-            interface: InterfaceConfig {
-                private_key: PrivateKey::generate(),
-                listen_port: 51820,
-                addresses: vec!["10.0.0.2/24".into()],
-                dns: Vec::new(),
-                dns_search: Vec::new(),
-                mtu: 1420,
-                fwmark: 0,
-                pre_up: Vec::new(),
-                post_up: Vec::new(),
-                pre_down: Vec::new(),
-                post_down: Vec::new(),
+    fn make_app_config_with_peers(peers: Vec<PeerConfig>) -> AppConfig {
+        let mut connections = BTreeMap::new();
+        connections.insert(
+            "test".to_string(),
+            WgConfig {
+                interface: InterfaceConfig {
+                    private_key: PrivateKey::generate(),
+                    listen_port: 51820,
+                    addresses: vec!["10.0.0.2/24".into()],
+                    dns: Vec::new(),
+                    dns_search: Vec::new(),
+                    mtu: 1420,
+                    fwmark: 0,
+                    pre_up: Vec::new(),
+                    post_up: Vec::new(),
+                    pre_down: Vec::new(),
+                    post_down: Vec::new(),
+                },
+                peers,
             },
-            peers: vec![
-                PeerConfig {
-                    name: "peer-a".into(),
-                    public_key: PrivateKey::generate().public_key(),
-                    preshared_key: None,
-                    endpoint: Some("1.2.3.4:51820".into()),
-                    allowed_ips: vec!["10.0.0.0/24".into()],
-                    persistent_keepalive: 25,
-                },
-                PeerConfig {
-                    name: "peer-b".into(),
-                    public_key: PrivateKey::generate().public_key(),
-                    preshared_key: None,
-                    endpoint: Some("5.6.7.8:51820".into()),
-                    allowed_ips: vec!["10.0.1.0/24".into()],
-                    persistent_keepalive: 25,
-                },
-            ],
-        })
+        );
+        AppConfig { connections }
+    }
+
+    fn test_state() -> AppState {
+        AppState::new(make_app_config_with_peers(vec![
+            PeerConfig {
+                name: "peer-a".into(),
+                public_key: PrivateKey::generate().public_key(),
+                preshared_key: None,
+                endpoint: Some("1.2.3.4:51820".into()),
+                allowed_ips: vec!["10.0.0.0/24".into()],
+                persistent_keepalive: 25,
+            },
+            PeerConfig {
+                name: "peer-b".into(),
+                public_key: PrivateKey::generate().public_key(),
+                preshared_key: None,
+                endpoint: Some("5.6.7.8:51820".into()),
+                allowed_ips: vec!["10.0.1.0/24".into()],
+                persistent_keepalive: 25,
+            },
+        ]))
     }
 
     #[test]
