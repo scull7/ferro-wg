@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(stats.tx_bytes, 0);
         assert_eq!(stats.rx_bytes, 0);
         assert!(stats.last_handshake.is_none());
-        assert_eq!(stats.packet_loss, 0.0);
+        assert_eq!(stats.packet_loss.to_bits(), 0.0_f32.to_bits());
         assert!(stats.session_index.is_none());
     }
 
@@ -90,7 +90,7 @@ mod tests {
             ..BenchmarkResult::default()
         };
         result.compute_throughput();
-        assert_eq!(result.throughput_bps, 0.0);
+        assert_eq!(result.throughput_bps.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]

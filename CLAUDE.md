@@ -29,7 +29,7 @@ Workflow requirements:
 - [ ] `cargo fmt --all` — format first, then verify with `--check`
 - [ ] `cargo test --workspace --features boringtun,neptun,gotatun` — all tests pass
 - [ ] `cargo build --workspace` — no warnings
-- [ ] `cargo clippy --workspace --features boringtun,neptun,gotatun -- -W clippy::pedantic -D warnings` — clean
+- [ ] `cargo clippy --all-targets --all-features -- -D warnings -D clippy::pedantic` — clean (matches CI exactly)
 - [ ] All public items have doc comments
 - [ ] No commented-out code or debug statements
 - [ ] No hardcoded credentials
