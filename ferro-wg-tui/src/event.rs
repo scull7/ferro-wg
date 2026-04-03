@@ -32,10 +32,10 @@ impl EventHandler {
                     tokio::task::block_in_place(|| event::poll(tick_rate).unwrap_or(false));
 
                 if has_event {
-                    if let Ok(Event::Key(key)) = event::read() {
-                        if tx.send(AppEvent::Key(key)).is_err() {
-                            break;
-                        }
+                    if let Ok(Event::Key(key)) = event::read()
+                        && tx.send(AppEvent::Key(key)).is_err()
+                    {
+                        break;
                     }
                 } else if tx.send(AppEvent::Tick).is_err() {
                     break;
