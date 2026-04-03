@@ -102,6 +102,18 @@ lifecycle management work.
   configured" placeholder. The Overview tab is always renderable (it shows an
   empty table).
 
+### Vec vs HashMap for Connection Storage
+
+`connections` is stored as `Vec<ConnectionView>` (not `HashMap<String, ConnectionView>`)
+because the primary access pattern is **index-based**: `selected_connection: usize` into an
+ordered list. A `HashMap` would complicate stable ordering and `SelectNextConnection` wrapping.
+
+`UpdatePeers` iterates incoming `PeerStatus` entries and finds each matching `ConnectionView`
+by name — O(n) per entry, O(n²) overall. With the bounded connection count (<10 for Phase 2),
+this is at most ~100 comparisons per poll cycle and is not a practical concern. If Phase 4
+relaxes the static-config assumption and allows hundreds of dynamic connections, this should
+be revisited (e.g. maintain a `HashMap<&str, usize>` name→index alongside the Vec).
+
 ### Static Config Assumption
 
 `AppConfig` is treated as **read-only** for the lifetime of the TUI session.
@@ -245,8 +257,13 @@ pub enum Action {
 
 #### 1d — Update `AppState::dispatch`
 
-- `SelectNextConnection` — `selected_connection = (selected_connection + 1) % connections.len()` (no-op when empty); clear `search_query`.
-- `SelectPrevConnection` — `selected_connection = selected_connection.checked_sub(1).unwrap_or(connections.len().saturating_sub(1))`; clear `search_query`.
+- `SelectNextConnection` — if `connections.is_empty()`, no-op; otherwise
+  `selected_connection = (selected_connection + 1) % connections.len()`; clear
+  `search_query`. The `is_empty()` guard is required before the modulo to avoid
+  a division-by-zero panic.
+- `SelectPrevConnection` — if `connections.is_empty()`, no-op; otherwise
+  `selected_connection = selected_connection.checked_sub(1).unwrap_or(connections.len() - 1)`;
+  clear `search_query`.
 - `SelectConnection(i)` — silently ignore if `i >= connections.len()`; otherwise `selected_connection = i`.
 - `UpdatePeers(Vec<PeerStatus>)` — for each `PeerStatus`, find the matching
   `ConnectionView` by name using `connections.iter_mut().find(|c| c.name == s.name)`.
