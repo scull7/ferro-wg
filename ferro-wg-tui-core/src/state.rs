@@ -226,6 +226,7 @@ impl AppState {
                     );
                 } else {
                     self.selected_connection = *i;
+                    self.search_query.clear();
                 }
             }
 
@@ -600,6 +601,23 @@ mod tests {
         state.dispatch(&Action::SelectConnection(99));
         // Silently ignored; selection unchanged.
         assert_eq!(state.selected_connection, 0);
+    }
+
+    #[test]
+    fn select_connection_clears_search_query() {
+        let mut state = two_connection_state();
+        state.search_query = "mia".into();
+        state.dispatch(&Action::SelectConnection(1));
+        assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn select_connection_out_of_bounds_does_not_clear_search_query() {
+        // Out-of-bounds SelectConnection is a no-op; search is preserved.
+        let mut state = two_connection_state();
+        state.search_query = "mia".into();
+        state.dispatch(&Action::SelectConnection(99));
+        assert_eq!(state.search_query, "mia");
     }
 
     #[test]
