@@ -25,8 +25,8 @@ use ferro_wg_core::config::AppConfig;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
 use ferro_wg_tui_components::{
-    CompareComponent, ConfigComponent, LogsComponent, PeersComponent, StatusBarComponent,
-    StatusComponent, TabBarComponent,
+    CompareComponent, ConfigComponent, ConnectionBarComponent, LogsComponent, OverviewComponent,
+    PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
@@ -97,15 +97,16 @@ async fn event_loop(
     // Components are stored separately from AppState to avoid
     // split-borrow issues during rendering (&mut component + &state).
     let mut components: Vec<Box<dyn Component>> = vec![
-        Box::new(StatusComponent::new()), // Tab::Overview (index 0) — placeholder until OverviewComponent
-        Box::new(StatusComponent::new()), // Tab::Status (index 1)
-        Box::new(PeersComponent::new()),  // Tab::Peers (index 2)
-        Box::new(CompareComponent::new()), // Tab::Compare (index 3)
-        Box::new(ConfigComponent::new()), // Tab::Config (index 4)
-        Box::new(LogsComponent::new()),   // Tab::Logs (index 5)
+        Box::new(OverviewComponent::new()), // Tab::Overview (index 0)
+        Box::new(StatusComponent::new()),   // Tab::Status (index 1)
+        Box::new(PeersComponent::new()),    // Tab::Peers (index 2)
+        Box::new(CompareComponent::new()),  // Tab::Compare (index 3)
+        Box::new(ConfigComponent::new()),   // Tab::Config (index 4)
+        Box::new(LogsComponent::new()),     // Tab::Logs (index 5)
     ];
     let mut tab_bar = TabBarComponent::new();
     let mut status_bar = StatusBarComponent::new();
+    let mut connection_bar = ConnectionBarComponent::new();
 
     let mut events = EventHandler::new(Duration::from_millis(250));
 
@@ -146,18 +147,23 @@ async fn event_loop(
 
         // Render.
         terminal.draw(|frame| {
+            let bar_height = u16::from(state.connections.len() > 1);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // Tab bar
-                    Constraint::Min(0),    // Main content
-                    Constraint::Length(3), // Status bar / search
+                    Constraint::Length(3),          // Tab bar
+                    Constraint::Length(bar_height), // Connection bar (0 for single connection)
+                    Constraint::Min(0),             // Main content
+                    Constraint::Length(3),          // Status bar / search
                 ])
                 .split(frame.area());
 
             tab_bar.render(frame, chunks[0], false, &state);
-            components[state.active_tab.index()].render(frame, chunks[1], true, &state);
-            status_bar.render(frame, chunks[2], false, &state);
+            if state.connections.len() > 1 {
+                connection_bar.render(frame, chunks[1], false, &state);
+            }
+            components[state.active_tab.index()].render(frame, chunks[2], true, &state);
+            status_bar.render(frame, chunks[3], false, &state);
         })?;
 
         match events.next().await {
