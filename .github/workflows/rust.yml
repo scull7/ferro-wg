@@ -1,0 +1,63 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ main, master ]  # or whatever your default branch is
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"   # Treat all warnings (including Clippy) as errors
+
+jobs:
+  check:
+    name: Cargo Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy   # clippy is useful even for the check job
+
+      - name: Cargo Check
+        run: cargo check --all-targets --all-features
+        
+      - name: Cargo Check with annotations
+        uses: clechasseur/rs-clippy-check@v2   # Works great for plain `cargo check` too
+        with:
+          args: --all-targets --all-features
+
+  clippy:
+    name: Clippy (Pedantic)
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run Clippy (fails the job on errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings -D clippy::pedantic
+
+      - name: Annotate Clippy warnings in PR
+        if: always()                     # Run even if the previous step failed
+        uses: clechasseur/rs-clippy-check@v2
+        with:
+          args: --all-targets --all-features-- -D warnings -D clippy::pedantic
+          
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
