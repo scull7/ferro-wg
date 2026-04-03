@@ -62,7 +62,10 @@ impl EventHandler {
     ///
     /// Returns `Ok(())` when the stream ends cleanly, or an
     /// [`EventError`] on fatal crossterm or channel errors.
-    async fn run(tx: mpsc::UnboundedSender<AppEvent>, tick_rate: Duration) -> Result<(), EventError> {
+    async fn run(
+        tx: mpsc::UnboundedSender<AppEvent>,
+        tick_rate: Duration,
+    ) -> Result<(), EventError> {
         let mut stream = EventStream::new();
         let mut ticker = time::interval(tick_rate);
 
