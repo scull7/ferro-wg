@@ -132,6 +132,92 @@ for per-connection control. Phase 2 is entirely a TUI-layer change.
 
 ---
 
+## Design Rationale
+
+Answers to questions that tend to come up in review.
+
+### "ConnectionView duplicates WgConfig — DRY violation"
+
+`ConnectionView` is a **view model**: it combines immutable static config
+(`WgConfig`) with mutable runtime state (`status`, `selected_peer_row`). These
+two concerns cannot live in the same type because `WgConfig` is owned by the
+daemon layer and is `Clone`d once at startup. The wrapper adds no redundant
+fields — every field serves a distinct purpose. This pattern (static config +
+live state in one view-layer struct) is standard in unidirectional data-flow
+architectures (Elm, Redux, `ratatui` apps).
+
+### "ConnectionStatus just mirrors PeerStatus — redundant struct"
+
+`PeerStatus` is an IPC type defined in `ferro-wg-core` and belongs to the
+daemon boundary. `ConnectionStatus` is a TUI-layer type. Keeping them separate
+means the TUI does not import IPC types directly, and the two can evolve
+independently. The conversion (`From<PeerStatus>` or explicit mapping) is the
+single translation point.
+
+### "ConnectionState enum is incomplete — add Connecting now or it'll break later"
+
+Adding a variant to an enum in Rust is a **non-breaking refactor within the
+crate** and produces exhaustive-match errors at every external use site — exactly
+the right compile-time signal. There is no "break": the compiler guides you to
+every location that needs updating. `Connecting` is omitted in Phase 2 because
+the daemon has no such state; inventing a TUI-side state with no daemon backing
+would be misleading to users. It is added in Phase 4 alongside daemon lifecycle
+signals.
+
+### "Public fields should use getters / derive_more"
+
+`AppState` and `ConnectionView` fields are `pub` within the same workspace and
+consumed read-only by components via `&AppState`. Getters would be one-liner
+wrappers that add no encapsulation benefit (the fields are not invariant-bearing)
+and would require forwarding every field reference. `derive_more` is a macro
+dependency for two accessor methods — the cost exceeds the benefit. If
+`AppState` gains invariant-bearing fields (e.g. a field that must stay in sync
+with another), getters should be added at that point.
+
+### "Dispatch should use combinators / find_map to avoid nesting"
+
+The dispatch `match` arms are already flat — each `Action` variant maps to 2–5
+lines of state mutation. `find_map` is used in `UpdatePeers` where the iterator
+result is consumed. Additional combinator chaining in imperative state-mutation
+code often reduces readability without improving correctness. The nesting cap in
+CLAUDE.md (3–4 levels) is not exceeded in any dispatch arm.
+
+### "State needs tokio::sync::RwLock to prevent races"
+
+The TUI event loop runs as a **single tokio task**. All state mutation flows
+through `AppState::dispatch` in the event loop body — there is no concurrent
+writer. The daemon poll runs in a separate task and communicates via an
+`mpsc::UnboundedSender<Action>`, which is `Send + Sync` and itself provides the
+synchronisation boundary. Adding `RwLock` around `AppState` would be
+synchronisation for a problem that does not exist.
+
+### "Hot-reload should not be deferred to Phase 4"
+
+Phase 2 is scoped to **surfacing existing multi-connection support** in the TUI.
+Hot-reload requires daemon-side signalling (a config-changed event), TUI-side
+diffing of old vs. new `AppConfig`, and cursor preservation across structural
+changes to `connections`. That is a self-contained feature. Bundling it into
+Phase 2 would more than double the scope and risk the entire phase on an
+orthogonal concern.
+
+### "Search query should be preserved per-connection, not cleared on switch"
+
+Clearing `search_query` on connection switch is intentional: the query is typed
+against the peer list of a specific connection, and peer names differ between
+connections. Carrying "sjc" from a San Jose connection to an Osaka connection
+would match nothing and confuse users. If per-connection search history becomes
+a priority, it can be stored on `ConnectionView` in a later phase.
+
+### "[ and ] keybindings are hardcoded — bad for Vim users"
+
+`[` and `]` are chosen because they are bracket-navigation conventions
+(next/prev in a list) and do not conflict with any existing single-key
+shortcut in the app or common terminal emulator sequences. Configurable
+keybindings are a cross-cutting concern deferred to Phase 7 (UX Polish),
+where all bindings can be designed holistically rather than bolt-on per feature.
+
+---
+
 ## Dependency Graph
 
 ```
