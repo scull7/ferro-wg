@@ -39,8 +39,16 @@ pub enum Action {
     /// Periodic tick for background refresh.
     Tick,
 
+    // -- Connection selection actions --
+    /// Focus the next connection in the list (wraps).
+    SelectNextConnection,
+    /// Focus the previous connection in the list (wraps).
+    SelectPrevConnection,
+    /// Focus a specific connection by index.
+    SelectConnection(usize),
+
     // -- Daemon integration actions --
-    /// Update peer state from a daemon status response.
+    /// Update connection state from a daemon status response.
     UpdatePeers(Vec<PeerStatus>),
     /// Bring up the selected connection by name.
     ConnectPeer(String),

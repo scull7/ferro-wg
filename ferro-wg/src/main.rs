@@ -85,16 +85,8 @@ fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "tui")]
     {
         let app_config = load_app_config(config_path)?;
-        // For the TUI, create a combined view from the first connection.
-        // TODO: update TUI to support multiple connections natively.
-        let first = app_config
-            .connections
-            .values()
-            .next()
-            .ok_or("no connections configured")?
-            .clone();
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(ferro_wg_tui::run(first))?;
+        rt.block_on(ferro_wg_tui::run(app_config))?;
         Ok(())
     }
     #[cfg(not(feature = "tui"))]

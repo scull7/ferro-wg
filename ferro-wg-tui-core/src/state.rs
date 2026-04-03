@@ -1,15 +1,16 @@
 //! Centralized TUI application state.
 //!
-//! [`AppState`] owns all shared data (config, peers, logs, theme) and
+//! [`AppState`] owns all shared data (connections, logs, theme) and
 //! processes [`Action`]s via [`dispatch()`](AppState::dispatch). Components
 //! receive `&AppState` for read-only access during rendering and key
 //! handling.
 
 use std::time::{Duration, Instant};
 
-use ferro_wg_core::config::{PeerConfig, WgConfig};
+use ferro_wg_core::config::{AppConfig, WgConfig};
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::stats::TunnelStats;
+use tracing::warn;
 
 use crate::action::Action;
 use crate::app::{InputMode, Tab};
@@ -18,17 +19,48 @@ use crate::theme::Theme;
 /// How long feedback messages are displayed before expiring.
 const FEEDBACK_DURATION: Duration = Duration::from_secs(3);
 
-/// Per-peer runtime state shown in the TUI.
+/// Whether a connection tunnel is currently active.
+///
+/// A plain `bool` is insufficient here because it cannot express the
+/// absence of data (`None` on `ConnectionStatus`). The enum is kept
+/// minimal for Phase 2; a `Connecting` variant may be added in Phase 4
+/// if the daemon gains handshake-in-progress signalling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// The tunnel is up and routing traffic.
+    Connected,
+    /// The tunnel is down.
+    Disconnected,
+}
+
+/// Live status for one connection, sourced from a `PeerStatus` daemon response.
 #[derive(Debug, Clone)]
-pub struct PeerState {
-    /// The peer's static config.
-    pub config: PeerConfig,
-    /// Whether the tunnel is connected.
-    pub connected: bool,
-    /// Current tunnel statistics (if connected).
-    pub stats: TunnelStats,
-    /// Which backend is active for this peer.
+pub struct ConnectionStatus {
+    /// Whether the tunnel is currently active.
+    pub state: ConnectionState,
+    /// Which backend is active.
     pub backend: BackendKind,
+    /// Current tunnel statistics.
+    pub stats: TunnelStats,
+    /// The peer's endpoint (hostname:port or ip:port).
+    pub endpoint: Option<String>,
+    /// The local TUN interface name (e.g. `utun4`).
+    pub interface: Option<String>,
+}
+
+/// Static config and live status for one named connection.
+#[derive(Debug, Clone)]
+pub struct ConnectionView {
+    /// Connection name as it appears in `AppConfig` (e.g. `"mia"`).
+    pub name: String,
+    /// Static `WireGuard` config (interface + peers).
+    pub config: WgConfig,
+    /// Live status from the last daemon poll; `None` until the first poll
+    /// completes.
+    pub status: Option<ConnectionStatus>,
+    /// Which peer row is selected in the Status/Peers tabs for this
+    /// connection. Preserved when switching away and back.
+    pub selected_peer_row: usize,
 }
 
 /// A transient feedback message shown in the status bar.
@@ -73,7 +105,7 @@ impl Feedback {
 /// Centralized application state.
 ///
 /// All shared data lives here. Components never own or duplicate this
-/// data — they receive `&AppState` for read-only access.
+/// data — they receive `&AppState` for read-only access during rendering.
 pub struct AppState {
     /// Whether the app is still running.
     pub running: bool,
@@ -83,18 +115,15 @@ pub struct AppState {
     pub input_mode: InputMode,
     /// Search query string.
     pub search_query: String,
-
-    /// The loaded `WireGuard` configuration.
-    pub wg_config: WgConfig,
-    /// Per-peer runtime state.
-    pub peers: Vec<PeerState>,
-
+    /// All configured connections in display order (sorted by name).
+    pub connections: Vec<ConnectionView>,
+    /// Index into `connections` for the currently focused connection.
+    /// Always 0 when `connections` is empty.
+    pub selected_connection: usize,
     /// Log lines for the Logs tab.
     pub log_lines: Vec<String>,
-
     /// Active color theme.
     pub theme: Theme,
-
     /// Whether the daemon is currently reachable.
     pub daemon_connected: bool,
     /// Transient feedback message (success or error) with expiry.
@@ -102,32 +131,48 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Create a new state from a loaded config.
+    /// Create a new state from the full application config.
+    ///
+    /// Connections are stored in alphabetical order by name.
+    /// An empty `AppConfig` produces `connections: vec![]` and
+    /// `selected_connection: 0`; all accessors return `None` gracefully.
     #[must_use]
-    pub fn new(wg_config: WgConfig) -> Self {
-        let peers = wg_config
-            .peers
-            .iter()
-            .map(|p| PeerState {
-                config: p.clone(),
-                connected: false,
-                stats: TunnelStats::default(),
-                backend: BackendKind::Boringtun,
+    pub fn new(app_config: AppConfig) -> Self {
+        // BTreeMap is already sorted by key, so iteration order is alphabetical.
+        let connections = app_config
+            .connections
+            .into_iter()
+            .map(|(name, config)| ConnectionView {
+                name,
+                config,
+                status: None,
+                selected_peer_row: 0,
             })
             .collect();
 
         Self {
             running: true,
-            active_tab: Tab::Status,
+            active_tab: Tab::Overview,
             input_mode: InputMode::Normal,
             search_query: String::new(),
-            wg_config,
-            peers,
+            connections,
+            selected_connection: 0,
             log_lines: Vec::new(),
             theme: Theme::mocha(),
             daemon_connected: false,
             feedback: None,
         }
+    }
+
+    /// Returns the currently focused connection, if any.
+    #[must_use]
+    pub fn active_connection(&self) -> Option<&ConnectionView> {
+        self.connections.get(self.selected_connection)
+    }
+
+    /// Returns the currently focused connection mutably.
+    pub fn active_connection_mut(&mut self) -> Option<&mut ConnectionView> {
+        self.connections.get_mut(self.selected_connection)
     }
 
     /// Dispatch an action, mutating shared state.
@@ -154,17 +199,62 @@ impl AppState {
             Action::SearchBackspace => {
                 self.search_query.pop();
             }
+
+            // -- Connection selection --
+            Action::SelectNextConnection => {
+                if !self.connections.is_empty() {
+                    self.selected_connection =
+                        (self.selected_connection + 1) % self.connections.len();
+                    self.search_query.clear();
+                }
+            }
+            Action::SelectPrevConnection => {
+                if !self.connections.is_empty() {
+                    self.selected_connection = self
+                        .selected_connection
+                        .checked_sub(1)
+                        .unwrap_or(self.connections.len() - 1);
+                    self.search_query.clear();
+                }
+            }
+            Action::SelectConnection(i) => {
+                if *i >= self.connections.len() {
+                    warn!(
+                        i,
+                        len = self.connections.len(),
+                        "SelectConnection index out of bounds; ignoring"
+                    );
+                } else {
+                    self.selected_connection = *i;
+                    self.search_query.clear();
+                }
+            }
+
             // -- Daemon integration --
             Action::UpdatePeers(statuses) => {
                 self.daemon_connected = true;
-                for status in statuses {
-                    if let Some(peer) = self.peers.iter_mut().find(|p| p.config.name == status.name)
-                    {
-                        peer.connected = status.connected;
-                        peer.stats = status.stats.clone();
-                        peer.backend = status.backend;
+                for s in statuses {
+                    if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
+                        let state = if s.connected {
+                            ConnectionState::Connected
+                        } else {
+                            ConnectionState::Disconnected
+                        };
+                        conn.status = Some(ConnectionStatus {
+                            state,
+                            backend: s.backend,
+                            stats: s.stats.clone(),
+                            endpoint: s.endpoint.clone(),
+                            interface: s.interface.clone(),
+                        });
+                    } else {
+                        warn!(name = %s.name, "UpdatePeers received status for unknown connection");
                     }
                 }
+                // Clamp in case connections changed (defensive; static in Phase 2).
+                self.selected_connection = self
+                    .selected_connection
+                    .min(self.connections.len().saturating_sub(1));
             }
             Action::DaemonConnectivityChanged(connected) => {
                 self.daemon_connected = *connected;
@@ -175,11 +265,22 @@ impl AppState {
             Action::DaemonError(msg) => {
                 self.feedback = Some(Feedback::error(msg.clone()));
             }
-            // Row navigation, tick, and peer commands are handled by
-            // components or the event loop, not by shared state.
-            Action::NextRow
-            | Action::PrevRow
-            | Action::Tick
+
+            // -- Row navigation --
+            Action::NextRow => {
+                if let Some(conn) = self.active_connection_mut() {
+                    let max = conn.config.peers.len().saturating_sub(1);
+                    conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
+                }
+            }
+            Action::PrevRow => {
+                if let Some(conn) = self.active_connection_mut() {
+                    conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
+                }
+            }
+
+            // Tick and peer commands are handled by components or the event loop.
+            Action::Tick
             | Action::ConnectPeer(_)
             | Action::DisconnectPeer(_)
             | Action::CyclePeerBackend(_) => {}
@@ -193,17 +294,20 @@ impl AppState {
         }
     }
 
-    /// Peers matching the current search query.
+    /// Peers from the active connection matching the current search query.
     ///
+    /// Returns an empty iterator when there is no active connection.
     /// Returns all peers when the query is empty. Matches against
     /// the peer name and endpoint (case-insensitive substring).
-    pub fn filtered_peers(&self) -> impl Iterator<Item = &PeerState> {
+    pub fn filtered_peers(&self) -> impl Iterator<Item = &ferro_wg_core::config::PeerConfig> {
         let query = self.search_query.to_lowercase();
-        self.peers.iter().filter(move |p| {
+        let peers: &[ferro_wg_core::config::PeerConfig] = self
+            .active_connection()
+            .map_or(&[], |c| c.config.peers.as_slice());
+        peers.iter().filter(move |p| {
             query.is_empty()
-                || p.config.name.to_lowercase().contains(&query)
-                || p.config
-                    .endpoint
+                || p.name.to_lowercase().contains(&query)
+                || p.endpoint
                     .as_ref()
                     .is_some_and(|ep| ep.to_lowercase().contains(&query))
         })
@@ -212,80 +316,111 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ferro_wg_core::config::InterfaceConfig;
-    use ferro_wg_core::key::PrivateKey;
+    use std::collections::BTreeMap;
 
-    fn test_config() -> WgConfig {
-        WgConfig {
-            interface: InterfaceConfig {
-                private_key: PrivateKey::generate(),
-                listen_port: 51820,
-                addresses: vec!["10.0.0.2/24".into()],
-                dns: Vec::new(),
-                dns_search: Vec::new(),
-                mtu: 1420,
-                fwmark: 0,
-                pre_up: Vec::new(),
-                post_up: Vec::new(),
-                pre_down: Vec::new(),
-                post_down: Vec::new(),
-            },
-            peers: vec![
-                PeerConfig {
-                    name: "dc-sjc01".into(),
-                    public_key: PrivateKey::generate().public_key(),
-                    preshared_key: None,
-                    endpoint: Some("198.51.100.1:51820".into()),
-                    allowed_ips: vec!["10.100.0.0/16".into()],
-                    persistent_keepalive: 25,
-                },
-                PeerConfig {
-                    name: "dc-ord01".into(),
-                    public_key: PrivateKey::generate().public_key(),
-                    preshared_key: None,
-                    endpoint: Some("198.51.100.2:51820".into()),
-                    allowed_ips: vec!["10.200.0.0/16".into()],
-                    persistent_keepalive: 25,
-                },
-            ],
+    use ferro_wg_core::config::{InterfaceConfig, PeerConfig};
+    use ferro_wg_core::ipc::PeerStatus;
+    use ferro_wg_core::key::PrivateKey;
+    use ferro_wg_core::stats::TunnelStats;
+
+    use super::*;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_interface() -> InterfaceConfig {
+        InterfaceConfig {
+            private_key: PrivateKey::generate(),
+            listen_port: 51820,
+            addresses: vec!["10.0.0.2/24".into()],
+            dns: Vec::new(),
+            dns_search: Vec::new(),
+            mtu: 1420,
+            fwmark: 0,
+            pre_up: Vec::new(),
+            post_up: Vec::new(),
+            pre_down: Vec::new(),
+            post_down: Vec::new(),
         }
     }
 
-    fn test_state() -> AppState {
-        AppState::new(test_config())
+    fn make_peer(name: &str) -> PeerConfig {
+        PeerConfig {
+            name: name.into(),
+            public_key: PrivateKey::generate().public_key(),
+            preshared_key: None,
+            endpoint: Some("198.51.100.1:51820".to_string()),
+            allowed_ips: vec!["10.100.0.0/16".into()],
+            persistent_keepalive: 25,
+        }
     }
+
+    fn make_wg_config(peers: Vec<PeerConfig>) -> WgConfig {
+        WgConfig {
+            interface: make_interface(),
+            peers,
+        }
+    }
+
+    /// Build an `AppConfig` from a list of `(name, peers)` pairs.
+    fn make_app_config(entries: &[(&str, Vec<PeerConfig>)]) -> AppConfig {
+        let mut connections = BTreeMap::new();
+        for (name, peers) in entries {
+            connections.insert((*name).to_string(), make_wg_config(peers.clone()));
+        }
+        AppConfig { connections }
+    }
+
+    fn make_peer_status(name: &str, connected: bool) -> PeerStatus {
+        PeerStatus {
+            name: name.into(),
+            connected,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats::default(),
+            endpoint: None,
+            interface: None,
+        }
+    }
+
+    fn two_connection_state() -> AppState {
+        AppState::new(make_app_config(&[
+            ("mia", vec![make_peer("mia-dc")]),
+            ("ord01", vec![make_peer("ord01-dc")]),
+        ]))
+    }
+
+    // ── Existing tests (updated for new structure) ────────────────────────────
 
     #[test]
     fn initial_state() {
-        let state = test_state();
+        let state = two_connection_state();
         assert!(state.running);
-        assert_eq!(state.active_tab, Tab::Status);
+        assert_eq!(state.active_tab, Tab::Overview);
         assert_eq!(state.input_mode, InputMode::Normal);
-        assert_eq!(state.peers.len(), 2);
+        assert_eq!(state.connections.len(), 2);
+        assert_eq!(state.selected_connection, 0);
     }
 
     #[test]
     fn dispatch_quit() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
         state.dispatch(&Action::Quit);
         assert!(!state.running);
     }
 
     #[test]
     fn dispatch_tab_navigation() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
         state.dispatch(&Action::NextTab);
-        assert_eq!(state.active_tab, Tab::Peers);
-        state.dispatch(&Action::PrevTab);
         assert_eq!(state.active_tab, Tab::Status);
+        state.dispatch(&Action::PrevTab);
+        assert_eq!(state.active_tab, Tab::Overview);
         state.dispatch(&Action::SelectTab(Tab::Compare));
         assert_eq!(state.active_tab, Tab::Compare);
     }
 
     #[test]
     fn dispatch_search_lifecycle() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
         state.dispatch(&Action::EnterSearch);
         assert_eq!(state.input_mode, InputMode::Search);
         assert!(state.search_query.is_empty());
@@ -304,7 +439,7 @@ mod tests {
 
     #[test]
     fn dispatch_clear_search() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
         state.dispatch(&Action::EnterSearch);
         state.dispatch(&Action::SearchInput('x'));
         state.dispatch(&Action::ClearSearch);
@@ -313,67 +448,8 @@ mod tests {
     }
 
     #[test]
-    fn filtered_peers_matches() {
-        let mut state = test_state();
-        state.search_query = "sjc".into();
-        let matched: Vec<_> = state.filtered_peers().collect();
-        assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].config.name, "dc-sjc01");
-    }
-
-    #[test]
-    fn filtered_peers_empty_query_returns_all() {
-        let state = test_state();
-        let matched: Vec<_> = state.filtered_peers().collect();
-        assert_eq!(matched.len(), 2);
-    }
-
-    #[test]
-    fn peers_initialized_disconnected() {
-        let state = test_state();
-        for peer in &state.peers {
-            assert!(!peer.connected);
-            assert_eq!(peer.stats.tx_bytes, 0);
-        }
-    }
-
-    #[test]
-    fn dispatch_update_peers() {
-        use ferro_wg_core::ipc::PeerStatus;
-
-        let mut state = test_state();
-        assert!(!state.daemon_connected);
-
-        let statuses = vec![PeerStatus {
-            name: "dc-sjc01".into(),
-            connected: true,
-            backend: BackendKind::Neptun,
-            stats: TunnelStats {
-                tx_bytes: 1000,
-                rx_bytes: 2000,
-                ..TunnelStats::default()
-            },
-            endpoint: Some("198.51.100.1:51820".into()),
-            interface: Some("utun4".into()),
-        }];
-
-        state.dispatch(&Action::UpdatePeers(statuses));
-        assert!(state.daemon_connected);
-
-        let sjc = &state.peers[0];
-        assert!(sjc.connected);
-        assert_eq!(sjc.stats.tx_bytes, 1000);
-        assert_eq!(sjc.stats.rx_bytes, 2000);
-        assert_eq!(sjc.backend, BackendKind::Neptun);
-
-        // Unmatched peer stays disconnected.
-        let ord = &state.peers[1];
-        assert!(!ord.connected);
-    }
-
-    #[test]
     fn dispatch_daemon_connectivity() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
         state.dispatch(&Action::DaemonConnectivityChanged(true));
         assert!(state.daemon_connected);
         state.dispatch(&Action::DaemonConnectivityChanged(false));
@@ -382,7 +458,7 @@ mod tests {
 
     #[test]
     fn dispatch_daemon_feedback() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
 
         state.dispatch(&Action::DaemonOk("tunnel up".into()));
         assert!(state.feedback.is_some());
@@ -399,7 +475,7 @@ mod tests {
 
     #[test]
     fn clear_expired_feedback_removes_old() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
         state.feedback = Some(Feedback {
             message: "old".into(),
             is_error: false,
@@ -411,9 +487,235 @@ mod tests {
 
     #[test]
     fn clear_expired_feedback_keeps_fresh() {
-        let mut state = test_state();
+        let mut state = two_connection_state();
         state.dispatch(&Action::DaemonOk("fresh".into()));
         state.clear_expired_feedback();
         assert!(state.feedback.is_some());
+    }
+
+    // ── New Phase 2 Step 1 tests ──────────────────────────────────────────────
+
+    #[test]
+    fn connections_sorted_on_new() {
+        let state = AppState::new(make_app_config(&[
+            ("zzz", vec![]),
+            ("aaa", vec![]),
+            ("mmm", vec![]),
+        ]));
+        let names: Vec<&str> = state.connections.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["aaa", "mmm", "zzz"]);
+    }
+
+    #[test]
+    fn new_empty_config() {
+        let state = AppState::new(AppConfig::default());
+        assert!(state.connections.is_empty());
+        assert_eq!(state.selected_connection, 0);
+        assert!(state.active_connection().is_none());
+    }
+
+    #[test]
+    fn update_peers_routes_by_name() {
+        let mut state = two_connection_state();
+        let statuses = vec![
+            make_peer_status("mia", true),
+            make_peer_status("ord01", false),
+        ];
+        state.dispatch(&Action::UpdatePeers(statuses));
+
+        let mia = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        assert_eq!(
+            mia.status.as_ref().unwrap().state,
+            ConnectionState::Connected
+        );
+
+        let ord = state
+            .connections
+            .iter()
+            .find(|c| c.name == "ord01")
+            .unwrap();
+        assert_eq!(
+            ord.status.as_ref().unwrap().state,
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[test]
+    fn update_peers_partial() {
+        let mut state = two_connection_state();
+        // Update only mia.
+        state.dispatch(&Action::UpdatePeers(vec![make_peer_status("mia", true)]));
+
+        let mia = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        assert!(mia.status.is_some());
+
+        // ord01 still has no status.
+        let ord = state
+            .connections
+            .iter()
+            .find(|c| c.name == "ord01")
+            .unwrap();
+        assert!(ord.status.is_none());
+    }
+
+    #[test]
+    fn update_peers_unknown_name_ignored() {
+        let mut state = two_connection_state();
+        // Should not panic; connections remain unaffected.
+        state.dispatch(&Action::UpdatePeers(vec![make_peer_status(
+            "unknown-connection",
+            true,
+        )]));
+        for conn in &state.connections {
+            assert!(conn.status.is_none());
+        }
+    }
+
+    #[test]
+    fn select_next_wraps() {
+        let mut state = two_connection_state();
+        state.selected_connection = 1; // last index
+        state.dispatch(&Action::SelectNextConnection);
+        assert_eq!(state.selected_connection, 0);
+    }
+
+    #[test]
+    fn select_prev_wraps() {
+        let mut state = two_connection_state();
+        assert_eq!(state.selected_connection, 0);
+        state.dispatch(&Action::SelectPrevConnection);
+        assert_eq!(state.selected_connection, 1); // wraps to last
+    }
+
+    #[test]
+    fn select_next_empty() {
+        let mut state = AppState::new(AppConfig::default());
+        // Must not panic.
+        state.dispatch(&Action::SelectNextConnection);
+        assert_eq!(state.selected_connection, 0);
+    }
+
+    #[test]
+    fn select_connection_out_of_bounds() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::SelectConnection(99));
+        // Silently ignored; selection unchanged.
+        assert_eq!(state.selected_connection, 0);
+    }
+
+    #[test]
+    fn select_connection_clears_search_query() {
+        let mut state = two_connection_state();
+        state.search_query = "mia".into();
+        state.dispatch(&Action::SelectConnection(1));
+        assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn select_connection_out_of_bounds_does_not_clear_search_query() {
+        // Out-of-bounds SelectConnection is a no-op; search is preserved.
+        let mut state = two_connection_state();
+        state.search_query = "mia".into();
+        state.dispatch(&Action::SelectConnection(99));
+        assert_eq!(state.search_query, "mia");
+    }
+
+    #[test]
+    fn select_next_clears_search_query() {
+        let mut state = two_connection_state();
+        state.search_query = "sjc".into();
+        state.dispatch(&Action::SelectNextConnection);
+        assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn select_prev_clears_search_query() {
+        let mut state = two_connection_state();
+        state.selected_connection = 1;
+        state.search_query = "ord".into();
+        state.dispatch(&Action::SelectPrevConnection);
+        assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn next_prev_row_per_connection() {
+        let mut state = AppState::new(make_app_config(&[
+            ("mia", vec![make_peer("p1"), make_peer("p2")]),
+            ("ord01", vec![make_peer("p3"), make_peer("p4")]),
+        ]));
+        // Move row cursor on connection 0 (mia).
+        state.dispatch(&Action::NextRow);
+        assert_eq!(state.connections[0].selected_peer_row, 1);
+        // Connection 1 (ord01) is unaffected.
+        assert_eq!(state.connections[1].selected_peer_row, 0);
+    }
+
+    #[test]
+    fn next_row_clamps_at_end() {
+        let mut state = AppState::new(make_app_config(&[("mia", vec![make_peer("p1")])]));
+        state.dispatch(&Action::NextRow);
+        state.dispatch(&Action::NextRow); // already at last index
+        assert_eq!(state.connections[0].selected_peer_row, 0); // only 1 peer → max index 0
+    }
+
+    #[test]
+    fn prev_row_clamps_at_zero() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::PrevRow);
+        assert_eq!(state.connections[0].selected_peer_row, 0);
+    }
+
+    #[test]
+    fn next_row_no_connection_no_panic() {
+        let mut state = AppState::new(AppConfig::default());
+        state.dispatch(&Action::NextRow);
+        // No panic, no state change.
+        assert_eq!(state.selected_connection, 0);
+    }
+
+    #[test]
+    fn filtered_peers_matches_active_connection() {
+        let mut state = AppState::new(make_app_config(&[
+            ("mia", vec![make_peer("sjc01"), make_peer("ord01")]),
+            ("tus1", vec![make_peer("tus1-dc")]),
+        ]));
+        state.search_query = "sjc".into();
+        let matched: Vec<_> = state.filtered_peers().collect();
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].name, "sjc01");
+    }
+
+    #[test]
+    fn filtered_peers_empty_query_returns_all() {
+        let state = AppState::new(make_app_config(&[(
+            "mia",
+            vec![make_peer("p1"), make_peer("p2")],
+        )]));
+        let matched: Vec<_> = state.filtered_peers().collect();
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[test]
+    fn filtered_peers_no_connection_returns_empty() {
+        let state = AppState::new(AppConfig::default());
+        let matched: Vec<_> = state.filtered_peers().collect();
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn connections_initialized_no_status() {
+        let state = two_connection_state();
+        for conn in &state.connections {
+            assert!(conn.status.is_none());
+            assert_eq!(conn.selected_peer_row, 0);
+        }
+    }
+
+    #[test]
+    fn update_peers_sets_daemon_connected() {
+        let mut state = two_connection_state();
+        assert!(!state.daemon_connected);
+        state.dispatch(&Action::UpdatePeers(vec![make_peer_status("mia", true)]));
+        assert!(state.daemon_connected);
     }
 }

@@ -117,26 +117,10 @@ fn daemon_indicator<'a>(state: &AppState, theme: &ferro_wg_tui_core::Theme) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferro_wg_core::config::{InterfaceConfig, WgConfig};
-    use ferro_wg_core::key::PrivateKey;
+    use ferro_wg_core::config::AppConfig;
 
     fn search_state() -> AppState {
-        let mut state = AppState::new(WgConfig {
-            interface: InterfaceConfig {
-                private_key: PrivateKey::generate(),
-                listen_port: 51820,
-                addresses: Vec::new(),
-                dns: Vec::new(),
-                dns_search: Vec::new(),
-                mtu: 1420,
-                fwmark: 0,
-                pre_up: Vec::new(),
-                post_up: Vec::new(),
-                pre_down: Vec::new(),
-                post_down: Vec::new(),
-            },
-            peers: Vec::new(),
-        });
+        let mut state = AppState::new(AppConfig::default());
         state.dispatch(&Action::EnterSearch);
         state
     }
@@ -184,22 +168,7 @@ mod tests {
     #[test]
     fn ignores_keys_in_normal_mode() {
         let mut comp = StatusBarComponent::new();
-        let state = AppState::new(WgConfig {
-            interface: InterfaceConfig {
-                private_key: PrivateKey::generate(),
-                listen_port: 51820,
-                addresses: Vec::new(),
-                dns: Vec::new(),
-                dns_search: Vec::new(),
-                mtu: 1420,
-                fwmark: 0,
-                pre_up: Vec::new(),
-                post_up: Vec::new(),
-                pre_down: Vec::new(),
-                post_down: Vec::new(),
-            },
-            peers: Vec::new(),
-        });
+        let state = AppState::new(AppConfig::default());
         assert_eq!(
             comp.handle_key(KeyEvent::from(KeyCode::Char('a')), &state),
             None

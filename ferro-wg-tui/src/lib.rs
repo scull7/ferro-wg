@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use ferro_wg_core::client;
-use ferro_wg_core::config::WgConfig;
+use ferro_wg_core::config::AppConfig;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
 use ferro_wg_tui_components::{
@@ -62,11 +62,13 @@ fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
 /// Sets up the terminal, creates the component tree and application
 /// state, and drives the event loop until the user quits.
 ///
+/// An empty `AppConfig` is valid — the TUI renders a placeholder.
+///
 /// # Errors
 ///
 /// Returns an error if terminal setup, event handling, or teardown
 /// fails.
-pub async fn run(wg_config: WgConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -76,7 +78,7 @@ pub async fn run(wg_config: WgConfig) -> Result<(), Box<dyn std::error::Error>> 
     terminal.clear()?;
 
     // Run the event loop, then restore terminal regardless of outcome.
-    let result = event_loop(&mut terminal, wg_config).await;
+    let result = event_loop(&mut terminal, app_config).await;
 
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
@@ -88,18 +90,19 @@ pub async fn run(wg_config: WgConfig) -> Result<(), Box<dyn std::error::Error>> 
 /// Drive the TUI event loop until the user quits.
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    wg_config: WgConfig,
+    app_config: AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = AppState::new(wg_config);
+    let mut state = AppState::new(app_config);
 
     // Components are stored separately from AppState to avoid
     // split-borrow issues during rendering (&mut component + &state).
     let mut components: Vec<Box<dyn Component>> = vec![
-        Box::new(StatusComponent::new()),
-        Box::new(PeersComponent::new()),
-        Box::new(CompareComponent::new()),
-        Box::new(ConfigComponent::new()),
-        Box::new(LogsComponent::new()),
+        Box::new(StatusComponent::new()), // Tab::Overview (index 0) — placeholder until OverviewComponent
+        Box::new(StatusComponent::new()), // Tab::Status (index 1)
+        Box::new(PeersComponent::new()),  // Tab::Peers (index 2)
+        Box::new(CompareComponent::new()), // Tab::Compare (index 3)
+        Box::new(ConfigComponent::new()), // Tab::Config (index 4)
+        Box::new(LogsComponent::new()),   // Tab::Logs (index 5)
     ];
     let mut tab_bar = TabBarComponent::new();
     let mut status_bar = StatusBarComponent::new();
@@ -214,11 +217,16 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
         KeyCode::Tab | KeyCode::Right => Some(Action::NextTab),
         KeyCode::BackTab | KeyCode::Left => Some(Action::PrevTab),
-        KeyCode::Char('1') => Some(Action::SelectTab(Tab::Status)),
-        KeyCode::Char('2') => Some(Action::SelectTab(Tab::Peers)),
-        KeyCode::Char('3') => Some(Action::SelectTab(Tab::Compare)),
-        KeyCode::Char('4') => Some(Action::SelectTab(Tab::Config)),
-        KeyCode::Char('5') => Some(Action::SelectTab(Tab::Logs)),
+        // Tab shortcuts shift by one to accommodate Overview at index 0.
+        KeyCode::Char('1') => Some(Action::SelectTab(Tab::Overview)),
+        KeyCode::Char('2') => Some(Action::SelectTab(Tab::Status)),
+        KeyCode::Char('3') => Some(Action::SelectTab(Tab::Peers)),
+        KeyCode::Char('4') => Some(Action::SelectTab(Tab::Compare)),
+        KeyCode::Char('5') => Some(Action::SelectTab(Tab::Config)),
+        KeyCode::Char('6') => Some(Action::SelectTab(Tab::Logs)),
+        // Connection selection.
+        KeyCode::Char('[') => Some(Action::SelectPrevConnection),
+        KeyCode::Char(']') => Some(Action::SelectNextConnection),
         KeyCode::Char('/') => Some(Action::EnterSearch),
         _ => None,
     }
