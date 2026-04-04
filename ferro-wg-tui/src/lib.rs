@@ -235,11 +235,17 @@ async fn event_loop(
         match client::stream_logs().await {
             Ok(mut rx) => {
                 while let Some(line) = rx.recv().await {
-                    let mut buf = log_lines.lock().expect("mutex poisoned");
-                    if buf.len() == buf.capacity() {
-                        buf.pop_front();
+                    match log_lines.lock() {
+                        Ok(mut buf) => {
+                            if buf.len() == buf.capacity() {
+                                buf.pop_front();
+                            }
+                            buf.push_back(line);
+                        }
+                        Err(_) => {
+                            warn!("Log buffer mutex poisoned, skipping log append");
+                        }
                     }
-                    buf.push_back(line);
                 }
             }
             Err(e) => {
