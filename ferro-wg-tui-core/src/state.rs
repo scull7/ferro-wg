@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ferro_wg_core::config::{AppConfig, WgConfig};
+use ferro_wg_core::config::{AppConfig, LogDisplayConfig, WgConfig};
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::stats::TunnelStats;
 use tracing::warn;
@@ -130,6 +130,8 @@ pub struct AppState {
     pub daemon_connected: bool,
     /// Transient feedback message (success or error) with expiry.
     pub feedback: Option<Feedback>,
+    /// Log display preferences forwarded from [`AppConfig`].
+    pub log_display: LogDisplayConfig,
 }
 
 impl AppState {
@@ -163,6 +165,7 @@ impl AppState {
             theme: Theme::mocha(),
             daemon_connected: false,
             feedback: None,
+            log_display: app_config.log_display,
         }
     }
 
@@ -380,7 +383,7 @@ mod tests {
         }
         AppConfig {
             connections,
-            log_display: Default::default(),
+            log_display: LogDisplayConfig::default(),
         }
     }
 

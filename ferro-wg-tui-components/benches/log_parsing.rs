@@ -1,6 +1,6 @@
-# Performance benchmark for log parsing
+//! Performance benchmarks for `LogsComponent::parse_log_line`.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ferro_wg_tui_components::logs::LogsComponent;
 
 fn benchmark_log_parsing(c: &mut Criterion) {
@@ -10,7 +10,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
         "12:34:58 WARN ferro_wg_core::tunnel: Handshake timeout",
         "12:34:59 DEBUG ferro_wg_core::stats: Packets: 42 rx, 37 tx",
         "INFO ferro_wg_core::legacy: Old format log", // Legacy format
-        "some malformed log message", // Malformed
+        "some malformed log message",                 // Malformed
     ];
 
     c.bench_function("parse_log_lines", |b| {
@@ -18,7 +18,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
             for line in &test_lines {
                 black_box(LogsComponent::parse_log_line(line, true, true));
             }
-        })
+        });
     });
 
     c.bench_function("parse_log_lines_no_timestamps", |b| {
@@ -26,7 +26,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
             for line in &test_lines {
                 black_box(LogsComponent::parse_log_line(line, false, true));
             }
-        })
+        });
     });
 
     c.bench_function("parse_log_lines_no_colors", |b| {
@@ -34,7 +34,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
             for line in &test_lines {
                 black_box(LogsComponent::parse_log_line(line, true, false));
             }
-        })
+        });
     });
 }
 
