@@ -148,11 +148,9 @@ impl WgConfig {
         }
         for (i, peer) in self.peers.iter().enumerate() {
             if !peer.name.is_empty() {
-                validate_name("peer.name", &peer.name).map_err(|e| {
-                    ConfigError::InvalidValue {
-                        field: "peer.name",
-                        reason: format!("peer {i}: {e}"),
-                    }
+                validate_name("peer.name", &peer.name).map_err(|e| ConfigError::InvalidValue {
+                    field: "peer.name",
+                    reason: format!("peer {i}: {e}"),
                 })?;
             }
             if peer.allowed_ips.is_empty() {
@@ -328,7 +326,10 @@ mod tests {
     #[test]
     fn validate_name_rejects_empty() {
         let err = validate_name("test", "").unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidValue { field: "test", .. }));
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { field: "test", .. }
+        ));
         assert!(err.to_string().contains("empty"));
     }
 

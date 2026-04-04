@@ -126,7 +126,10 @@ fn reload_config(manager: &mut TunnelManager, config_path: &Path) {
 /// Dispatch a command to the tunnel manager and produce a response.
 async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> DaemonResponse {
     match command {
-        DaemonCommand::Up { connection_name, backend } => {
+        DaemonCommand::Up {
+            connection_name,
+            backend,
+        } => {
             let result = match connection_name {
                 Some(name) => manager.up(&name, backend).await,
                 None => manager.up_all(backend).await,
@@ -148,7 +151,10 @@ async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> 
             }
         }
         DaemonCommand::Status => DaemonResponse::Status(manager.status()),
-        DaemonCommand::SwitchBackend { connection_name, backend } => {
+        DaemonCommand::SwitchBackend {
+            connection_name,
+            backend,
+        } => {
             if let Err(e) = manager.down(&connection_name) {
                 warn!("Down before switch: {e}");
             }

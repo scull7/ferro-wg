@@ -166,7 +166,10 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 println!("  interface: {iface}");
 
                 // Show config details if available.
-                if let Some(wg) = app_config.as_ref().and_then(|c| c.get(&peer.connection_name)) {
+                if let Some(wg) = app_config
+                    .as_ref()
+                    .and_then(|c| c.get(&peer.connection_name))
+                {
                     println!(
                         "  public key: {}",
                         wg.interface.private_key.public_key().to_base64()
