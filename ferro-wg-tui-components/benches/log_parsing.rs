@@ -30,7 +30,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
     c.bench_function("parse_log_lines", |b| {
         b.iter(|| {
             for line in &test_lines {
-                black_box(LogsComponent::parse_log_line(line, &cfg_all));
+                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_all));
             }
         });
     });
@@ -38,7 +38,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
     c.bench_function("parse_log_lines_no_timestamps", |b| {
         b.iter(|| {
             for line in &test_lines {
-                black_box(LogsComponent::parse_log_line(line, &cfg_no_ts));
+                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_ts));
             }
         });
     });
@@ -46,7 +46,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
     c.bench_function("parse_log_lines_no_colors", |b| {
         b.iter(|| {
             for line in &test_lines {
-                black_box(LogsComponent::parse_log_line(line, &cfg_no_color));
+                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_color));
             }
         });
     });

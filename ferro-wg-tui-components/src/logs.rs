@@ -9,6 +9,17 @@ use tracing::warn;
 use ferro_wg_core::config::LogDisplayConfig;
 use ferro_wg_tui_core::{Action, AppState, Component};
 
+/// Errors that can occur when parsing a structured log line.
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum LogParseError {
+    /// The line does not begin with a valid `HH:MM:SS ` timestamp prefix.
+    #[error("line does not begin with a valid HH:MM:SS timestamp")]
+    MalformedTimestamp,
+    /// The token following the timestamp is not a recognised tracing level.
+    #[error("unknown log level: {0:?}")]
+    UnknownLevel(String),
+}
+
 /// Logs tab: scrollable log viewer with parsed log lines.
 pub struct LogsComponent;
 
@@ -51,14 +62,21 @@ impl LogsComponent {
     }
 
     /// Split `after_timestamp` (the portion of a log line after `HH:MM:SS `) into
-    /// `(level, message)`, or return `None` if the level token is not a known tracing level.
-    fn extract_level_message(after_timestamp: &str) -> Option<(&str, &str)> {
-        let space_pos = after_timestamp.find(' ')?;
+    /// `(level, message)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogParseError::UnknownLevel`] when the token before the first
+    /// space is not a recognised tracing level, or when there is no space at all.
+    fn extract_level_message(after_timestamp: &str) -> Result<(&str, &str), LogParseError> {
+        let space_pos = after_timestamp
+            .find(' ')
+            .ok_or_else(|| LogParseError::UnknownLevel(after_timestamp.to_owned()))?;
         let level = &after_timestamp[..space_pos];
         if !matches!(level, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR") {
-            return None;
+            return Err(LogParseError::UnknownLevel(level.to_owned()));
         }
-        Some((level, &after_timestamp[space_pos + 1..]))
+        Ok((level, &after_timestamp[space_pos + 1..]))
     }
 
     /// Parse a log line into styled spans for display.
@@ -70,17 +88,20 @@ impl LogsComponent {
     /// - `show_timestamps`: include the `[HH:MM:SS]` prefix span.
     /// - `color_badges`: apply color to the `[LEVEL]` span; plain text otherwise.
     ///
-    /// Falls back to a single plain-text span for legacy or malformed lines.
-    #[must_use]
-    pub fn parse_log_line(line: &str, config: &LogDisplayConfig) -> Vec<Span<'static>> {
+    /// # Errors
+    ///
+    /// Returns [`LogParseError::MalformedTimestamp`] when the line does not begin
+    /// with `HH:MM:SS `, or [`LogParseError::UnknownLevel`] when the level token
+    /// is not a recognised tracing level. Callers should fall back to a plain-text
+    /// span on error.
+    pub fn parse_log_line(
+        line: &str,
+        config: &LogDisplayConfig,
+    ) -> Result<Vec<Span<'static>>, LogParseError> {
         let line = line.trim();
 
-        let Some(timestamp) = Self::parse_timestamp(line) else {
-            return vec![Span::raw(line.to_owned())];
-        };
-        let Some((level, message)) = Self::extract_level_message(&line[9..]) else {
-            return vec![Span::raw(line.to_owned())];
-        };
+        let timestamp = Self::parse_timestamp(line).ok_or(LogParseError::MalformedTimestamp)?;
+        let (level, message) = Self::extract_level_message(&line[9..])?;
 
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(5);
         if config.show_timestamps {
@@ -96,7 +117,7 @@ impl LogsComponent {
         ));
         spans.push(Span::raw(" "));
         spans.push(Span::raw(message.to_owned()));
-        spans
+        Ok(spans)
     }
 
     /// Create a new logs component.
@@ -139,7 +160,11 @@ impl Component for LogsComponent {
         } else {
             log_lines
                 .iter()
-                .map(|l| Line::from(Self::parse_log_line(l, config)))
+                .map(|l| {
+                    let spans = Self::parse_log_line(l, config)
+                        .unwrap_or_else(|_| vec![Span::raw(l.clone())]);
+                    Line::from(spans)
+                })
                 .collect()
         };
 
@@ -196,14 +221,15 @@ mod tests {
         assert_eq!(LogsComponent::level_style("CUSTOM", true), Style::default());
     }
 
-    // --- parse_log_line ---
+    // --- parse_log_line: success paths ---
 
     #[test]
     fn parse_log_line_with_timestamp_and_level() {
         let spans = LogsComponent::parse_log_line(
             "12:34:56 INFO ferro_wg_core::tunnel::mod: Connection abc is up",
             &cfg(true, true),
-        );
+        )
+        .unwrap();
 
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[0].content, "[12:34:56]");
@@ -221,7 +247,8 @@ mod tests {
         let spans = LogsComponent::parse_log_line(
             "12:34:56 ERROR ferro_wg_core::error: Failed to connect",
             &cfg(true, true),
-        );
+        )
+        .unwrap();
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[2].content, "[ERROR]");
         assert_eq!(spans[2].style.fg, Some(Color::Red));
@@ -232,7 +259,8 @@ mod tests {
         let spans = LogsComponent::parse_log_line(
             "12:34:56 WARN ferro_wg_core::tunnel: Handshake timeout",
             &cfg(true, true),
-        );
+        )
+        .unwrap();
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[2].content, "[WARN]");
         assert_eq!(spans[2].style.fg, Some(Color::Yellow));
@@ -243,7 +271,8 @@ mod tests {
         let spans = LogsComponent::parse_log_line(
             "12:34:56 DEBUG ferro_wg_core::stats: Packet count: 42",
             &cfg(true, true),
-        );
+        )
+        .unwrap();
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[2].content, "[DEBUG]");
         assert_eq!(spans[2].style.fg, Some(Color::Blue));
@@ -254,7 +283,8 @@ mod tests {
         let spans = LogsComponent::parse_log_line(
             "12:34:56 INFO ferro_wg_core::tunnel: msg",
             &cfg(false, true),
-        );
+        )
+        .unwrap();
         // No timestamp + space → 3 spans: [LEVEL], space, message.
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "[INFO]");
@@ -266,26 +296,40 @@ mod tests {
         let spans = LogsComponent::parse_log_line(
             "12:34:56 INFO ferro_wg_core::tunnel: msg",
             &cfg(true, false),
-        );
+        )
+        .unwrap();
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[2].content, "[INFO]");
         // No color applied.
         assert_eq!(spans[2].style.fg, None);
     }
 
+    // --- parse_log_line: error paths ---
+
     #[test]
-    fn parse_log_line_legacy_format() {
-        let line = "INFO ferro_wg_core::tunnel::mod: Connection abc is up";
-        let spans = LogsComponent::parse_log_line(line, &cfg(true, true));
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content, line);
+    fn parse_log_line_legacy_format_errs_malformed_timestamp() {
+        let err = LogsComponent::parse_log_line(
+            "INFO ferro_wg_core::tunnel::mod: Connection abc is up",
+            &cfg(true, true),
+        )
+        .unwrap_err();
+        assert_eq!(err, LogParseError::MalformedTimestamp);
     }
 
     #[test]
-    fn parse_log_line_malformed() {
-        let line = "some random log message";
-        let spans = LogsComponent::parse_log_line(line, &cfg(true, true));
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content, line);
+    fn parse_log_line_malformed_errs_malformed_timestamp() {
+        let err =
+            LogsComponent::parse_log_line("some random log message", &cfg(true, true)).unwrap_err();
+        assert_eq!(err, LogParseError::MalformedTimestamp);
+    }
+
+    #[test]
+    fn parse_log_line_unknown_level_errs() {
+        let err = LogsComponent::parse_log_line(
+            "12:34:56 CUSTOM ferro_wg_core::tunnel: msg",
+            &cfg(true, true),
+        )
+        .unwrap_err();
+        assert_eq!(err, LogParseError::UnknownLevel("CUSTOM".to_owned()));
     }
 }
