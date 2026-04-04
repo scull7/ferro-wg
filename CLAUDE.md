@@ -2,7 +2,7 @@
 
 These rules **MUST** be followed by all AI coding agents and contributors.
 
-**Before writing any Rust code, invoke `/rust-practices`.** For deeper reference:
+**Before writing any Rust code, invoke `/rust-code-writer`.** For deeper reference:
 - `/rust-crates` — preferred crates by purpose
 - `/rust-style` — nesting, combinators, documentation template
 - `/rust-errors` — error type structure, `From`/`Into` conversion patterns
