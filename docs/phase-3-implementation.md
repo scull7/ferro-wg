@@ -3,10 +3,19 @@
 ## Pre-implementation checklist
 
 Before writing any Rust code, invoke `/rust-practices` (per `CLAUDE.md`).
-Also confirm `tokio::sync::broadcast` is already in `ferro-wg-core`'s
-`[dependencies]` before reaching for it — it ships as part of `tokio` with the
-`sync` feature and should already be enabled, but verify before adding a
-redundant entry.
+
+- Confirm `tokio::sync::broadcast` is already in `ferro-wg-core`'s
+  `[dependencies]` — it ships with the `tokio` `sync` feature; verify before
+  adding a redundant entry.
+- Confirm `chrono` is available (or add it) in `ferro-wg-tui-components` for
+  timestamp formatting (`DateTime::from_timestamp_millis`, `Local` timezone).
+- Verify that the theme struct exposes the roles referenced in Step 5
+  (`theme.error`, `theme.warning`, `theme.success`, `theme.muted`) before
+  writing render code. If the names differ, update this document.
+- `LogEntry.target` is a heap-allocated `String` but is almost always a
+  `'static` module-path literal from `tracing`. If profiling shows allocation
+  pressure here, consider `Cow<'static, str>`; leave as `String` initially for
+  simplicity.
 
 ---
 
@@ -180,16 +189,19 @@ impl LogLevel {
         }
     }
 
-    /// Advance to the next stricter minimum severity for UI filtering
-    /// (DEBUG → INFO → WARN → ERROR → DEBUG, wrapping).
+    /// Advance to the next stricter minimum severity for UI filtering.
+    ///
+    /// The UI cycle is `DEBUG → INFO → WARN → ERROR → DEBUG` (wrapping).
+    /// `Trace` is not part of the UI cycle; it is treated as `Debug` for
+    /// cycling purposes (i.e. `Trace.next_filter_level() == Info`).
     /// "Next filter level" means fewer entries will be shown after the call.
     pub fn next_filter_level(self) -> Self {
         match self {
-            Self::Trace => Self::Debug,
+            Self::Trace => Self::Info,  // Trace not in UI cycle; skip to Info
             Self::Debug => Self::Info,
             Self::Info  => Self::Warn,
             Self::Warn  => Self::Error,
-            Self::Error => Self::Trace,
+            Self::Error => Self::Debug, // wrap back to Debug (not Trace)
         }
     }
 }
@@ -243,7 +255,8 @@ LogEntry(LogEntry),
 | Test | Assertion |
 |------|-----------|
 | `log_level_ordering` | `Error > Warn > Info > Debug > Trace` |
-| `log_level_next_filter_level_wraps` | `Error.next_filter_level() == Trace` |
+| `log_level_next_filter_level_wraps` | `Error.next_filter_level() == Debug` (wraps to start of UI cycle, not Trace) |
+| `log_level_next_filter_level_trace` | `Trace.next_filter_level() == Info` (Trace is not in the UI cycle) |
 | `log_entry_roundtrip` | Serialize → deserialize preserves all fields |
 | `stream_logs_command_roundtrip` | `StreamLogs { connection_name: Some("mia"), min_level: Info }` survives encode/decode |
 | `log_entry_response_roundtrip` | `DaemonResponse::LogEntry(entry)` survives encode/decode |
@@ -274,6 +287,17 @@ impl LogBroadcaster {
     pub fn publish(&self, entry: LogEntry) { ... }
 
     /// Subscribe and snapshot current history atomically.
+    ///
+    /// Acquires the history `Mutex`, calls `sender.subscribe()` while holding
+    /// the lock, then collects history into a `Vec` — all in one critical
+    /// section. This prevents the TOCTOU gap where entries published between
+    /// the snapshot and the first `recv()` would be missed: the receiver is
+    /// registered before the lock is released, so the broadcast ring-buffer
+    /// already holds any entries published after subscription.
+    ///
+    /// The snapshot is a single `.iter().cloned().collect()` pass with no
+    /// intermediate allocations.
+    ///
     /// Returns `(receiver, history_snapshot)`.
     pub fn subscribe(&self) -> (broadcast::Receiver<LogEntry>, Vec<LogEntry>) { ... }
 }
@@ -312,6 +336,24 @@ DaemonCommand::StreamLogs { connection_name, min_level } => {
     continue; // loop back to accept() immediately
 }
 ```
+
+`passes_filter()` contract (must never panic):
+
+```
+passes_filter(entry, filter_connection, min_level):
+  - entry.level < min_level          → false  (level too low)
+  - filter_connection == None        → true   (no connection filter)
+  - entry.connection_name == None    → true   (global events always pass)
+  - entry.connection_name == filter_connection → true
+  - otherwise                        → false
+```
+
+`lag_warning_entry(n)` — a synthetic `LogEntry` with:
+- `level: LogLevel::Warn`
+- `connection_name: None`
+- `target: "ferro_wg::log_stream"`
+- `message: format!("[{n} log entries dropped — channel lagged]")`
+- `timestamp_ms`: current wall-clock UTC ms
 
 `stream_logs()`:
 
@@ -383,6 +425,8 @@ daemon::run(config, &config_path, &socket_path, broadcaster).await?;
 | `stream_logs_filters_by_level` | `min_level: Warn` → DEBUG/INFO entries are suppressed before the writer |
 | `stream_logs_filters_by_connection` | `filter_connection: Some("mia")` → entries with `connection_name: Some("ord01")` are skipped |
 | `stream_logs_global_events_pass_connection_filter_none` | `filter_connection: None` → entries with `connection_name: None` are forwarded |
+| `stream_logs_global_events_pass_connection_filter_some` | `filter_connection: Some("mia")` → entries with `connection_name: None` are still forwarded (global events always pass) |
+| `broadcaster_two_concurrent_subscribers` | Two subscribers both receive all published entries independently |
 
 ---
 
@@ -540,6 +584,15 @@ fn spawn_log_stream(
 `DaemonCommand::StreamLogs { connection_name: None, min_level: LogLevel::Debug }`,
 returning a `BufReader` over the socket's read half.
 
+`synthetic_connected_entry()` — a `LogEntry` used internally to signal
+connection to the event loop (dispatched as `DaemonMessage::LogStreamConnected`,
+not inserted into `log_buffer`):
+- `level: LogLevel::Info`
+- `connection_name: None`
+- `target: "ferro_wg::log_stream"`
+- `message: "log stream connected"`
+- `timestamp_ms`: current wall-clock UTC ms
+
 The stream task is spawned **once** at TUI startup, alongside the status poll
 infrastructure, and runs for the lifetime of the TUI session.
 
@@ -579,6 +632,7 @@ pub struct LogsComponent {
     /// Lines scrolled above the bottom of the visible window (0 = pinned to bottom).
     scroll_offset: usize,
     /// Minimum log level to display in the rendered viewport.
+    /// Default: `LogLevel::Debug` (show everything; matches the stream request).
     level_filter: LogLevel,
     /// Whether to show only the active connection's logs or all logs.
     connection_filter: ConnectionFilter,
@@ -607,6 +661,19 @@ Auto-scroll: when `scroll_offset == 0` and an `AppendLog` action arrives
 (observed via `update()`), scroll stays at 0 so the new entry is immediately
 visible. When `scroll_offset > 0` (user has scrolled up), the view freezes.
 
+**Scroll position on buffer eviction:** When the buffer evicts the oldest entry
+(front), `scroll_offset` must be decremented by 1 (clamped to 0) so the user's
+viewport stays anchored to the same content. Failing to do this causes a one-row
+upward jump for every eviction when the user is scrolled to the top.
+
+**Search infrastructure:** `LogsComponent` owns its search query string
+(`search_query: String`) and search mode flag (`in_search: bool`) locally. The
+"existing search infrastructure" referenced in the key-binding table refers to
+the `Action::EnterSearch` / `Action::ExitSearch` pattern used by other
+components, but `LogsComponent` must implement its own query application and
+match highlighting since it operates on `LogEntry` spans rather than plain text
+lines. Do not assume a shared search widget exists.
+
 #### Render layout
 
 ```
@@ -626,7 +693,10 @@ visible. When `scroll_offset > 0` (user has scrolled up), the view freezes.
   - `WARN` → `theme.warning`
   - `INFO` → `theme.success`
   - `DEBUG` / `TRACE` → `theme.muted`
-- Timestamp formatted from `entry.timestamp_ms` as `HH:MM:SS` (local time)
+- Timestamp formatted from `entry.timestamp_ms` as `HH:MM:SS` (local time).
+  Use `chrono::DateTime::from_timestamp_millis(entry.timestamp_ms)` (returns
+  `Option`); if `None` (overflow or invalid value), render `"??:??:??"` instead
+  of panicking. Convert to local time with `.with_timezone(&chrono::Local)`.
 - Search highlight: query matches are bold/underline within the message span
 - When `log_stream_connected == false`: a `[disconnected]` suffix in the title,
   message lines from the buffer still shown but a muted banner at the bottom:
@@ -675,6 +745,8 @@ component (other components have no use for it).
 | `logs_renders_disconnected_banner` | `state.log_stream_connected == false` → banner text present |
 | `logs_title_reflects_filters` | `level_filter = Warn`, `connection_filter = ActiveConnection`, active connection "mia" → title contains `[WARN+] [mia]` |
 | `logs_global_events_shown_in_connection_filter` | Entry with `connection_name: None` → visible even in `ActiveConnection` mode |
+| `logs_scroll_adjusts_on_eviction` | Buffer at capacity; new entry pushed while `scroll_offset > 0` → `scroll_offset` decremented by 1 |
+| `logs_invalid_timestamp_renders_fallback` | `timestamp_ms` outside valid `chrono` range → renders `"??:??:??"` without panic |
 
 ---
 
@@ -720,6 +792,7 @@ These spin up a mock daemon that:
 | `log_connection_filter_applied_server_side` | Mock sends "mia" and "ord01" entries; filter on "mia" → only "mia" entries in buffer |
 | `history_replayed_on_connect` | Mock had 50 entries in history → TUI buffer has 50 entries immediately after connect |
 | `buffer_capacity_respected_under_flood` | Mock streams 2 000 entries rapidly → `log_buffer.len() <= 1_000` at all times |
+| `malformed_ipc_line_ignored` | Mock sends a non-JSON line followed by a valid `LogEntry` → malformed line is silently skipped, valid entry appears in buffer |
 
 ---
 
