@@ -100,11 +100,11 @@ impl Component for OverviewComponent {
                     .as_ref()
                     .map_or_else(|| "—".to_owned(), |s| s.backend.to_string());
 
-                let interface = conn
+                let interface: &str = conn
                     .status
                     .as_ref()
-                    .and_then(|s| s.interface.clone())
-                    .unwrap_or_else(|| "—".to_owned());
+                    .and_then(|s| s.interface.as_deref())
+                    .unwrap_or("—");
 
                 let tx = conn
                     .status
