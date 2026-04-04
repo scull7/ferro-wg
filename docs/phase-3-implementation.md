@@ -124,12 +124,9 @@ task holds the socket open, replays history, then forwards broadcast events
 until the writer fails (client disconnected). This keeps the existing one-shot
 path entirely unchanged.
 
-### Broadcast channel and backpressure
+### Broadcast channel and backpressure (critical)
 
-`broadcast::Sender<LogEntry>` has a fixed capacity (512 entries). If a TUI
-client reads too slowly, `recv()` returns `RecvError::Lagged(n)` — the client
-skips `n` entries and appends a synthetic `"[n log entries dropped]"` warning
-entry to `log_buffer`. The daemon is never blocked.
+`broadcast::Sender<LogEntry>` capacity 512. `TuiTracingLayer::on_event` is **sync**; to avoid blocking tracing pipeline, `publish()` uses non-blocking send (or mpsc forwarder task). On `Lagged(n)`, TUI receives dedicated `Lagged` message (status only, no buffer pollution). Daemon never blocked. See `LogBroadcaster::publish` for impl.
 
 ### History replay
 
@@ -220,7 +217,7 @@ pub struct LogEntry {
     /// `None` means a global daemon event not tied to a specific tunnel.
     pub connection_name: Option<String>,
     /// The `tracing` target (usually the Rust module path).
-    pub target: String,
+    pub target: Cow<'static, str>,
     /// Formatted log message.
     pub message: String,
 }
@@ -274,9 +271,9 @@ Lagged(usize),
 ```rust
 pub struct LogBroadcaster {
     sender: broadcast::Sender<LogEntry>,
-    /// Ring buffer of recent entries replayed to new subscribers.
     history: Mutex<VecDeque<LogEntry>>,
     history_capacity: usize,
+    dropped_count: std::sync::atomic::AtomicU64,  // for observability
 }
 
 impl LogBroadcaster {
@@ -445,27 +442,29 @@ daemon::run(config, &config_path, &socket_path, broadcaster).await?;
 pub struct LogBuffer {
     entries: VecDeque<LogEntry>,
     capacity: usize,
+    evicted_count: u64,  // monotonic; incremented on every eviction for scroll adjustment
 }
 
 impl LogBuffer {
     pub fn new(capacity: usize) -> Self { ... }
 
-    /// Append an entry, evicting the oldest if at capacity.
+    /// Append an entry, evicting the oldest if at capacity (increments `evicted_count`).
     pub fn push(&mut self, entry: LogEntry) {
         if self.entries.len() == self.capacity {
             self.entries.pop_front();
+            self.evicted_count = self.evicted_count.wrapping_add(1);
         }
         self.entries.push_back(entry);
     }
 
-    /// Iterate entries passing the given level and optional connection filter.
-    /// `query` is a case-insensitive substring matched against the message.
+    /// Iterate entries passing filters. Yields `(absolute_index, &entry)` where
+    /// absolute_index accounts for evicted_count (for scroll adjustment).
     pub fn filtered<'a>(
         &'a self,
         min_level: LogLevel,
         connection: Option<&'a str>,
         query: &'a str,
-    ) -> impl Iterator<Item = &'a LogEntry> { ... }
+    ) -> impl Iterator<Item = (usize, &'a LogEntry)> { ... }
 
     pub fn len(&self) -> usize { ... }
     pub fn is_empty(&self) -> bool { ... }
@@ -579,7 +578,10 @@ fn spawn_log_stream(
                 Err(_) => {} // daemon not running yet
             }
             let _ = tx.send(DaemonMessage::LogStreamDisconnected);
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // Exponential backoff with jitter (reset on successful connect).
+            // backoff starts at 500ms, doubles to max 30s.
+            // (impl details in code: use rand for jitter)
+            tokio::time::sleep(backoff_duration).await;
         }
     });
 }
@@ -631,13 +633,11 @@ Add `LogLagged(usize)` to Actions. `spawn_log_stream` called once at startup. Us
 
 ```rust
 pub struct LogsComponent {
-    /// Lines scrolled above the bottom of the visible window (0 = pinned to bottom).
     scroll_offset: usize,
-    /// Minimum log level to display in the rendered viewport.
-    /// Default: `LogLevel::Debug` (show everything; matches the stream request).
-    level_filter: LogLevel,
-    /// Whether to show only the active connection's logs or all logs.
-    connection_filter: ConnectionFilter,
+    /// Tracks last seen evicted_count to compute delta on eviction.
+    old_evicted: u64,
+    level_filter: LogLevel,  // default: Debug
+    connection_filter: ConnectionFilter,  // default: All
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,7 +663,16 @@ Auto-scroll: when `scroll_offset == 0` and an `AppendLog` action arrives
 (observed via `update()`), scroll stays at 0 so the new entry is immediately
 visible. When `scroll_offset > 0` (user has scrolled up), the view freezes.
 
-**Eviction-aware scrolling (critical fix):** `LogBuffer` tracks `evicted_count: u64` (monotonic). On `push()` when evicting, increment it. `filtered()` iterator yields with absolute index. `LogsComponent` adjusts `scroll_offset` by `new_evicted - old_evicted` on each render/update. This prevents any viewport jump even when viewing oldest entries or during high-rate eviction. No visible stutter.
+**Eviction-aware scrolling (critical fix):** 
+`LogBuffer` has `evicted_count: u64` (init 0, `wrapping_add` on pop_front).
+`LogsComponent` has `old_evicted: u64` (init 0).
+In `update()`/`render()`:
+```rust
+let delta = state.log_buffer.evicted_count.saturating_sub(self.old_evicted);
+self.scroll_offset = self.scroll_offset.saturating_sub(delta as usize);
+self.old_evicted = state.log_buffer.evicted_count;
+```
+`filtered()` yields `(absolute_idx, &entry)`. Test with mocks for scroll + eviction + search.
 
 **Search infrastructure:** `LogsComponent` owns its search query string
 (`search_query: String`) and search mode flag (`in_search: bool`) locally. The
