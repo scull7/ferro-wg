@@ -13,8 +13,6 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use std::sync::mpsc;
-
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -26,27 +24,20 @@ use crate::config::toml::load_app_config;
 use crate::ipc::{self, DaemonCommand, DaemonResponse};
 use crate::tunnel::TunnelManager;
 
-/// Buffer for daemon logs with broadcasting capability.
+/// Buffer for daemon logs.
 #[derive(Clone)]
 pub struct LogBuffer {
     buffer: Arc<Mutex<VecDeque<String>>>,
-    sender: mpsc::SyncSender<String>,
 }
 
 impl LogBuffer {
-    /// Create a new log buffer with maximum capacity and sync sender.
+    /// Create a new log buffer with maximum capacity.
     ///
     /// The buffer will hold up to `max_lines` log entries, evicting oldest on overflow.
-    /// Logs are sent via the provided sync sender for broadcasting.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the sync channel is full (should not happen in normal operation).
     #[must_use]
-    pub fn new(max_lines: usize, sender: mpsc::SyncSender<String>) -> Self {
+    pub fn new(max_lines: usize) -> Self {
         Self {
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_lines))),
-            sender,
         }
     }
 
@@ -57,8 +48,7 @@ impl LogBuffer {
                 if buf.len() == buf.capacity() {
                     buf.pop_front();
                 }
-                buf.push_back(line.clone());
-                let _ = self.sender.send(line);
+                buf.push_back(line);
             }
             Err(_) => {
                 warn!("LogBuffer mutex poisoned, skipping log line");
@@ -75,6 +65,19 @@ impl LogBuffer {
             buf.iter().cloned().collect()
         } else {
             warn!("LogBuffer mutex poisoned, returning empty buffer");
+            Vec::new()
+        }
+    }
+
+    /// Drain all current logs from the buffer.
+    ///
+    /// Returns the drained logs, or empty vector if poisoned.
+    #[must_use]
+    pub fn drain_logs(&self) -> Vec<String> {
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.drain(..).collect()
+        } else {
+            warn!("LogBuffer mutex poisoned, cannot drain logs");
             Vec::new()
         }
     }
@@ -406,18 +409,9 @@ async fn send_response(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn log_buffer_broadcast_capacity() {
-        let (sync_tx, sync_rx) = mpsc::sync_channel(10);
-        let (tx, mut rx) = broadcast::channel(3);
-        let buffer = LogBuffer::new(3, sync_tx);
-
-        // Spawn broadcaster
-        tokio::spawn(async move {
-            while let Ok(line) = sync_rx.recv().await {
-                let _ = tx.send(line);
-            }
-        });
+    #[test]
+    fn log_buffer_capacity() {
+        let buffer = LogBuffer::new(3);
 
         // Add lines up to capacity
         buffer.add_line("line1".to_string());
@@ -425,17 +419,9 @@ mod tests {
         buffer.add_line("line3".to_string());
         assert_eq!(buffer.get_buffer(), vec!["line1", "line2", "line3"]);
 
-        // Verify broadcast receives
-        assert_eq!(rx.recv().await.unwrap(), "line1");
-        assert_eq!(rx.recv().await.unwrap(), "line2");
-        assert_eq!(rx.recv().await.unwrap(), "line3");
-
         // Overflow: should evict oldest
         buffer.add_line("line4".to_string());
         assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
-
-        // Verify broadcast for new line
-        assert_eq!(rx.recv().await.unwrap(), "line4");
 
         // Buffer capacity is 3
         assert_eq!(buffer.buffer.lock().unwrap().capacity(), 3);
@@ -444,7 +430,7 @@ mod tests {
     #[test]
     fn log_buffer_overflow_eviction() {
         let (sender, _receiver) = tokio::sync::mpsc::sync_channel(10);
-        let buffer = LogBuffer::new(3, sender);
+        let buffer = LogBuffer::new(3);
 
         // Add more than capacity
         for i in 0..5 {
