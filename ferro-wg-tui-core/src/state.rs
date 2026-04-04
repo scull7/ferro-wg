@@ -5,6 +5,8 @@
 //! receive `&AppState` for read-only access during rendering and key
 //! handling.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ferro_wg_core::config::{AppConfig, WgConfig};
@@ -121,7 +123,7 @@ pub struct AppState {
     /// Always 0 when `connections` is empty.
     pub selected_connection: usize,
     /// Log lines for the Logs tab.
-    pub log_lines: Vec<String>,
+    pub log_lines: Arc<Mutex<VecDeque<String>>>,
     /// Active color theme.
     pub theme: Theme,
     /// Whether the daemon is currently reachable.
@@ -157,7 +159,7 @@ impl AppState {
             search_query: String::new(),
             connections,
             selected_connection: 0,
-            log_lines: Vec::new(),
+            log_lines: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             theme: Theme::mocha(),
             daemon_connected: false,
             feedback: None,
@@ -165,21 +167,31 @@ impl AppState {
     }
 
     /// Returns the currently focused connection, if any.
+    ///
+    /// Returns `None` when `connections` is empty.
     #[must_use]
     pub fn active_connection(&self) -> Option<&ConnectionView> {
         self.connections.get(self.selected_connection)
     }
 
-    /// Returns the currently focused connection mutably, if any.
-    ///
-    /// Returns `None` when `connections` is empty.
-    pub fn active_connection_mut(&mut self) -> Option<&mut ConnectionView> {
-        self.connections.get_mut(self.selected_connection)
+    /// Append a log line to the log buffer, maintaining bounded size.
+    pub fn append_log(&self, line: String) {
+        match self.log_lines.lock() {
+            Ok(mut buf) => {
+                if buf.len() == buf.capacity() {
+                    buf.pop_front();
+                }
+                buf.push_back(line);
+            }
+            Err(_) => {
+                warn!("Log buffer mutex poisoned, skipping log append");
+            }
+        }
     }
 
-    /// Dispatch an action, mutating shared state.
+    /// Dispatch an action to update the application state.
     ///
-    /// This is Phase 1 of the two-phase dispatch cycle. After this
+    /// This is the central hub for all state mutations. After dispatch
     /// returns, the caller should forward the action to all components
     /// via [`Component::update()`](crate::component::Component::update).
     ///
@@ -204,8 +216,6 @@ impl AppState {
             Action::SearchBackspace => {
                 self.search_query.pop();
             }
-
-            // -- Connection selection --
             Action::SelectNextConnection => {
                 if !self.connections.is_empty() {
                     self.selected_connection =
@@ -234,16 +244,10 @@ impl AppState {
                     self.search_query.clear();
                 }
             }
-
-            // -- Daemon integration --
             Action::UpdatePeers(statuses) => {
                 self.daemon_connected = true;
                 for s in statuses {
-                    if let Some(conn) = self
-                        .connections
-                        .iter_mut()
-                        .find(|c| c.name == s.connection_name)
-                    {
+                    if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
                         let state = if s.connected {
                             ConnectionState::Connected
                         } else {
@@ -257,7 +261,7 @@ impl AppState {
                             interface: s.interface.clone(),
                         });
                     } else {
-                        warn!(connection_name = %s.connection_name, "UpdatePeers received status for unknown connection");
+                        warn!(name = %s.name, "UpdatePeers received status for unknown connection");
                     }
                 }
                 // Clamp in case connections changed (defensive; static in Phase 2).
@@ -274,20 +278,17 @@ impl AppState {
             Action::DaemonError(msg) => {
                 self.feedback = Some(Feedback::error(msg.clone()));
             }
-
-            // -- Row navigation --
             Action::NextRow => {
-                if let Some(conn) = self.active_connection_mut() {
+                if let Some(conn) = self.connections.get_mut(self.selected_connection) {
                     let max = conn.config.peers.len().saturating_sub(1);
                     conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
                 }
             }
             Action::PrevRow => {
-                if let Some(conn) = self.active_connection_mut() {
+                if let Some(conn) = self.connections.get_mut(self.selected_connection) {
                     conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
                 }
             }
-
             // Tick and peer commands are handled by components or the event loop.
             Action::Tick
             | Action::ConnectPeer(_)
@@ -311,7 +312,8 @@ impl AppState {
     pub fn filtered_peers(&self) -> impl Iterator<Item = &ferro_wg_core::config::PeerConfig> {
         let query = self.search_query.to_lowercase();
         let peers: &[ferro_wg_core::config::PeerConfig] = self
-            .active_connection()
+            .connections
+            .get(self.selected_connection)
             .map_or(&[], |c| c.config.peers.as_slice());
         peers.iter().filter(move |p| {
             query.is_empty()
@@ -381,7 +383,7 @@ mod tests {
 
     fn make_peer_status(name: &str, connected: bool) -> PeerStatus {
         PeerStatus {
-            connection_name: name.into(),
+            name: name.into(),
             connected,
             backend: BackendKind::Boringtun,
             stats: TunnelStats::default(),

@@ -41,6 +41,7 @@ tun = { version = "0.8", features = ["async"] }
 
 # Logging
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # WireGuard backends (feature-gated)
 boringtun = { version = "0.7", optional = true }

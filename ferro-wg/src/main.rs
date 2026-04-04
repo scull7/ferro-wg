@@ -112,6 +112,7 @@ fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 
@@ -130,6 +131,7 @@ fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 
@@ -159,17 +161,14 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 let iface = peer.interface.as_deref().unwrap_or("-");
                 let endpoint = peer.endpoint.as_deref().unwrap_or("-");
 
-                println!("connection: {}", peer.connection_name);
+                println!("connection: {}", peer.name);
                 println!("  status: {status}");
                 println!("  backend: {}", peer.backend);
                 println!("  endpoint: {endpoint}");
                 println!("  interface: {iface}");
 
                 // Show config details if available.
-                if let Some(wg) = app_config
-                    .as_ref()
-                    .and_then(|c| c.get(&peer.connection_name))
-                {
+                if let Some(wg) = app_config.as_ref().and_then(|c| c.get(&peer.name)) {
                     println!(
                         "  public key: {}",
                         wg.interface.private_key.public_key().to_base64()
@@ -201,6 +200,7 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Ok => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 
@@ -269,12 +269,28 @@ fn cmd_daemon(
     println!("Connections: {}", conn_names.join(", "));
     println!("Press Ctrl+C to stop.\n");
 
+    // Bounded channel: sender blocks under backpressure instead of dropping messages.
+    let (log_tx, log_rx) = tokio::sync::mpsc::channel::<String>(4096);
+    let log_buffer = ferro_wg_core::daemon::LogBuffer::new(1000);
+    let log_buffer_for_broadcast = log_buffer.clone();
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(ferro_wg_core::daemon::run(
-        app_config,
-        config_path,
-        &socket_path,
-    ))?;
+    rt.block_on(async {
+        // Spawn broadcaster task inside the runtime so tokio::spawn has a valid context.
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                let lines = log_buffer_for_broadcast.drain_logs();
+                for line in lines {
+                    if log_tx.send(line).await.is_err() {
+                        // Receiver dropped; daemon is shutting down.
+                        return;
+                    }
+                }
+            }
+        });
+        ferro_wg_core::daemon::run(app_config, config_path, &socket_path, log_buffer, log_rx).await
+    })?;
     Ok(())
 }
 
@@ -289,6 +305,7 @@ fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 

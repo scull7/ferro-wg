@@ -8,11 +8,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
+use tracing::warn;
 
 /// Live log viewer displaying daemon output.
 ///
-/// Currently a placeholder that shows "(no log entries yet)" when
-/// empty. Log streaming will be implemented in Phase 3.
+/// Shows real-time daemon logs as they are emitted. Displays
+/// "(no log entries yet)" when empty.
 pub struct LogsComponent;
 
 impl LogsComponent {
@@ -42,18 +43,19 @@ impl Component for LogsComponent {
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
 
-        let lines: Vec<Line<'_>> = if state.log_lines.is_empty() {
+        let Ok(log_lines) = state.log_lines.lock() else {
+            warn!("Log buffer mutex poisoned, showing empty logs");
+            return;
+        };
+        let lines: Vec<Line> = if log_lines.is_empty() {
             vec![Line::from(Span::styled(
                 "(no log entries yet)",
                 Style::default().fg(theme.muted),
             ))]
         } else {
-            state
-                .log_lines
-                .iter()
-                .map(|l| Line::from(l.as_str()))
-                .collect()
+            log_lines.iter().map(|l| Line::from(l.clone())).collect()
         };
+        drop(log_lines); // Release lock
 
         let paragraph = Paragraph::new(lines).block(theme.panel_block("Logs"));
         frame.render_widget(paragraph, area);

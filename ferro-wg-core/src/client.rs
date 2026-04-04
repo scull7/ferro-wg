@@ -93,6 +93,71 @@ pub async fn send_command_to(
     ipc::decode_message(&line).map_err(DaemonClientError::Decode)
 }
 
+/// Stream daemon logs from the default socket path.
+///
+/// Returns a receiver that yields log lines as they are emitted by the daemon.
+/// The stream continues until the connection is closed or an error occurs.
+///
+/// # Errors
+///
+/// Returns a [`DaemonClientError`] if the daemon is unreachable or the command cannot be encoded.
+pub async fn stream_logs() -> Result<tokio::sync::mpsc::Receiver<String>, DaemonClientError> {
+    stream_logs_from(Path::new(SOCKET_PATH)).await
+}
+
+/// Stream daemon logs from a specific socket path.
+///
+/// # Errors
+///
+/// Returns a [`DaemonClientError`] describing the failure.
+pub async fn stream_logs_from(
+    socket_path: &Path,
+) -> Result<tokio::sync::mpsc::Receiver<String>, DaemonClientError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                DaemonClientError::NotRunning
+            }
+            _ => DaemonClientError::Io(e),
+        })?;
+
+    let (reader, mut writer) = stream.into_split();
+
+    // Send StreamLogs command.
+    let json = ipc::encode_message(&DaemonCommand::StreamLogs)?;
+    writer.write_all(json.as_bytes()).await?;
+    writer.flush().await?;
+    // Shut down write half.
+    drop(writer);
+
+    // Read log lines.
+    let mut reader = BufReader::new(reader);
+    let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+    tokio::spawn(async move {
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if let Ok(DaemonResponse::LogLine(log)) =
+                        ipc::decode_message::<DaemonResponse>(&line)
+                    {
+                        if tx.send(log).await.is_err() {
+                            break;
+                        }
+                    } else {
+                        break; // unexpected response
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(rx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

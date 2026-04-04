@@ -36,6 +36,8 @@ pub enum DaemonCommand {
     },
     /// Ask the daemon to shut down cleanly.
     Shutdown,
+    /// Request to stream daemon logs in real-time.
+    StreamLogs,
 }
 
 /// Responses sent from the daemon to the CLI/TUI.
@@ -47,13 +49,15 @@ pub enum DaemonResponse {
     Error(String),
     /// Current status of all peers.
     Status(Vec<PeerStatus>),
+    /// A single log line from the daemon.
+    LogLine(String),
 }
 
 /// Runtime status of a single connection, reported by the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerStatus {
     /// The connection's configured name (matches `AppConfig` connection keys).
-    pub connection_name: String,
+    pub name: String,
     /// Whether the tunnel is connected.
     pub connected: bool,
     /// Which backend is active.
@@ -119,7 +123,7 @@ mod tests {
     #[test]
     fn response_status_roundtrip() {
         let resp = DaemonResponse::Status(vec![PeerStatus {
-            connection_name: "mia".into(),
+            name: "mia".into(),
             connected: true,
             backend: BackendKind::Neptun,
             stats: TunnelStats::default(),
@@ -130,7 +134,7 @@ mod tests {
         let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
         if let DaemonResponse::Status(peers) = decoded {
             assert_eq!(peers.len(), 1);
-            assert_eq!(peers[0].connection_name, "mia");
+            assert_eq!(peers[0].name, "mia");
             assert!(peers[0].connected);
             assert_eq!(peers[0].interface.as_deref(), Some("utun4"));
         } else {
@@ -144,6 +148,17 @@ mod tests {
         let encoded = encode_message(&resp).expect("encode");
         let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
         assert!(matches!(decoded, DaemonResponse::Error(ref s) if s == "no such peer"));
+    }
+
+    #[test]
+    fn response_logline_roundtrip() {
+        let resp = DaemonResponse::LogLine(
+            "2024-10-04T12:34:56.789 INFO ferro_wg_daemon::server: Listening on /tmp/ferro-wg.sock"
+                .into(),
+        );
+        let encoded = encode_message(&resp).expect("encode");
+        let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
+        assert!(matches!(decoded, DaemonResponse::LogLine(ref s) if s.starts_with("2024-10-04")));
     }
 
     #[test]
@@ -162,6 +177,7 @@ mod tests {
                 backend: BackendKind::Neptun,
             },
             DaemonCommand::Shutdown,
+            DaemonCommand::StreamLogs,
         ];
         for cmd in &commands {
             let encoded = encode_message(cmd).expect("encode");
