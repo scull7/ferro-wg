@@ -39,6 +39,14 @@ use event::{AppEvent, EventHandler};
 /// collapses to zero rows.
 const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 = 8;
 
+/// Minimum terminal width at which the connection bar is shown.
+///
+/// Below this threshold the `" Connections: "` prefix (14 cols) plus at least
+/// one entry would overflow or clip beyond usefulness.  40 columns gives the
+/// viewport algorithm enough budget (`40 − 16 = 24`) to display the selected
+/// entry and at least one neighbour.
+const MIN_WIDTH_FOR_CONNECTION_BAR: u16 = 40;
+
 /// Messages sent from background daemon tasks to the event loop.
 enum DaemonMessage {
     /// Status poll returned peer statuses.
@@ -155,7 +163,8 @@ async fn event_loop(
         // Render.
         terminal.draw(|frame| {
             let show_bar = state.connections.len() > 1
-                && frame.area().height >= MIN_HEIGHT_FOR_CONNECTION_BAR;
+                && frame.area().height >= MIN_HEIGHT_FOR_CONNECTION_BAR
+                && frame.area().width >= MIN_WIDTH_FOR_CONNECTION_BAR;
             let bar_height = u16::from(show_bar);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
