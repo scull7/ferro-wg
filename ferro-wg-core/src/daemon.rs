@@ -13,6 +13,8 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use std::sync::mpsc;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -28,17 +30,23 @@ use crate::tunnel::TunnelManager;
 #[derive(Clone)]
 pub struct LogBuffer {
     buffer: Arc<Mutex<VecDeque<String>>>,
-    tx: broadcast::Sender<String>,
+    sender: mpsc::SyncSender<String>,
 }
 
 impl LogBuffer {
-    /// Create a new log buffer with maximum capacity.
+    /// Create a new log buffer with maximum capacity and sync sender.
+    ///
+    /// The buffer will hold up to `max_lines` log entries, evicting oldest on overflow.
+    /// Logs are sent via the provided sync sender for broadcasting.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sync channel is full (should not happen in normal operation).
     #[must_use]
-    pub fn new(max_lines: usize) -> Self {
-        let (tx, _) = broadcast::channel(max_lines);
+    pub fn new(max_lines: usize, sender: mpsc::SyncSender<String>) -> Self {
         Self {
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_lines))),
-            tx,
+            sender,
         }
     }
 
@@ -50,7 +58,7 @@ impl LogBuffer {
                     buf.pop_front();
                 }
                 buf.push_back(line.clone());
-                let _ = self.tx.send(line);
+                let _ = self.sender.send(line);
             }
             Err(_) => {
                 warn!("LogBuffer mutex poisoned, skipping log line");
@@ -154,6 +162,7 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
 async fn handle_stream_logs(
     mut writer: tokio::net::unix::OwnedWriteHalf,
     log_buffer: &LogBuffer,
+    log_rx: &mut broadcast::Receiver<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Send buffered logs first
     let buf = log_buffer.get_buffer();
@@ -165,9 +174,8 @@ async fn handle_stream_logs(
         }
     }
     // Then stream new logs
-    let mut rx = log_buffer.tx.subscribe();
     loop {
-        match rx.recv().await {
+        match log_rx.recv().await {
             Ok(line) => {
                 let resp = DaemonResponse::LogLine(line);
                 if let Err(e) = send_response(&mut writer, &resp).await {
@@ -253,6 +261,7 @@ async fn handle_connection(
     manager: &mut TunnelManager,
     config_path: &Path,
     log_buffer: &LogBuffer,
+    log_rx: &mut broadcast::Receiver<String>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let (stream, _addr) = listener.accept().await?;
     let (reader, mut writer) = stream.into_split();
@@ -266,7 +275,7 @@ async fn handle_connection(
 
     match command {
         DaemonCommand::StreamLogs => {
-            handle_stream_logs(writer, log_buffer).await?;
+            handle_stream_logs(writer, log_buffer, log_rx).await?;
             Ok(false)
         }
         cmd => process_command(&cmd, manager, config_path, &mut writer).await,
@@ -288,6 +297,7 @@ pub async fn run(
     config_path: &Path,
     socket_path: &Path,
     log_buffer: LogBuffer,
+    mut log_rx: broadcast::Receiver<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = setup_listener(socket_path)?;
     set_socket_permissions(socket_path)?;
@@ -298,7 +308,15 @@ pub async fn run(
     let config_path = config_path.to_owned();
 
     loop {
-        if handle_connection(&listener, &mut manager, &config_path, &log_buffer).await? {
+        if handle_connection(
+            &listener,
+            &mut manager,
+            &config_path,
+            &log_buffer,
+            &mut log_rx,
+        )
+        .await?
+        {
             break; // Shutdown
         }
     }
@@ -388,27 +406,18 @@ async fn send_response(
 mod tests {
     use super::*;
 
-    #[test]
-    fn log_buffer_add_line_and_overflow() {
-        let buffer = LogBuffer::new(3);
-        assert!(buffer.get_buffer().is_empty());
+    #[tokio::test]
+    async fn log_buffer_broadcast_capacity() {
+        let (sync_tx, sync_rx) = mpsc::sync_channel(10);
+        let (tx, mut rx) = broadcast::channel(3);
+        let buffer = LogBuffer::new(3, sync_tx);
 
-        buffer.add_line("line1".to_string());
-        assert_eq!(buffer.get_buffer(), vec!["line1"]);
-
-        buffer.add_line("line2".to_string());
-        buffer.add_line("line3".to_string());
-        assert_eq!(buffer.get_buffer(), vec!["line1", "line2", "line3"]);
-
-        // Overflow: oldest should be removed
-        buffer.add_line("line4".to_string());
-        assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
-    }
-
-    #[test]
-    fn log_buffer_broadcast_capacity() {
-        let buffer = LogBuffer::new(3);
-        let _rx = buffer.tx.subscribe();
+        // Spawn broadcaster
+        tokio::spawn(async move {
+            while let Ok(line) = sync_rx.recv().await {
+                let _ = tx.send(line);
+            }
+        });
 
         // Add lines up to capacity
         buffer.add_line("line1".to_string());
@@ -416,11 +425,33 @@ mod tests {
         buffer.add_line("line3".to_string());
         assert_eq!(buffer.get_buffer(), vec!["line1", "line2", "line3"]);
 
+        // Verify broadcast receives
+        assert_eq!(rx.recv().await.unwrap(), "line1");
+        assert_eq!(rx.recv().await.unwrap(), "line2");
+        assert_eq!(rx.recv().await.unwrap(), "line3");
+
         // Overflow: should evict oldest
         buffer.add_line("line4".to_string());
         assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
 
+        // Verify broadcast for new line
+        assert_eq!(rx.recv().await.unwrap(), "line4");
+
         // Buffer capacity is 3
         assert_eq!(buffer.buffer.lock().unwrap().capacity(), 3);
+    }
+
+    #[test]
+    fn log_buffer_overflow_eviction() {
+        let (sender, _receiver) = tokio::sync::mpsc::sync_channel(10);
+        let buffer = LogBuffer::new(3, sender);
+
+        // Add more than capacity
+        for i in 0..5 {
+            buffer.add_line(format!("line{i}"));
+        }
+
+        // Should have last 3
+        assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
     }
 }

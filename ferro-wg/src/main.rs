@@ -274,17 +274,14 @@ fn cmd_daemon(
     println!("Press Ctrl+C to stop.\n");
 
     let (log_tx, log_rx) = tokio::sync::broadcast::channel(1000);
-    let (sync_tx, sync_rx) = tokio::sync::mpsc::sync_channel(1000);
+    let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel(1000);
     let log_buffer = ferro_wg_core::daemon::LogBuffer::new(1000, sync_tx);
 
     // Spawn broadcaster task to isolate async I/O
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            while let Ok(line) = sync_rx.recv().await {
-                let _ = log_tx.send(line);
-            }
-        });
+        while let Ok(line) = sync_rx.recv() {
+            let _ = log_tx.send(line);
+        }
     });
 
     let rt = tokio::runtime::Runtime::new()?;
