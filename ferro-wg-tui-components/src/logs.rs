@@ -1,63 +1,69 @@
-//! Logs tab: scrollable log viewer.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
 
-use crossterm::event::KeyEvent;
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+    #[test]
+    fn test_parse_log_line_with_timestamp_and_level() {
+        let line = "12:34:56 INFO ferro_wg_core::tunnel::mod: Connection abc is up";
+        let spans = LogsComponent::parse_log_line(line);
 
-use ferro_wg_tui_core::{Action, AppState, Component};
-use tracing::warn;
-
-/// Live log viewer displaying daemon output.
-///
-/// Shows real-time daemon logs as they are emitted. Displays
-/// "(no log entries yet)" when empty.
-pub struct LogsComponent;
-
-impl LogsComponent {
-    /// Create a new logs component.
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for LogsComponent {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Component for LogsComponent {
-    fn handle_key(&mut self, _key: KeyEvent, _state: &AppState) -> Option<Action> {
-        // No interactive elements yet (future: scroll, filter).
-        None
+        assert_eq!(spans.len(), 5);
+        assert_eq!(spans[0].content, "[12:34:56]");
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[2].content, "[INFO]");
+        assert_eq!(spans[2].style.fg, Some(Color::Green));
+        assert_eq!(
+            spans[4].content,
+            "ferro_wg_core::tunnel::mod: Connection abc is up"
+        );
     }
 
-    fn update(&mut self, _action: &Action, _state: &AppState) {
-        // No local state to update.
+    #[test]
+    fn test_parse_log_line_error_level() {
+        let line = "12:34:56 ERROR ferro_wg_core::error: Failed to connect";
+        let spans = LogsComponent::parse_log_line(line);
+
+        assert_eq!(spans.len(), 5);
+        assert_eq!(spans[2].content, "[ERROR]");
+        assert_eq!(spans[2].style.fg, Some(Color::Red));
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
-        let theme = &state.theme;
+    #[test]
+    fn test_parse_log_line_warn_level() {
+        let line = "12:34:56 WARN ferro_wg_core::tunnel: Handshake timeout";
+        let spans = LogsComponent::parse_log_line(line);
 
-        let Ok(log_lines) = state.log_lines.lock() else {
-            warn!("Log buffer mutex poisoned, showing empty logs");
-            return;
-        };
-        let lines: Vec<Line> = if log_lines.is_empty() {
-            vec![Line::from(Span::styled(
-                "(no log entries yet)",
-                Style::default().fg(theme.muted),
-            ))]
-        } else {
-            log_lines.iter().map(|l| Line::from(l.clone())).collect()
-        };
-        drop(log_lines); // Release lock
+        assert_eq!(spans.len(), 5);
+        assert_eq!(spans[2].content, "[WARN]");
+        assert_eq!(spans[2].style.fg, Some(Color::Yellow));
+    }
 
-        let paragraph = Paragraph::new(lines).block(theme.panel_block("Logs"));
-        frame.render_widget(paragraph, area);
+    #[test]
+    fn test_parse_log_line_debug_level() {
+        let line = "12:34:56 DEBUG ferro_wg_core::stats: Packet count: 42";
+        let spans = LogsComponent::parse_log_line(line);
+
+        assert_eq!(spans.len(), 5);
+        assert_eq!(spans[2].content, "[DEBUG]");
+        assert_eq!(spans[2].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn test_parse_log_line_legacy_format() {
+        let line = "INFO ferro_wg_core::tunnel::mod: Connection abc is up";
+        let spans = LogsComponent::parse_log_line(line);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, line);
+    }
+
+    #[test]
+    fn test_parse_log_line_malformed() {
+        let line = "some random log message";
+        let spans = LogsComponent::parse_log_line(line);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, line);
     }
 }
