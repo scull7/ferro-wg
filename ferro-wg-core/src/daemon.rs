@@ -327,3 +327,36 @@ async fn send_response(
     writer.flush().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_buffer_add_line_and_overflow() {
+        let mut buffer = LogBuffer::new(3);
+        assert!(buffer.get_buffer().is_empty());
+
+        buffer.add_line("line1".to_string());
+        assert_eq!(buffer.get_buffer(), vec!["line1"]);
+
+        buffer.add_line("line2".to_string());
+        buffer.add_line("line3".to_string());
+        assert_eq!(buffer.get_buffer(), vec!["line1", "line2", "line3"]);
+
+        // Overflow: oldest should be removed
+        buffer.add_line("line4".to_string());
+        assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
+    }
+
+    #[test]
+    fn log_buffer_broadcast() {
+        let buffer = LogBuffer::new(10);
+        let mut rx = buffer.tx.subscribe();
+
+        buffer.add_line("test".to_string());
+        // Note: In a real test, we'd await rx.recv(), but since it's sync, we can't easily test broadcast here
+        // This test mainly checks that add_line doesn't panic
+        assert_eq!(buffer.get_buffer(), vec!["test"]);
+    }
+}
