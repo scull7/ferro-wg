@@ -32,13 +32,25 @@ pub struct LogsComponent {
 
 /// Scroll state for the logs component.
 #[derive(Debug, Clone)]
-pub struct ScrollState {
+pub(crate) struct ScrollState {
     /// The index of the first visible log line in the `log_lines` `VecDeque`.
-    pub offset: usize,
+    pub(crate) offset: usize,
     /// Whether to automatically scroll to the bottom when new logs are added.
-    pub auto_scroll: bool,
+    pub(crate) auto_scroll: bool,
     /// The number of lines that fit in the current view area.
-    pub view_height: usize,
+    pub(crate) view_height: usize,
+}
+
+impl Default for ScrollState {
+    /// Creates a `ScrollState` with auto-scroll enabled so the component
+    /// tracks the bottom of the log until the user manually scrolls away.
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            auto_scroll: true,
+            view_height: 0,
+        }
+    }
 }
 
 impl LogsComponent {
@@ -193,11 +205,7 @@ impl LogsComponent {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            scroll_state: ScrollState {
-                offset: 0,
-                auto_scroll: true,
-                view_height: 0,
-            },
+            scroll_state: ScrollState::default(),
         }
     }
 }
