@@ -27,7 +27,6 @@ criterion = "0.5"
 [[bench]]
 name = "log_parsing"
 harness = false
-ferro-wg-core = { path = "../ferro-wg-core" }
 
 [lints]
 workspace = true
