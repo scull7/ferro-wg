@@ -43,11 +43,15 @@ impl LogsComponent {
         // Expected format: `HH:MM:SS LEVEL target: message`
         // Detect timestamp by positions: digits at 0-1, ':' at 2, digits at 3-4,
         // ':' at 5, digits at 6-7, ' ' at 8.
-        let has_timestamp = line.len() >= 9
-            && line.as_bytes().get(2) == Some(&b':')
-            && line.as_bytes().get(5) == Some(&b':')
-            && line.as_bytes().get(8) == Some(&b' ')
-            && line[0..8].chars().all(|c| c.is_ascii_digit() || c == ':');
+        // Byte indexing is safe and correct here: the timestamp is always ASCII,
+        // so each byte corresponds to exactly one character, and matching ASCII
+        // literals rules out any multi-byte UTF-8 continuation bytes.
+        let bytes = line.as_bytes();
+        let has_timestamp = bytes.len() >= 9
+            && bytes[2] == b':'
+            && bytes[5] == b':'
+            && bytes[8] == b' '
+            && bytes[0..8].iter().all(|&b| b.is_ascii_digit() || b == b':');
 
         if has_timestamp {
             let timestamp = &line[0..8];
