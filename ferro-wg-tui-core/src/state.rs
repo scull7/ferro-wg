@@ -193,8 +193,15 @@ impl AppState {
             self.connections.get_mut(self.selected_connection)
         }
 
-        /// Handle UI-related actions (tabs, search, quit).
-        fn handle_ui_action(&mut self, action: &Action) {
+        /// Dispatch an action to update the application state.
+        ///
+        /// This is the central hub for all state mutations. After dispatch
+        /// returns, the caller should forward the action to all components
+        /// via [`Component::update()`](crate::component::Component::update).
+        ///
+        /// `SelectConnection(i)` with an out-of-bounds index is silently
+        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
+        pub fn dispatch(&mut self, action: &Action) {
             match action {
                 Action::Quit => self.running = false,
                 Action::NextTab => self.active_tab = self.active_tab.next(),
@@ -213,13 +220,6 @@ impl AppState {
                 Action::SearchBackspace => {
                     self.search_query.pop();
                 }
-                _ => {}
-            }
-        }
-
-        /// Handle connection selection actions.
-        fn handle_connection_action(&mut self, action: &Action) {
-            match action {
                 Action::SelectNextConnection => {
                     if !self.connections.is_empty() {
                         self.selected_connection =
@@ -248,20 +248,13 @@ impl AppState {
                         self.search_query.clear();
                     }
                 }
-                _ => {}
-            }
-        }
-
-        /// Handle daemon integration actions.
-        fn handle_daemon_action(&mut self, action: &Action) {
-            match action {
                 Action::UpdatePeers(statuses) => {
                     self.daemon_connected = true;
                     for s in statuses {
-                        if let Some(conn) = self
-                            .connections
-                            .iter_mut()
-                            .find(|c| c.name == s.connection_name)
+                    if let Some(conn) = self
+                        .connections
+                        .iter_mut()
+                        .find(|c| c.name == s.name)
                         {
                             let state = if s.connected {
                                 ConnectionState::Connected
@@ -276,7 +269,7 @@ impl AppState {
                                 interface: s.interface.clone(),
                             });
                         } else {
-                            warn!(connection_name = %s.name, "UpdatePeers received status for unknown connection");
+                            warn!(name = %s.name, "UpdatePeers received status for unknown connection");
                         }
                     }
                     // Clamp in case connections changed (defensive; static in Phase 2).
@@ -293,51 +286,38 @@ impl AppState {
                 Action::DaemonError(msg) => {
                     self.feedback = Some(Feedback::error(msg.clone()));
                 }
-                _ => {}
-            }
-        }
-
-        /// Handle row navigation actions.
-        fn handle_navigation_action(&mut self, action: &Action) {
-            match action {
                 Action::NextRow => {
                     if let Some(conn) = self.active_connection_mut() {
                         let max = conn.config.peers.len().saturating_sub(1);
                         conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
                     }
                 }
-                Action::PrevRow => {
-                    if let Some(conn) = self.active_connection_mut() {
-                        conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
-                    }
-                }
-                _ => {}
+            Action::PrevRow => {
+                if let Some(conn) = self.active_connection_mut() {
+                    conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
             }
-        }
 
-        /// Dispatch an action to update the application state.
-        ///
-        /// This is the central hub for all state mutations. After dispatch
-        /// returns, the caller should forward the action to all components
-        /// via [`Component::update()`](crate::component::Component::update).
-        ///
-        /// `SelectConnection(i)` with an out-of-bounds index is silently
-        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
-        /// Dispatch an action to update the application state.
-        ///
-        /// This is the central hub for all state mutations. After dispatch
-        /// returns, the caller should forward the action to all components
-        /// via [`Component::update()`](crate::component::Component::update).
-        ///
-        /// `SelectConnection(i)` with an out-of-bounds index is silently
-        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
-        pub fn dispatch(&mut self, action: &Action) {
-            self.handle_ui_action(action);
-            self.handle_connection_action(action);
-            self.handle_daemon_action(action);
-            self.handle_navigation_action(action);
             // Tick and peer commands are handled by components or the event loop.
+            Action::Tick
+            | Action::ConnectPeer(_)
+            | Action::DisconnectPeer(_)
+            | Action::CyclePeerBackend(_) => {}
         }
+                }
+        // Tick and peer commands are handled by components or the event loop.
+    }
+    }
+        /// This is the central hub for all state mutations. After dispatch
+        /// returns, the caller should forward the action to all components
+        /// via [`Component::update()`](crate::component::Component::update).
+        ///
+        /// `SelectConnection(i)` with an out-of-bounds index is silently
+        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
+        /// Dispatch an action to update the application state.
+        ///
+        /// This is the central hub for all state mutations. After dispatch
+        /// returns, the caller should forward the action to all components
+        /// via [`Component::update()`](crate::component::Component::update).
     }
 
     /// Clear expired feedback messages. Called on each tick.
@@ -425,7 +405,7 @@ mod tests {
 
     fn make_peer_status(name: &str, connected: bool) -> PeerStatus {
         PeerStatus {
-            connection_name: name.into(),
+            name: name.into(),
             connected,
             backend: BackendKind::Boringtun,
             stats: TunnelStats::default(),

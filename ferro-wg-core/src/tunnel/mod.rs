@@ -272,7 +272,7 @@ impl TunnelManager {
                 let active = self.connections.get(name);
                 let first_peer = wg_config.peers.first();
                 PeerStatus {
-                    connection_name: name.clone(),
+                    name: name.clone(),
                     connected: active.is_some(),
                     backend: active.map_or(BackendKind::Boringtun, |c| c.backend_kind),
                     stats: active

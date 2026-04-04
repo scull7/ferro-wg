@@ -57,7 +57,7 @@ pub enum DaemonResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerStatus {
     /// The connection's configured name (matches `AppConfig` connection keys).
-    pub connection_name: String,
+    pub name: String,
     /// Whether the tunnel is connected.
     pub connected: bool,
     /// Which backend is active.
