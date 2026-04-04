@@ -398,7 +398,10 @@ pub async fn run(
 #### Daemon binary wiring (`ferro-wg-daemon/src/main.rs`, `ferro-wg/src/cli.rs`)
 
 ```rust
-let broadcaster = LogBroadcaster::new(512, 200);
+let broadcaster = LogBroadcaster::new(
+    512, // BROADCAST_CAP: balances mem vs lag for ~20 logs/sec bursts
+    200, // HISTORY_CAP: ~10s of history at typical rate
+);
 let layer = TuiTracingLayer::new(Arc::clone(&broadcaster));
 tracing_subscriber::registry()
     .with(tracing_subscriber::fmt::layer())  // existing stderr logging
