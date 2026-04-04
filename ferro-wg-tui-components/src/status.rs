@@ -104,22 +104,22 @@ impl Component for StatusComponent {
         let header = Row::new(vec!["Peer", "Endpoint", "Status", "Rx", "Tx", "Handshake"])
             .style(theme.header_style());
 
-        let rows: Vec<Row<'static>> = state
+        let (status_str, status_style): (&'static str, Style) = if is_connected {
+            ("connected", Style::default().fg(theme.success))
+        } else {
+            ("down", Style::default().fg(theme.muted))
+        };
+
+        let rows: Vec<Row<'_>> = state
             .filtered_peers()
             .map(|p| {
-                let (status_str, status_style): (String, Style) = if is_connected {
-                    ("connected".into(), Style::default().fg(theme.success))
-                } else {
-                    ("down".into(), Style::default().fg(theme.muted))
-                };
-
                 Row::new(vec![
-                    Cell::from(p.name.clone()),
-                    Cell::from(p.endpoint.clone().unwrap_or_else(|| "-".into())),
+                    Cell::from(p.name.as_str()),
+                    Cell::from(p.endpoint.as_deref().unwrap_or("-")),
                     Cell::from(status_str).style(status_style),
-                    Cell::from(rx.clone()),
-                    Cell::from(tx.clone()),
-                    Cell::from(hs.clone()),
+                    Cell::from(rx.as_str()),
+                    Cell::from(tx.as_str()),
+                    Cell::from(hs.as_str()),
                 ])
             })
             .collect();

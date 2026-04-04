@@ -124,7 +124,7 @@ impl Component for ConnectionBarComponent {
             }
         };
 
-        let mut spans: Vec<Span<'static>> = vec![
+        let mut spans: Vec<Span<'_>> = vec![
             Span::raw(" Connections: "),
             Span::styled("◀  ", arrow_style(can_scroll_left)),
         ];
@@ -154,7 +154,7 @@ impl Component for ConnectionBarComponent {
             };
 
             spans.push(Span::raw(format!("[{}] ", i + 1)));
-            spans.push(Span::styled(conn.name.clone(), name_style));
+            spans.push(Span::styled(conn.name.as_str(), name_style));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(indicator, ind_style));
             spans.push(Span::raw("  "));

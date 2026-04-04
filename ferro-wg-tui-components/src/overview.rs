@@ -82,20 +82,17 @@ impl Component for OverviewComponent {
         ])
         .style(theme.header_style());
 
-        let rows: Vec<Row<'static>> = state
+        let rows: Vec<Row<'_>> = state
             .connections
             .iter()
             .enumerate()
             .map(|(i, conn)| {
-                let (status_str, status_style) = match &conn.status {
-                    None => ("—".to_owned(), Style::default().fg(theme.muted)),
+                let (status_str, status_style): (&'static str, Style) = match &conn.status {
+                    None => ("—", Style::default().fg(theme.muted)),
                     Some(s) if s.state == ConnectionState::Connected => {
-                        ("● Connected".to_owned(), Style::default().fg(theme.success))
+                        ("● Connected", Style::default().fg(theme.success))
                     }
-                    Some(_) => (
-                        "○ Disconnected".to_owned(),
-                        Style::default().fg(theme.muted),
-                    ),
+                    Some(_) => ("○ Disconnected", Style::default().fg(theme.muted)),
                 };
 
                 let backend = conn
@@ -130,7 +127,7 @@ impl Component for OverviewComponent {
 
                 Row::new(vec![
                     Cell::from(format!("{}", i + 1)),
-                    Cell::from(conn.name.clone()),
+                    Cell::from(conn.name.as_str()),
                     Cell::from(status_str).style(status_style),
                     Cell::from(backend),
                     Cell::from(interface),
