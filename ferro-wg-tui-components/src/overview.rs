@@ -255,6 +255,23 @@ mod tests {
             .collect()
     }
 
+    // ── Column percentage validation ───────────────────────────────────────────
+
+    #[test]
+    fn overview_column_widths_sum_to_100() {
+        assert_eq!(
+            COL_NAME_W
+                + COL_STATUS_W
+                + COL_BACKEND_W
+                + COL_IFACE_W
+                + COL_TX_W
+                + COL_RX_W
+                + COL_HANDSHAKE_W,
+            100,
+            "overview column percentages must sum to 100"
+        );
+    }
+
     #[test]
     fn overview_renders_all_connections() {
         let state = three_connection_state();

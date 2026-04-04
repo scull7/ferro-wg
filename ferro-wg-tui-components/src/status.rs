@@ -286,6 +286,17 @@ mod tests {
         ]))
     }
 
+    // ── Column percentage validation ───────────────────────────────────────────
+
+    #[test]
+    fn status_column_widths_sum_to_100() {
+        assert_eq!(
+            COL_PEER_W + COL_ENDPOINT_W + COL_ALLOWED_W + COL_KEEPALIVE_W,
+            100,
+            "status column percentages must sum to 100"
+        );
+    }
+
     #[test]
     fn handle_key_row_navigation() {
         let mut comp = StatusComponent::new();
