@@ -126,8 +126,11 @@ fn reload_config(manager: &mut TunnelManager, config_path: &Path) {
 /// Dispatch a command to the tunnel manager and produce a response.
 async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> DaemonResponse {
     match command {
-        DaemonCommand::Up { peer_name, backend } => {
-            let result = match peer_name {
+        DaemonCommand::Up {
+            connection_name,
+            backend,
+        } => {
+            let result = match connection_name {
                 Some(name) => manager.up(&name, backend).await,
                 None => manager.up_all(backend).await,
             };
@@ -136,8 +139,8 @@ async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> 
                 Err(e) => DaemonResponse::Error(e.to_string()),
             }
         }
-        DaemonCommand::Down { peer_name } => {
-            if let Some(name) = peer_name {
+        DaemonCommand::Down { connection_name } => {
+            if let Some(name) = connection_name {
                 match manager.down(&name) {
                     Ok(()) => DaemonResponse::Ok,
                     Err(e) => DaemonResponse::Error(e.to_string()),
@@ -148,11 +151,14 @@ async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> 
             }
         }
         DaemonCommand::Status => DaemonResponse::Status(manager.status()),
-        DaemonCommand::SwitchBackend { peer_name, backend } => {
-            if let Err(e) = manager.down(&peer_name) {
+        DaemonCommand::SwitchBackend {
+            connection_name,
+            backend,
+        } => {
+            if let Err(e) = manager.down(&connection_name) {
                 warn!("Down before switch: {e}");
             }
-            match manager.up(&peer_name, backend).await {
+            match manager.up(&connection_name, backend).await {
                 Ok(()) => DaemonResponse::Ok,
                 Err(e) => DaemonResponse::Error(e.to_string()),
             }

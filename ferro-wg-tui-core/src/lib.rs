@@ -21,4 +21,4 @@ pub use app::{InputMode, Tab};
 pub use component::Component;
 pub use state::{AppState, ConnectionState, ConnectionStatus, ConnectionView, Feedback};
 pub use theme::Theme;
-pub use util::format_bytes;
+pub use util::{format_bytes, format_handshake_age};

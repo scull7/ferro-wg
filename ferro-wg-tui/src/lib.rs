@@ -24,13 +24,37 @@ use ferro_wg_core::client;
 use ferro_wg_core::config::AppConfig;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
+use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_WIDTH};
+use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
+use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
-    CompareComponent, ConfigComponent, LogsComponent, PeersComponent, StatusBarComponent,
-    StatusComponent, TabBarComponent,
+    CompareComponent, ConfigComponent, ConnectionBarComponent, LogsComponent, OverviewComponent,
+    PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
 use event::{AppEvent, EventHandler};
+
+/// Minimum rows reserved for the main content area.
+///
+/// Policy constant: ensures the content pane is never squeezed to zero rows
+/// when the connection bar is shown.
+const MIN_CONTENT_HEIGHT: u16 = 1;
+
+/// Minimum terminal height at which the connection bar is shown.
+///
+/// Derived directly from each component's own height measurement so this
+/// threshold automatically tracks any layout changes to surrounding
+/// components.  Below this value the bar is suppressed so the content area
+/// never collapses below [`MIN_CONTENT_HEIGHT`].
+const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 =
+    TAB_BAR_HEIGHT + CONNECTION_BAR_HEIGHT + MIN_CONTENT_HEIGHT + STATUS_BAR_HEIGHT;
+
+/// Minimum terminal width at which the connection bar is shown.
+///
+/// Delegates to [`MIN_USEFUL_WIDTH`] so this threshold stays in sync with any
+/// changes to the bar's prefix or indicator strings.
+const MIN_WIDTH_FOR_CONNECTION_BAR: u16 = MIN_USEFUL_WIDTH;
 
 /// Messages sent from background daemon tasks to the event loop.
 enum DaemonMessage {
@@ -66,8 +90,12 @@ fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
 ///
 /// # Errors
 ///
-/// Returns an error if terminal setup, event handling, or teardown
-/// fails.
+/// Returns an error if:
+/// - The terminal cannot be put into raw mode (`crossterm::terminal::enable_raw_mode`)
+/// - Entering or leaving the alternate screen fails (`crossterm::execute!`)
+/// - The [`Terminal`] backend cannot be created or cleared
+/// - A terminal draw call fails (e.g. the underlying writer returns an I/O error)
+/// - The event handler fails to read a terminal event
 pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
@@ -97,15 +125,16 @@ async fn event_loop(
     // Components are stored separately from AppState to avoid
     // split-borrow issues during rendering (&mut component + &state).
     let mut components: Vec<Box<dyn Component>> = vec![
-        Box::new(StatusComponent::new()), // Tab::Overview (index 0) — placeholder until OverviewComponent
-        Box::new(StatusComponent::new()), // Tab::Status (index 1)
-        Box::new(PeersComponent::new()),  // Tab::Peers (index 2)
-        Box::new(CompareComponent::new()), // Tab::Compare (index 3)
-        Box::new(ConfigComponent::new()), // Tab::Config (index 4)
-        Box::new(LogsComponent::new()),   // Tab::Logs (index 5)
+        Box::new(OverviewComponent::new()), // Tab::Overview (index 0)
+        Box::new(StatusComponent::new()),   // Tab::Status (index 1)
+        Box::new(PeersComponent::new()),    // Tab::Peers (index 2)
+        Box::new(CompareComponent::new()),  // Tab::Compare (index 3)
+        Box::new(ConfigComponent::new()),   // Tab::Config (index 4)
+        Box::new(LogsComponent::new()),     // Tab::Logs (index 5)
     ];
     let mut tab_bar = TabBarComponent::new();
     let mut status_bar = StatusBarComponent::new();
+    let mut connection_bar = ConnectionBarComponent::new();
 
     let mut events = EventHandler::new(Duration::from_millis(250));
 
@@ -146,18 +175,27 @@ async fn event_loop(
 
         // Render.
         terminal.draw(|frame| {
+            let show_bar = state.connections.len() > 1
+                && frame.area().height >= MIN_HEIGHT_FOR_CONNECTION_BAR
+                && frame.area().width >= MIN_WIDTH_FOR_CONNECTION_BAR;
+            let bar_height = u16::from(show_bar);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // Tab bar
-                    Constraint::Min(0),    // Main content
-                    Constraint::Length(3), // Status bar / search
+                    Constraint::Length(TAB_BAR_HEIGHT),    // Tab bar
+                    Constraint::Length(bar_height),        // Connection bar (0 when hidden)
+                    Constraint::Min(0),                    // Main content
+                    Constraint::Length(STATUS_BAR_HEIGHT), // Status bar / search
                 ])
                 .split(frame.area());
+            debug_assert_layout(&chunks, frame.area(), show_bar);
 
             tab_bar.render(frame, chunks[0], false, &state);
-            components[state.active_tab.index()].render(frame, chunks[1], true, &state);
-            status_bar.render(frame, chunks[2], false, &state);
+            if show_bar {
+                connection_bar.render(frame, chunks[1], false, &state);
+            }
+            components[state.active_tab.index()].render(frame, chunks[2], true, &state);
+            status_bar.render(frame, chunks[3], false, &state);
         })?;
 
         match events.next().await {
@@ -166,6 +204,7 @@ async fn event_loop(
                     status_bar.handle_key(key, &state)
                 } else {
                     handle_global_key(key)
+                        .or_else(|| connection_bar.handle_key(key, &state))
                         .or_else(|| components[state.active_tab.index()].handle_key(key, &state))
                 };
 
@@ -191,6 +230,43 @@ async fn event_loop(
     tasks.abort_all();
 
     Ok(())
+}
+
+/// Assert that the top-level layout chunks have the expected dimensions.
+///
+/// Only active in debug builds (`debug_assert!`). Called once per frame
+/// immediately after the layout split so mismatches surface in testing.
+fn debug_assert_layout(
+    chunks: &[ratatui::layout::Rect],
+    area: ratatui::layout::Rect,
+    show_bar: bool,
+) {
+    debug_assert_eq!(
+        chunks.len(),
+        4,
+        "top-level layout must yield exactly 4 chunks"
+    );
+    // Length constraints are satisfied in full when the terminal has
+    // enough rows for the two fixed chrome bands.
+    if area.height >= TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT {
+        debug_assert_eq!(
+            chunks[0].height, TAB_BAR_HEIGHT,
+            "tab bar chunk height should be {TAB_BAR_HEIGHT}, got {}",
+            chunks[0].height
+        );
+        debug_assert_eq!(
+            chunks[3].height, STATUS_BAR_HEIGHT,
+            "status bar chunk height should be {STATUS_BAR_HEIGHT}, got {}",
+            chunks[3].height
+        );
+    }
+    if show_bar {
+        debug_assert_eq!(
+            chunks[1].height, CONNECTION_BAR_HEIGHT,
+            "connection bar chunk height should be {CONNECTION_BAR_HEIGHT}, got {}",
+            chunks[1].height
+        );
+    }
 }
 
 /// Dispatch an action to `AppState` and all components.
@@ -224,9 +300,6 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('4') => Some(Action::SelectTab(Tab::Compare)),
         KeyCode::Char('5') => Some(Action::SelectTab(Tab::Config)),
         KeyCode::Char('6') => Some(Action::SelectTab(Tab::Logs)),
-        // Connection selection.
-        KeyCode::Char('[') => Some(Action::SelectPrevConnection),
-        KeyCode::Char(']') => Some(Action::SelectNextConnection),
         KeyCode::Char('/') => Some(Action::EnterSearch),
         _ => None,
     }
@@ -268,20 +341,20 @@ fn maybe_spawn_command(
     let (cmd, description) = match action {
         Action::ConnectPeer(name) => (
             DaemonCommand::Up {
-                peer_name: Some(name.clone()),
+                connection_name: Some(name.clone()),
                 backend: BackendKind::Boringtun,
             },
             format!("Brought up: {name}"),
         ),
         Action::DisconnectPeer(name) => (
             DaemonCommand::Down {
-                peer_name: Some(name.clone()),
+                connection_name: Some(name.clone()),
             },
             format!("Tore down: {name}"),
         ),
         Action::CyclePeerBackend(name) => (
             DaemonCommand::SwitchBackend {
-                peer_name: name.clone(),
+                connection_name: name.clone(),
                 backend: BackendKind::Neptun, // TODO: cycle through available backends
             },
             format!("Switched backend: {name}"),

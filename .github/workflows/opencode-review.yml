@@ -26,6 +26,7 @@ jobs:
           use_github_token: true
           prompt: |
             Review this pull request:
+            - Only post a review comment. Do NOT create branches, commit changes, or push anything
             - Use the rust-code-reviewer skill
             - Be ruthless and unapologetic
             - Check for code quality issues
