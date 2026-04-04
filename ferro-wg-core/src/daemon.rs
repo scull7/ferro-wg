@@ -406,13 +406,21 @@ mod tests {
     }
 
     #[test]
-    fn log_buffer_broadcast() {
-        let buffer = LogBuffer::new(10);
+    fn log_buffer_broadcast_capacity() {
+        let buffer = LogBuffer::new(3);
         let _rx = buffer.tx.subscribe();
 
-        buffer.add_line("test".to_string());
-        // Note: In a real test, we'd await rx.recv(), but since it's sync, we can't easily test broadcast here
-        // This test mainly checks that add_line doesn't panic
-        assert_eq!(buffer.get_buffer(), vec!["test"]);
+        // Add lines up to capacity
+        buffer.add_line("line1".to_string());
+        buffer.add_line("line2".to_string());
+        buffer.add_line("line3".to_string());
+        assert_eq!(buffer.get_buffer(), vec!["line1", "line2", "line3"]);
+
+        // Overflow: should evict oldest
+        buffer.add_line("line4".to_string());
+        assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
+
+        // Check broadcast capacity matches buffer
+        assert_eq!(buffer.tx.max_capacity(), 3);
     }
 }
