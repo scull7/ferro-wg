@@ -79,10 +79,19 @@ struct LogVisitor(String);
 impl tracing::field::Visit for LogVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.0 = format!("{value:?}").trim_matches('"').to_string();
+            self.0 = format!("{:?}", value);
+            if self.0.starts_with('"') && self.0.ends_with('"') {
+                self.0 = self.0[1..self.0.len() - 1].to_string();
+            }
         }
     }
-}
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0 = value.to_string();
+        }
+        }
+    }
 
 impl<S> Layer<S> for LogBuffer
 where
@@ -151,7 +160,8 @@ async fn handle_stream_logs(
     let buf = log_buffer.get_buffer();
     for line in buf {
         let resp = DaemonResponse::LogLine(line);
-        if send_response(&mut writer, &resp).await.is_err() {
+        if let Err(e) = send_response(&mut writer, &resp).await {
+            warn!("Failed to send buffered log line: {e}");
             return Ok(());
         }
     }
@@ -161,7 +171,8 @@ async fn handle_stream_logs(
         match rx.recv().await {
             Ok(line) => {
                 let resp = DaemonResponse::LogLine(line);
-                if send_response(&mut writer, &resp).await.is_err() {
+                if let Err(e) = send_response(&mut writer, &resp).await {
+                    warn!("Failed to send streamed log line: {e}");
                     break;
                 }
             }
@@ -355,7 +366,10 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             }
         }
         DaemonCommand::Shutdown => DaemonResponse::Ok,
-        DaemonCommand::StreamLogs => unreachable!("StreamLogs handled in server loop"),
+        DaemonCommand::StreamLogs => {
+            warn!("StreamLogs command received in handle_command, should be handled separately");
+            DaemonResponse::Error("StreamLogs not supported here".to_string())
+        }
     }
 }
 
