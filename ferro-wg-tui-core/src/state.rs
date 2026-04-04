@@ -166,6 +166,14 @@ impl AppState {
         }
     }
 
+    /// Returns the currently focused connection, if any.
+    ///
+    /// Returns `None` when `connections` is empty.
+    #[must_use]
+    pub fn active_connection(&self) -> Option<&ConnectionView> {
+        self.connections.get(self.selected_connection)
+    }
+
     /// Append a log line to the log buffer, maintaining bounded size.
     pub fn append_log(&self, line: String) {
         match self.log_lines.lock() {
@@ -179,125 +187,114 @@ impl AppState {
                 warn!("Log buffer mutex poisoned, skipping log append");
             }
         }
+    }
 
-
-
-        /// Dispatch an action to update the application state.
-        ///
-        /// This is the central hub for all state mutations. After dispatch
-        /// returns, the caller should forward the action to all components
-        /// via [`Component::update()`](crate::component::Component::update).
-        ///
-        /// `SelectConnection(i)` with an out-of-bounds index is silently
-        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
+    /// Dispatch an action to update the application state.
+    ///
+    /// This is the central hub for all state mutations. After dispatch
+    /// returns, the caller should forward the action to all components
+    /// via [`Component::update()`](crate::component::Component::update).
+    ///
+    /// `SelectConnection(i)` with an out-of-bounds index is silently
+    /// ignored and emits a `tracing::warn!` log entry; it does not panic.
     pub fn dispatch(&mut self, action: &Action) {
-        if let Action::Quit = action {
-            self.running = false;
-        }
-        if let Action::NextTab = action {
-            self.active_tab = self.active_tab.next();
-        }
-        if let Action::PrevTab = action {
-            self.active_tab = self.active_tab.prev();
-        }
-        if let Action::SelectTab(tab) = action {
-            self.active_tab = *tab;
-        }
-        if let Action::EnterSearch = action {
-            self.input_mode = InputMode::Search;
-            self.search_query.clear();
-        }
-        if let Action::ExitSearch = action {
-            self.input_mode = InputMode::Normal;
-        }
-        if let Action::ClearSearch = action {
-            self.input_mode = InputMode::Normal;
-            self.search_query.clear();
-        }
-        if let Action::SearchInput(c) = action {
-            self.search_query.push(*c);
-        }
-        if let Action::SearchBackspace = action {
-            self.search_query.pop();
-        }
-        if let Action::SelectNextConnection = action {
-            if !self.connections.is_empty() {
-                self.selected_connection =
-                    (self.selected_connection + 1) % self.connections.len();
+        match action {
+            Action::Quit => self.running = false,
+            Action::NextTab => self.active_tab = self.active_tab.next(),
+            Action::PrevTab => self.active_tab = self.active_tab.prev(),
+            Action::SelectTab(tab) => self.active_tab = *tab,
+            Action::EnterSearch => {
+                self.input_mode = InputMode::Search;
                 self.search_query.clear();
             }
-        }
-        if let Action::SelectPrevConnection = action {
-            if !self.connections.is_empty() {
-                self.selected_connection = self
-                    .selected_connection
-                    .checked_sub(1)
-                    .unwrap_or(self.connections.len() - 1);
+            Action::ExitSearch => self.input_mode = InputMode::Normal,
+            Action::ClearSearch => {
+                self.input_mode = InputMode::Normal;
                 self.search_query.clear();
             }
-        }
-        if let Action::SelectConnection(i) = action {
-            if *i >= self.connections.len() {
-                warn!(
-                    i,
-                    len = self.connections.len(),
-                    "SelectConnection index out of bounds; ignoring"
-                );
-            } else {
-                self.selected_connection = *i;
-                self.search_query.clear();
+            Action::SearchInput(c) => self.search_query.push(*c),
+            Action::SearchBackspace => {
+                self.search_query.pop();
             }
-        }
-        if let Action::UpdatePeers(statuses) = action {
-            self.daemon_connected = true;
-            for s in statuses {
-                if let Some(conn) = self
-                    .connections
-                    .iter_mut()
-                    .find(|c| c.name == s.name)
-                {
-                    let state = if s.connected {
-                        ConnectionState::Connected
-                    } else {
-                        ConnectionState::Disconnected
-                    };
-                    conn.status = Some(ConnectionStatus {
-                        state,
-                        backend: s.backend,
-                        stats: s.stats.clone(),
-                        endpoint: s.endpoint.clone(),
-                        interface: s.interface.clone(),
-                    });
-                } else {
-                    warn!(name = %s.name, "UpdatePeers received status for unknown connection");
+            Action::SelectNextConnection => {
+                if !self.connections.is_empty() {
+                    self.selected_connection =
+                        (self.selected_connection + 1) % self.connections.len();
+                    self.search_query.clear();
                 }
             }
-            // Clamp in case connections changed (defensive; static in Phase 2).
-            self.selected_connection = self
-                .selected_connection
-                .min(self.connections.len().saturating_sub(1));
-        }
-        if let Action::DaemonConnectivityChanged(connected) = action {
-            self.daemon_connected = *connected;
-        }
-        if let Action::DaemonOk(msg) = action {
-            self.feedback = Some(Feedback::success(msg.clone()));
-        }
-        if let Action::DaemonError(msg) = action {
-            self.feedback = Some(Feedback::error(msg.clone()));
-        }
-        if let Action::NextRow = action {
-            if let Some(conn) = self.connections.get_mut(self.selected_connection) {
-                let max = conn.config.peers.len().saturating_sub(1);
-                conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
+            Action::SelectPrevConnection => {
+                if !self.connections.is_empty() {
+                    self.selected_connection = self
+                        .selected_connection
+                        .checked_sub(1)
+                        .unwrap_or(self.connections.len() - 1);
+                    self.search_query.clear();
+                }
             }
-        }
-        if let Action::PrevRow = action {
-            if let Some(conn) = self.connections.get_mut(self.selected_connection) {
-                conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
+            Action::SelectConnection(i) => {
+                if *i >= self.connections.len() {
+                    warn!(
+                        i,
+                        len = self.connections.len(),
+                        "SelectConnection index out of bounds; ignoring"
+                    );
+                } else {
+                    self.selected_connection = *i;
+                    self.search_query.clear();
+                }
             }
+            Action::UpdatePeers(statuses) => {
+                self.daemon_connected = true;
+                for s in statuses {
+                    if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
+                        let state = if s.connected {
+                            ConnectionState::Connected
+                        } else {
+                            ConnectionState::Disconnected
+                        };
+                        conn.status = Some(ConnectionStatus {
+                            state,
+                            backend: s.backend,
+                            stats: s.stats.clone(),
+                            endpoint: s.endpoint.clone(),
+                            interface: s.interface.clone(),
+                        });
+                    } else {
+                        warn!(name = %s.name, "UpdatePeers received status for unknown connection");
+                    }
+                }
+                // Clamp in case connections changed (defensive; static in Phase 2).
+                self.selected_connection = self
+                    .selected_connection
+                    .min(self.connections.len().saturating_sub(1));
+            }
+            Action::DaemonConnectivityChanged(connected) => {
+                self.daemon_connected = *connected;
+            }
+            Action::DaemonOk(msg) => {
+                self.feedback = Some(Feedback::success(msg.clone()));
+            }
+            Action::DaemonError(msg) => {
+                self.feedback = Some(Feedback::error(msg.clone()));
+            }
+            Action::NextRow => {
+                if let Some(conn) = self.connections.get_mut(self.selected_connection) {
+                    let max = conn.config.peers.len().saturating_sub(1);
+                    conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
+                }
+            }
+            Action::PrevRow => {
+                if let Some(conn) = self.connections.get_mut(self.selected_connection) {
+                    conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
+                }
+            }
+            // Tick and peer commands are handled by components or the event loop.
+            Action::Tick
+            | Action::ConnectPeer(_)
+            | Action::DisconnectPeer(_)
+            | Action::CyclePeerBackend(_) => {}
         }
-        // Tick and peer commands are handled by components or the event loop.
     }
 
     /// Clear expired feedback messages. Called on each tick.

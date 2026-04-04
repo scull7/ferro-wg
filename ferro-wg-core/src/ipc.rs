@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn response_status_roundtrip() {
         let resp = DaemonResponse::Status(vec![PeerStatus {
-            connection_name: "mia".into(),
+            name: "mia".into(),
             connected: true,
             backend: BackendKind::Neptun,
             stats: TunnelStats::default(),
@@ -134,7 +134,7 @@ mod tests {
         let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
         if let DaemonResponse::Status(peers) = decoded {
             assert_eq!(peers.len(), 1);
-            assert_eq!(peers[0].connection_name, "mia");
+            assert_eq!(peers[0].name, "mia");
             assert!(peers[0].connected);
             assert_eq!(peers[0].interface.as_deref(), Some("utun4"));
         } else {

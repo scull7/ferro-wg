@@ -9,9 +9,10 @@ mod server;
 use std::path::PathBuf;
 
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt};
-
-use ferro_wg_core::daemon::LogBuffer;
+use ferro_wg_core::daemon::{LogBuffer, LogLayer};
+use tokio::sync::mpsc;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, Layer};
 
 /// Privileged `WireGuard` tunnel daemon.
 #[derive(Debug, Parser)]
@@ -40,10 +41,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => "trace",
     };
 
+    // Bounded channel: sender blocks under backpressure instead of dropping messages.
+    let (log_tx, log_rx) = mpsc::channel::<String>(4096);
     let log_buffer = LogBuffer::new(1000);
+
+    // Spawn broadcaster task to isolate async I/O from the tracing layer.
+    let log_buffer_for_broadcast = log_buffer.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                let lines = log_buffer_for_broadcast.drain_logs();
+                for line in lines {
+                    if log_tx.send(line).await.is_err() {
+                        // Receiver dropped; daemon is shutting down.
+                        return;
+                    }
+                }
+            }
+        });
+    });
+
     let subscriber = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::new(filter)))
-        .with(log_buffer.clone());
+        .with(LogLayer::new(log_buffer.clone()));
     tracing::subscriber::set_global_default(subscriber).expect("set global subscriber");
 
     // Load config.

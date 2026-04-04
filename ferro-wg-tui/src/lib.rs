@@ -7,9 +7,10 @@
 
 mod event;
 
+use std::collections::VecDeque;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -69,13 +70,45 @@ enum DaemonMessage {
     Unreachable,
 }
 
+/// All TUI components, grouped to reduce function parameter counts.
+///
+/// Components are split into tab content (`tabs`) and fixed chrome
+/// (`tab_bar`, `status_bar`, `connection_bar`).  The index into `tabs`
+/// corresponds to [`Tab::index()`](ferro_wg_tui_core::Tab).
+struct ComponentBundle {
+    /// Tab content components in tab-index order.
+    tabs: Vec<Box<dyn Component>>,
+    /// Fixed chrome: top tab navigation bar.
+    tab_bar: TabBarComponent,
+    /// Fixed chrome: bottom status / search bar.
+    status_bar: StatusBarComponent,
+    /// Optional chrome: multi-connection selector bar.
+    connection_bar: ConnectionBarComponent,
+}
+
+impl ComponentBundle {
+    fn new() -> Self {
+        Self {
+            tabs: vec![
+                Box::new(OverviewComponent::new()), // Tab::Overview (index 0)
+                Box::new(StatusComponent::new()),   // Tab::Status (index 1)
+                Box::new(PeersComponent::new()),    // Tab::Peers (index 2)
+                Box::new(CompareComponent::new()),  // Tab::Compare (index 3)
+                Box::new(ConfigComponent::new()),   // Tab::Config (index 4)
+                Box::new(LogsComponent::new()),     // Tab::Logs (index 5)
+            ],
+            tab_bar: TabBarComponent::new(),
+            status_bar: StatusBarComponent::new(),
+            connection_bar: ConnectionBarComponent::new(),
+        }
+    }
+}
+
 /// Process pending daemon messages and dispatch actions.
 fn handle_daemon_messages(
     daemon_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
     state: &mut AppState,
-    components: &mut [Box<dyn Component>],
-    tab_bar: &mut TabBarComponent,
-    status_bar: &mut StatusBarComponent,
+    bundle: &mut ComponentBundle,
 ) {
     while let Ok(msg) = daemon_rx.try_recv() {
         let actions: Vec<Action> = match msg {
@@ -88,66 +121,95 @@ fn handle_daemon_messages(
             ],
         };
         for action in &actions {
-            dispatch_all(state, action, components, tab_bar, status_bar);
+            dispatch_all(state, action, bundle);
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Render the UI to the terminal.
 fn render_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &AppState,
-    components: &mut [Box<dyn Component>],
-    tab_bar: &mut TabBarComponent,
-    status_bar: &mut StatusBarComponent,
-    connection_bar: &mut ConnectionBarComponent,
-    show_bar: bool,
+    bundle: &mut ComponentBundle,
     chunks: &[ratatui::layout::Rect],
+    show_bar: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     terminal.draw(|frame| {
-        tab_bar.render(frame, chunks[0], false, state);
+        bundle.tab_bar.render(frame, chunks[0], false, state);
         if show_bar {
-            connection_bar.render(frame, chunks[1], false, state);
+            bundle.connection_bar.render(frame, chunks[1], false, state);
         }
-        components[state.active_tab.index()].render(frame, chunks[2], true, state);
-        status_bar.render(frame, chunks[3], false, state);
+        bundle.tabs[state.active_tab.index()].render(frame, chunks[2], true, state);
+        bundle.status_bar.render(frame, chunks[3], false, state);
     })?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Handle a single application event.
-fn handle_app_event(
-    event: &AppEvent,
+/// Handle a key event: resolve it to an action, dispatch, and spawn any command.
+fn handle_key_event(
+    key: KeyEvent,
     state: &mut AppState,
-    components: &mut [Box<dyn Component>],
-    tab_bar: &mut TabBarComponent,
-    status_bar: &mut StatusBarComponent,
-    connection_bar: &mut ConnectionBarComponent,
+    bundle: &mut ComponentBundle,
     daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
-    poll_in_flight: &Arc<AtomicBool>,
 ) {
-    match *event {
-        AppEvent::Key(key) => {
-            let action = if state.input_mode == InputMode::Search {
-                status_bar.handle_key(key, state)
-            } else {
-                handle_global_key(key)
-                    .or_else(|| connection_bar.handle_key(key, state))
-                    .or_else(|| components[state.active_tab.index()].handle_key(key, state))
-            };
-
-            if let Some(ref action) = action {
-                dispatch_all(state, action, components, tab_bar, status_bar);
-                maybe_spawn_command(action, daemon_tx, tasks);
-            }
-        }
-        AppEvent::Tick => {
-            spawn_status_poll(daemon_tx, poll_in_flight, tasks);
-        }
+    let action = if state.input_mode == InputMode::Search {
+        bundle.status_bar.handle_key(key, state)
+    } else {
+        handle_global_key(key)
+            .or_else(|| bundle.connection_bar.handle_key(key, state))
+            .or_else(|| bundle.tabs[state.active_tab.index()].handle_key(key, state))
+    };
+    if let Some(ref action) = action {
+        dispatch_all(state, action, bundle);
+        maybe_spawn_command(action, daemon_tx, tasks);
     }
+}
+
+/// Compute the top-level layout and connection-bar visibility from the terminal area.
+fn compute_layout(
+    area: ratatui::layout::Rect,
+    connections: usize,
+) -> (Vec<ratatui::layout::Rect>, bool) {
+    let show_bar = connections > 1
+        && area.height >= MIN_HEIGHT_FOR_CONNECTION_BAR
+        && area.width >= MIN_WIDTH_FOR_CONNECTION_BAR;
+    let bar_height = u16::from(show_bar);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(TAB_BAR_HEIGHT),
+            Constraint::Length(bar_height),
+            Constraint::Min(0),
+            Constraint::Length(STATUS_BAR_HEIGHT),
+        ])
+        .split(area)
+        .to_vec();
+    debug_assert_layout(&chunks, area, show_bar);
+    (chunks, show_bar)
+}
+
+/// Spawn a background task that streams log lines from the daemon into the log buffer.
+fn spawn_log_stream(tasks: &mut JoinSet<()>, log_lines: Arc<Mutex<VecDeque<String>>>) {
+    tasks.spawn(async move {
+        let mut rx = match client::stream_logs().await {
+            Ok(rx) => rx,
+            Err(e) => {
+                warn!("Failed to stream logs: {e}");
+                return;
+            }
+        };
+        while let Some(line) = rx.recv().await {
+            let Ok(mut buf) = log_lines.lock() else {
+                warn!("Log buffer mutex poisoned, skipping log append");
+                continue;
+            };
+            if buf.len() == buf.capacity() {
+                buf.pop_front();
+            }
+            buf.push_back(line);
+        }
+    });
 }
 
 /// Convert a daemon client error into a [`DaemonMessage`].
@@ -203,119 +265,32 @@ async fn event_loop(
     app_config: AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new(app_config);
-
-    // Components are stored separately from AppState to avoid
-    // split-borrow issues during rendering (&mut component + &state).
-    let mut components: Vec<Box<dyn Component>> = vec![
-        Box::new(OverviewComponent::new()), // Tab::Overview (index 0)
-        Box::new(StatusComponent::new()),   // Tab::Status (index 1)
-        Box::new(PeersComponent::new()),    // Tab::Peers (index 2)
-        Box::new(CompareComponent::new()),  // Tab::Compare (index 3)
-        Box::new(ConfigComponent::new()),   // Tab::Config (index 4)
-        Box::new(LogsComponent::new()),     // Tab::Logs (index 5)
-    ];
-    let mut tab_bar = TabBarComponent::new();
-    let mut status_bar = StatusBarComponent::new();
-    let mut connection_bar = ConnectionBarComponent::new();
-
+    let mut bundle = ComponentBundle::new();
     let mut events = EventHandler::new(Duration::from_millis(250));
-
-    // Channel for receiving daemon responses from background tasks.
     let (daemon_tx, mut daemon_rx) = mpsc::unbounded_channel::<DaemonMessage>();
-
-    // Guard to prevent multiple concurrent status polls.
     let poll_in_flight = Arc::new(AtomicBool::new(false));
-
-    // Track background tasks for clean shutdown.
     let mut tasks = JoinSet::new();
 
-    // Spawn log streaming task.
-    let log_lines = Arc::clone(&state.log_lines);
-    tasks.spawn(async move {
-        let mut rx = match client::stream_logs().await {
-            Ok(rx) => rx,
-            Err(e) => {
-                warn!("Failed to stream logs: {e}");
-                return;
-            }
-        };
-        while let Some(line) = rx.recv().await {
-            let mut buf = match log_lines.lock() {
-                Ok(buf) => buf,
-                Err(_) => {
-                    warn!("Log buffer mutex poisoned, skipping log append");
-                    continue;
-                }
-            };
-            if buf.len() == buf.capacity() {
-                buf.pop_front();
-            }
-            buf.push_back(line);
-        }
-    });
+    spawn_log_stream(&mut tasks, Arc::clone(&state.log_lines));
 
     while state.running {
-        // Drain daemon messages (non-blocking).
-        handle_daemon_messages(
-            &mut daemon_rx,
-            &mut state,
-            &mut components,
-            &mut tab_bar,
-            &mut status_bar,
-        );
-
-        // Clear expired feedback.
+        handle_daemon_messages(&mut daemon_rx, &mut state, &mut bundle);
         state.clear_expired_feedback();
 
-        // Render.
-        let terminal_size = terminal.size()?;
-        let show_bar = state.connections.len() > 1
-            && terminal_size.height >= MIN_HEIGHT_FOR_CONNECTION_BAR
-            && terminal_size.width >= MIN_WIDTH_FOR_CONNECTION_BAR;
-        let bar_height = u16::from(show_bar);
-        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(TAB_BAR_HEIGHT),    // Tab bar
-                Constraint::Length(bar_height),        // Connection bar (0 when hidden)
-                Constraint::Min(0),                    // Main content
-                Constraint::Length(STATUS_BAR_HEIGHT), // Status bar / search
-            ])
-            .split(area);
-        debug_assert_layout(&chunks, area, show_bar);
-
-        render_ui(
-            terminal,
-            &state,
-            &mut components,
-            &mut tab_bar,
-            &mut status_bar,
-            &mut connection_bar,
-            show_bar,
-            &chunks,
-        )?;
+        let size = terminal.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
+        let (chunks, show_bar) = compute_layout(area, state.connections.len());
+        render_ui(terminal, &state, &mut bundle, &chunks, show_bar)?;
 
         match events.next().await {
-            Some(event) => {
-                handle_app_event(
-                    &event,
-                    &mut state,
-                    &mut components,
-                    &mut tab_bar,
-                    &mut status_bar,
-                    &mut connection_bar,
-                    &daemon_tx,
-                    &mut tasks,
-                    &poll_in_flight,
-                );
+            Some(AppEvent::Key(key)) => {
+                handle_key_event(key, &mut state, &mut bundle, &daemon_tx, &mut tasks);
             }
+            Some(AppEvent::Tick) => spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks),
             None => break,
         }
     }
-    // Abort remaining background tasks on exit.
     tasks.abort_all();
-
     Ok(())
 }
 
@@ -357,19 +332,13 @@ fn debug_assert_layout(
 }
 
 /// Dispatch an action to `AppState` and all components.
-fn dispatch_all(
-    state: &mut AppState,
-    action: &Action,
-    components: &mut [Box<dyn Component>],
-    tab_bar: &mut TabBarComponent,
-    status_bar: &mut StatusBarComponent,
-) {
+fn dispatch_all(state: &mut AppState, action: &Action, bundle: &mut ComponentBundle) {
     state.dispatch(action);
-    for comp in components.iter_mut() {
+    for comp in &mut bundle.tabs {
         comp.update(action, state);
     }
-    tab_bar.update(action, state);
-    status_bar.update(action, state);
+    bundle.tab_bar.update(action, state);
+    bundle.status_bar.update(action, state);
 }
 
 /// Handle global key events that apply regardless of which component

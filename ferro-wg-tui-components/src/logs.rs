@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
+use tracing::warn;
 
 /// Live log viewer displaying daemon output.
 ///
@@ -42,12 +43,9 @@ impl Component for LogsComponent {
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
 
-        let log_lines = match state.log_lines.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                warn!("Log buffer mutex poisoned, showing empty logs");
-                return;
-            }
+        let Ok(log_lines) = state.log_lines.lock() else {
+            warn!("Log buffer mutex poisoned, showing empty logs");
+            return;
         };
         let lines: Vec<Line> = if log_lines.is_empty() {
             vec![Line::from(Span::styled(

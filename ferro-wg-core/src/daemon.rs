@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::Layer;
 
@@ -83,27 +83,48 @@ impl LogBuffer {
     }
 }
 
-/// Visitor to extract log message from tracing event.
+/// Tracing layer that writes formatted events into a [`LogBuffer`].
+///
+/// This is the sole edge between the tracing subsystem (calculation) and the
+/// log buffer (data). All I/O — broadcasting, streaming — happens elsewhere
+/// at the application boundary.
+pub struct LogLayer {
+    buffer: LogBuffer,
+}
+
+impl LogLayer {
+    /// Wrap a [`LogBuffer`] as a tracing subscriber layer.
+    #[must_use]
+    pub fn new(buffer: LogBuffer) -> Self {
+        Self { buffer }
+    }
+}
+
+/// Visitor that extracts the `message` field from a tracing event.
+///
+/// `record_str` is the primary path: tracing macros pass literal string
+/// messages as `&str`, so the value arrives here without any Debug
+/// formatting overhead.  `record_debug` is the fallback for callers that
+/// supply a value implementing only `Debug`; the Debug representation is
+/// used verbatim — no quote-stripping heuristics that would corrupt
+/// non-string types (integers, structs, etc.).
 struct LogVisitor(String);
 
 impl tracing::field::Visit for LogVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "message" {
-            self.0 = format!("{value:?}");
-            if self.0.starts_with('"') && self.0.ends_with('"') {
-                self.0 = self.0[1..self.0.len() - 1].to_string();
-            }
+            value.clone_into(&mut self.0);
         }
     }
 
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.0 = value.to_string();
+            self.0 = format!("{value:?}");
         }
     }
 }
 
-impl<S> Layer<S> for LogBuffer
+impl<S> Layer<S> for LogLayer
 where
     S: tracing::Subscriber,
 {
@@ -120,7 +141,7 @@ where
             event.metadata().target(),
             visitor.0
         );
-        self.add_line(line);
+        self.buffer.add_line(line);
     }
 }
 
@@ -158,6 +179,11 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
 
 /// Handle a `StreamLogs` connection by sending buffered logs then streaming new ones.
 ///
+/// The live-stream channel is a bounded `mpsc`: the sender blocks under backpressure
+/// rather than skipping the slow receiver, so no `Lagged` drop can occur in this leg.
+/// Note that the upstream ring buffer ([`LogBuffer`]) can still evict old entries under
+/// sustained high-throughput load before they reach the channel.
+///
 /// # Errors
 ///
 /// Returns an error if sending responses fails.
@@ -165,29 +191,22 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
 async fn handle_stream_logs(
     mut writer: tokio::net::unix::OwnedWriteHalf,
     log_buffer: &LogBuffer,
-    log_rx: &mut broadcast::Receiver<String>,
+    log_rx: &mut mpsc::Receiver<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Send buffered logs first
-    let buf = log_buffer.get_buffer();
-    for line in buf {
+    // Replay historical buffer first so the client sees context on connect.
+    for line in log_buffer.get_buffer() {
         let resp = DaemonResponse::LogLine(line);
         if let Err(e) = send_response(&mut writer, &resp).await {
             warn!("Failed to send buffered log line: {e}");
             return Ok(());
         }
     }
-    // Then stream new logs
-    loop {
-        match log_rx.recv().await {
-            Ok(line) => {
-                let resp = DaemonResponse::LogLine(line);
-                if let Err(e) = send_response(&mut writer, &resp).await {
-                    warn!("Failed to send streamed log line: {e}");
-                    break;
-                }
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
-            Err(_) => {}
+    // Stream live log lines until the channel closes or the client disconnects.
+    while let Some(line) = log_rx.recv().await {
+        let resp = DaemonResponse::LogLine(line);
+        if let Err(e) = send_response(&mut writer, &resp).await {
+            warn!("Failed to send streamed log line: {e}");
+            break;
         }
     }
     Ok(())
@@ -251,7 +270,27 @@ async fn process_command(
     Ok(is_shutdown)
 }
 
-/// Handle a single client connection.
+/// Accept the next connection from the listener and decode its command.
+///
+/// Returns `None` if the connection closed before a valid command was received.
+///
+/// # Errors
+///
+/// Returns an error on socket I/O or protocol decode failure.
+async fn accept_command(
+    listener: &UnixListener,
+) -> Result<Option<(tokio::net::unix::OwnedWriteHalf, DaemonCommand)>, Box<dyn std::error::Error>> {
+    let (stream, _addr) = listener.accept().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let Some(command) = read_command(&mut reader, &mut writer).await? else {
+        return Ok(None);
+    };
+    info!("Received command: {command:?}");
+    Ok(Some((writer, command)))
+}
+
+/// Route a decoded command to its handler.
 ///
 /// Returns `true` if shutdown was requested.
 ///
@@ -264,18 +303,11 @@ async fn handle_connection(
     manager: &mut TunnelManager,
     config_path: &Path,
     log_buffer: &LogBuffer,
-    log_rx: &mut broadcast::Receiver<String>,
+    log_rx: &mut mpsc::Receiver<String>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let (stream, _addr) = listener.accept().await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-
-    let Some(command) = read_command(&mut reader, &mut writer).await? else {
+    let Some((mut writer, command)) = accept_command(listener).await? else {
         return Ok(false);
     };
-
-    info!("Received command: {command:?}");
-
     match command {
         DaemonCommand::StreamLogs => {
             handle_stream_logs(writer, log_buffer, log_rx).await?;
@@ -300,7 +332,7 @@ pub async fn run(
     config_path: &Path,
     socket_path: &Path,
     log_buffer: LogBuffer,
-    mut log_rx: broadcast::Receiver<String>,
+    mut log_rx: mpsc::Receiver<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = setup_listener(socket_path)?;
     set_socket_permissions(socket_path)?;
@@ -357,7 +389,7 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             };
             result.map_or_else(
                 |e| DaemonResponse::Error(e.to_string()),
-                |_| DaemonResponse::Ok,
+                |()| DaemonResponse::Ok,
             )
         }
         DaemonCommand::Down {
@@ -366,7 +398,7 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             if let Some(name) = connection_name {
                 manager.down(name).map_or_else(
                     |e| DaemonResponse::Error(e.to_string()),
-                    |_| DaemonResponse::Ok,
+                    |()| DaemonResponse::Ok,
                 )
             } else {
                 manager.down_all();
@@ -383,7 +415,7 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             }
             manager.up(connection_name, backend).await.map_or_else(
                 |e| DaemonResponse::Error(e.to_string()),
-                |_| DaemonResponse::Ok,
+                |()| DaemonResponse::Ok,
             )
         }
         DaemonCommand::Shutdown => DaemonResponse::Ok,
@@ -407,13 +439,17 @@ async fn send_response(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::thread;
+
+    use tokio::sync::mpsc;
+
     use super::*;
 
     #[test]
     fn log_buffer_capacity() {
         let buffer = LogBuffer::new(3);
 
-        // Add lines up to capacity
         buffer.add_line("line1".to_string());
         buffer.add_line("line2".to_string());
         buffer.add_line("line3".to_string());
@@ -423,21 +459,203 @@ mod tests {
         buffer.add_line("line4".to_string());
         assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
 
-        // Buffer capacity is 3
         assert_eq!(buffer.buffer.lock().unwrap().capacity(), 3);
     }
 
     #[test]
     fn log_buffer_overflow_eviction() {
-        let (sender, _receiver) = tokio::sync::mpsc::sync_channel(10);
         let buffer = LogBuffer::new(3);
 
-        // Add more than capacity
         for i in 0..5 {
             buffer.add_line(format!("line{i}"));
         }
 
-        // Should have last 3
         assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
+    }
+
+    #[test]
+    fn log_buffer_duplicates_are_stored() {
+        let buffer = LogBuffer::new(5);
+
+        buffer.add_line("dup".to_string());
+        buffer.add_line("dup".to_string());
+        buffer.add_line("dup".to_string());
+
+        assert_eq!(buffer.get_buffer(), vec!["dup", "dup", "dup"]);
+    }
+
+    #[test]
+    fn log_buffer_drain_clears_buffer() {
+        let buffer = LogBuffer::new(5);
+
+        for i in 0..4 {
+            buffer.add_line(format!("line{i}"));
+        }
+
+        let drained = buffer.drain_logs();
+        assert_eq!(drained, vec!["line0", "line1", "line2", "line3"]);
+        assert!(buffer.get_buffer().is_empty());
+    }
+
+    #[test]
+    fn log_buffer_large_overflow_keeps_last_n() {
+        let buffer = LogBuffer::new(5);
+
+        for i in 0..20 {
+            buffer.add_line(format!("line{i}"));
+        }
+
+        let contents = buffer.get_buffer();
+        assert_eq!(contents.len(), 5);
+        assert_eq!(
+            contents,
+            vec!["line15", "line16", "line17", "line18", "line19"]
+        );
+    }
+
+    /// Poison the mutex by panicking while holding the lock, then verify that
+    /// all `LogBuffer` methods handle the poisoned state without panicking.
+    #[test]
+    fn log_buffer_poisoned_mutex_does_not_panic() {
+        let buffer = LogBuffer::new(3);
+        let clone = buffer.clone();
+
+        // Poison the mutex.
+        let _ = thread::spawn(move || {
+            let _guard = clone.buffer.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        })
+        .join();
+
+        // All methods must be safe to call on a poisoned buffer.
+        buffer.add_line("after poison".to_string());
+        assert!(buffer.get_buffer().is_empty());
+        assert!(buffer.drain_logs().is_empty());
+    }
+
+    #[test]
+    fn log_buffer_concurrent_additions_no_deadlock() {
+        let buffer = Arc::new(LogBuffer::new(100));
+        let mut handles = Vec::new();
+
+        for i in 0..10 {
+            let b = Arc::clone(&buffer);
+            handles.push(thread::spawn(move || {
+                for j in 0..20 {
+                    b.add_line(format!("thread{i}-line{j}"));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // 10 threads × 20 lines = 200 total additions, but capacity is 100.
+        assert_eq!(buffer.get_buffer().len(), 100);
+    }
+
+    #[test]
+    fn log_buffer_concurrent_add_and_drain_no_deadlock() {
+        let buffer = Arc::new(LogBuffer::new(50));
+        let mut handles = Vec::new();
+
+        // Adder threads.
+        for i in 0..4 {
+            let b = Arc::clone(&buffer);
+            handles.push(thread::spawn(move || {
+                for j in 0..25 {
+                    b.add_line(format!("t{i}-{j}"));
+                }
+            }));
+        }
+
+        // Drain thread runs concurrently with adders.
+        let drain_buf = Arc::clone(&buffer);
+        handles.push(thread::spawn(move || {
+            for _ in 0..10 {
+                let _ = drain_buf.drain_logs();
+                thread::yield_now();
+            }
+        }));
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+        // No assertion on final count — the goal is no deadlock / panic.
+    }
+
+    /// `handle_stream_logs` must return `Ok(())` when the writer half is
+    /// closed before any data is sent (historical replay path).
+    #[tokio::test]
+    async fn handle_stream_logs_writer_closed_before_replay() {
+        let buffer = LogBuffer::new(5);
+        buffer.add_line("old line".to_string());
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_server_read, server_write) = server.into_split();
+
+        // Drop the client immediately so writes to server_write fail.
+        drop(client);
+
+        let (_tx, mut rx) = mpsc::channel::<String>(1);
+        let result = handle_stream_logs(server_write, &buffer, &mut rx).await;
+        assert!(result.is_ok());
+    }
+
+    /// `handle_stream_logs` must return `Ok(())` when the writer fails
+    /// mid-stream while forwarding live log lines.
+    #[tokio::test]
+    async fn handle_stream_logs_writer_closed_during_live_stream() {
+        let buffer = LogBuffer::new(5);
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_server_read, server_write) = server.into_split();
+
+        // Drop the client so the next write into server_write will fail.
+        drop(client);
+
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        tx.send("live line".to_string()).await.unwrap();
+
+        let result = handle_stream_logs(server_write, &buffer, &mut rx).await;
+        assert!(result.is_ok());
+    }
+
+    /// `handle_stream_logs` replays historical buffer then streams live lines.
+    #[tokio::test]
+    async fn handle_stream_logs_replays_then_streams() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let buffer = LogBuffer::new(5);
+        buffer.add_line("hist1".to_string());
+        buffer.add_line("hist2".to_string());
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (client_read, _client_write) = client.into_split();
+        let (_server_read, server_write) = server.into_split();
+
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        tx.send("live1".to_string()).await.unwrap();
+        // Close the sender so handle_stream_logs terminates after draining.
+        drop(tx);
+
+        handle_stream_logs(server_write, &buffer, &mut rx)
+            .await
+            .unwrap();
+
+        // Read all JSON lines the server wrote to the client.
+        let mut reader = BufReader::new(client_read);
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        while reader.read_line(&mut line).await.unwrap() > 0 {
+            lines.push(std::mem::take(&mut line));
+        }
+
+        // 2 historical + 1 live = 3 responses.
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("hist1"));
+        assert!(lines[1].contains("hist2"));
+        assert!(lines[2].contains("live1"));
     }
 }

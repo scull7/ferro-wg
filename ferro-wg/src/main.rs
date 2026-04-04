@@ -12,7 +12,6 @@ use tracing_subscriber::EnvFilter;
 use cli::{Cli, Command};
 use ferro_wg_core::config;
 use ferro_wg_core::config::AppConfig;
-use ferro_wg_core::daemon::LogBuffer;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, SOCKET_PATH};
 use ferro_wg_core::key::PrivateKey;
@@ -162,17 +161,14 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 let iface = peer.interface.as_deref().unwrap_or("-");
                 let endpoint = peer.endpoint.as_deref().unwrap_or("-");
 
-                println!("connection: {}", peer.connection_name);
+                println!("connection: {}", peer.name);
                 println!("  status: {status}");
                 println!("  backend: {}", peer.backend);
                 println!("  endpoint: {endpoint}");
                 println!("  interface: {iface}");
 
                 // Show config details if available.
-                if let Some(wg) = app_config
-                    .as_ref()
-                    .and_then(|c| c.get(&peer.connection_name))
-                {
+                if let Some(wg) = app_config.as_ref().and_then(|c| c.get(&peer.name)) {
                     println!(
                         "  public key: {}",
                         wg.interface.private_key.public_key().to_base64()
@@ -273,28 +269,28 @@ fn cmd_daemon(
     println!("Connections: {}", conn_names.join(", "));
     println!("Press Ctrl+C to stop.\n");
 
-    let (log_tx, log_rx) = tokio::sync::broadcast::channel(10000);
+    // Bounded channel: sender blocks under backpressure instead of dropping messages.
+    let (log_tx, log_rx) = tokio::sync::mpsc::channel::<String>(4096);
     let log_buffer = ferro_wg_core::daemon::LogBuffer::new(1000);
-
-    // Spawn broadcaster task to isolate async I/O
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            let lines = log_buffer.drain_logs();
-            for line in lines {
-                let _ = log_tx.send(line);
-            }
-        }
-    });
+    let log_buffer_for_broadcast = log_buffer.clone();
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(ferro_wg_core::daemon::run(
-        app_config,
-        config_path,
-        &socket_path,
-        log_buffer,
-        log_rx,
-    ))?;
+    rt.block_on(async {
+        // Spawn broadcaster task inside the runtime so tokio::spawn has a valid context.
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                let lines = log_buffer_for_broadcast.drain_logs();
+                for line in lines {
+                    if log_tx.send(line).await.is_err() {
+                        // Receiver dropped; daemon is shutting down.
+                        return;
+                    }
+                }
+            }
+        });
+        ferro_wg_core::daemon::run(app_config, config_path, &socket_path, log_buffer, log_rx).await
+    })?;
     Ok(())
 }
 
