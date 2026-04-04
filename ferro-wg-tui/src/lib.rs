@@ -454,7 +454,10 @@ fn maybe_spawn_command(
         let msg = match client::send_command(&cmd).await {
             Ok(DaemonResponse::Ok) => DaemonMessage::CommandOk(description),
             Ok(DaemonResponse::Error(e)) => DaemonMessage::CommandError(e),
-            Ok(DaemonResponse::LogLine(_)) => unreachable!("LogLine only for streaming"),
+            Ok(DaemonResponse::LogLine(_)) => {
+                warn!("Received unexpected LogLine response for command");
+                return;
+            }
             Err(e) => error_to_message(&e),
             Ok(DaemonResponse::Status(_)) => return,
         };
