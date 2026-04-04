@@ -154,7 +154,7 @@ async fn event_loop(
         match client::stream_logs().await {
             Ok(mut rx) => {
                 while let Some(line) = rx.recv().await {
-                    let mut buf = log_lines.lock().unwrap();
+                    let mut buf = log_lines.lock().expect("mutex poisoned");
                     if buf.len() == buf.capacity() {
                         buf.pop_front();
                     }

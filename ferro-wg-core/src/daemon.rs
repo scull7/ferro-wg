@@ -44,7 +44,7 @@ impl LogBuffer {
 
     /// Add a log line to the buffer and broadcast it.
     fn add_line(&self, line: String) {
-        let mut buf = self.buffer.lock().unwrap();
+        let mut buf = self.buffer.lock().expect("mutex poisoned");
         if buf.len() == buf.capacity() {
             buf.pop_front();
         }
@@ -59,7 +59,7 @@ impl LogBuffer {
     /// Panics if the mutex is poisoned.
     #[must_use]
     pub fn get_buffer(&self) -> Vec<String> {
-        self.buffer.lock().unwrap().iter().cloned().collect()
+        self.buffer.lock().expect("mutex poisoned").iter().cloned().collect()
     }
 }
 

@@ -172,7 +172,7 @@ impl AppState {
     ///
     /// Panics if the mutex is poisoned.
     pub fn append_log(&self, line: String) {
-        let mut buf = self.log_lines.lock().unwrap();
+        let mut buf = self.log_lines.lock().expect("mutex poisoned");
         if buf.len() == buf.capacity() {
             buf.pop_front();
         }

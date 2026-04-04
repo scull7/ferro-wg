@@ -1,11 +1,11 @@
 //! Logs tab: scrollable log viewer.
 
 use crossterm::event::KeyEvent;
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
 
@@ -42,7 +42,7 @@ impl Component for LogsComponent {
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
 
-        let log_lines = state.log_lines.lock().unwrap();
+        let log_lines = state.log_lines.lock().expect("mutex poisoned");
         let lines: Vec<Line> = if log_lines.is_empty() {
             vec![Line::from(Span::styled(
                 "(no log entries yet)",
