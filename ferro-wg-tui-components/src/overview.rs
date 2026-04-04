@@ -6,7 +6,9 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
-use ferro_wg_tui_core::{Action, AppState, Component, ConnectionState, Tab, format_bytes};
+use ferro_wg_tui_core::{
+    Action, AppState, Component, ConnectionState, Tab, format_bytes, format_handshake_age,
+};
 
 /// Aggregate health table showing all configured connections at a glance.
 ///
@@ -122,7 +124,7 @@ impl Component for OverviewComponent {
                     |s| {
                         s.stats
                             .last_handshake
-                            .map_or_else(|| "—".to_owned(), |d| format!("{}s ago", d.as_secs()))
+                            .map_or_else(|| "—".to_owned(), format_handshake_age)
                     },
                 );
 

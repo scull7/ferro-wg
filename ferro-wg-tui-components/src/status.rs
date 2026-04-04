@@ -6,7 +6,9 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
-use ferro_wg_tui_core::{Action, AppState, Component, ConnectionState, format_bytes};
+use ferro_wg_tui_core::{
+    Action, AppState, Component, ConnectionState, format_bytes, format_handshake_age,
+};
 
 /// Active tunnels overview showing connection state, traffic, and
 /// handshake age for each peer.
@@ -92,7 +94,7 @@ impl Component for StatusComponent {
                 let hs = s
                     .stats
                     .last_handshake
-                    .map_or_else(|| "-".to_owned(), |d| format!("{}s ago", d.as_secs()));
+                    .map_or_else(|| "-".to_owned(), format_handshake_age);
                 let rx = format_bytes(s.stats.rx_bytes);
                 let tx = format_bytes(s.stats.tx_bytes);
                 (s.state == ConnectionState::Connected, hs, rx, tx)
