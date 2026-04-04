@@ -204,16 +204,26 @@ mod tests {
     // --- level_style ---
 
     #[test]
-    fn level_style_known_with_color() {
-        assert_eq!(
-            LogsComponent::level_style("INFO", true).fg,
-            Some(Color::Green)
-        );
-    }
-
-    #[test]
-    fn level_style_no_color() {
-        assert_eq!(LogsComponent::level_style("ERROR", false).fg, None);
+    fn level_style_all_known_levels() {
+        let cases = [
+            ("TRACE", Color::Gray),
+            ("DEBUG", Color::Blue),
+            ("INFO", Color::Green),
+            ("WARN", Color::Yellow),
+            ("ERROR", Color::Red),
+        ];
+        for (level, expected) in cases {
+            assert_eq!(
+                LogsComponent::level_style(level, true).fg,
+                Some(expected),
+                "level={level} with color"
+            );
+            assert_eq!(
+                LogsComponent::level_style(level, false).fg,
+                None,
+                "level={level} without color"
+            );
+        }
     }
 
     #[test]
@@ -224,7 +234,8 @@ mod tests {
     // --- parse_log_line: success paths ---
 
     #[test]
-    fn parse_log_line_with_timestamp_and_level() {
+    fn parse_log_line_full_structure() {
+        // Verifies all five spans and their content/style for a well-formed line.
         let spans = LogsComponent::parse_log_line(
             "12:34:56 INFO ferro_wg_core::tunnel::mod: Connection abc is up",
             &cfg(true, true),
@@ -243,39 +254,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_log_line_error_level() {
-        let spans = LogsComponent::parse_log_line(
-            "12:34:56 ERROR ferro_wg_core::error: Failed to connect",
-            &cfg(true, true),
-        )
-        .unwrap();
-        assert_eq!(spans.len(), 5);
-        assert_eq!(spans[2].content, "[ERROR]");
-        assert_eq!(spans[2].style.fg, Some(Color::Red));
-    }
-
-    #[test]
-    fn parse_log_line_warn_level() {
-        let spans = LogsComponent::parse_log_line(
-            "12:34:56 WARN ferro_wg_core::tunnel: Handshake timeout",
-            &cfg(true, true),
-        )
-        .unwrap();
-        assert_eq!(spans.len(), 5);
-        assert_eq!(spans[2].content, "[WARN]");
-        assert_eq!(spans[2].style.fg, Some(Color::Yellow));
-    }
-
-    #[test]
-    fn parse_log_line_debug_level() {
-        let spans = LogsComponent::parse_log_line(
-            "12:34:56 DEBUG ferro_wg_core::stats: Packet count: 42",
-            &cfg(true, true),
-        )
-        .unwrap();
-        assert_eq!(spans.len(), 5);
-        assert_eq!(spans[2].content, "[DEBUG]");
-        assert_eq!(spans[2].style.fg, Some(Color::Blue));
+    fn parse_log_line_all_known_levels() {
+        // Covers every tracing level: badge content and color are correct for each.
+        let cases = [
+            ("TRACE", Color::Gray),
+            ("DEBUG", Color::Blue),
+            ("INFO", Color::Green),
+            ("WARN", Color::Yellow),
+            ("ERROR", Color::Red),
+        ];
+        for (level, expected_color) in cases {
+            let spans = LogsComponent::parse_log_line(
+                &format!("12:34:56 {level} target: message"),
+                &cfg(true, true),
+            )
+            .unwrap_or_else(|e| panic!("level={level}: {e}"));
+            assert_eq!(spans[2].content, format!("[{level}]"), "level={level}");
+            assert_eq!(spans[2].style.fg, Some(expected_color), "level={level}");
+        }
     }
 
     #[test]
@@ -307,20 +303,17 @@ mod tests {
     // --- parse_log_line: error paths ---
 
     #[test]
-    fn parse_log_line_legacy_format_errs_malformed_timestamp() {
-        let err = LogsComponent::parse_log_line(
+    fn parse_log_line_malformed_timestamp() {
+        // Both legacy format (no timestamp) and fully unstructured lines
+        // produce MalformedTimestamp.
+        let cases = [
             "INFO ferro_wg_core::tunnel::mod: Connection abc is up",
-            &cfg(true, true),
-        )
-        .unwrap_err();
-        assert_eq!(err, LogParseError::MalformedTimestamp);
-    }
-
-    #[test]
-    fn parse_log_line_malformed_errs_malformed_timestamp() {
-        let err =
-            LogsComponent::parse_log_line("some random log message", &cfg(true, true)).unwrap_err();
-        assert_eq!(err, LogParseError::MalformedTimestamp);
+            "some random log message",
+        ];
+        for line in cases {
+            let err = LogsComponent::parse_log_line(line, &cfg(true, true)).unwrap_err();
+            assert_eq!(err, LogParseError::MalformedTimestamp, "line={line:?}");
+        }
     }
 
     #[test]
