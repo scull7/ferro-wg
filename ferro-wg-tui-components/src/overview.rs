@@ -104,7 +104,10 @@ impl Component for OverviewComponent {
             .iter()
             .enumerate()
             .map(|(i, conn)| {
-                let (status_str, status_style): (&'static str, Style) = match &conn.status {
+                // Bind once; avoids repeated .as_ref() calls for each column.
+                let status_opt = conn.status.as_ref();
+
+                let (status_str, status_style): (&'static str, Style) = match status_opt {
                     None => ("—", Style::default().fg(theme.muted)),
                     Some(s) if s.state == ConnectionState::Connected => {
                         ("● Connected", Style::default().fg(theme.success))
@@ -112,28 +115,20 @@ impl Component for OverviewComponent {
                     Some(_) => ("○ Disconnected", Style::default().fg(theme.muted)),
                 };
 
-                let backend = conn
-                    .status
-                    .as_ref()
-                    .map_or_else(|| "—".to_owned(), |s| s.backend.to_string());
+                let backend =
+                    status_opt.map_or_else(|| "—".to_owned(), |s| s.backend.to_string());
 
-                let interface: &str = conn
-                    .status
-                    .as_ref()
+                let interface: &str = status_opt
                     .and_then(|s| s.interface.as_deref())
                     .unwrap_or("—");
 
-                let tx = conn
-                    .status
-                    .as_ref()
-                    .map_or_else(|| "—".to_owned(), |s| format_bytes(s.stats.tx_bytes));
+                let tx =
+                    status_opt.map_or_else(|| "—".to_owned(), |s| format_bytes(s.stats.tx_bytes));
 
-                let rx = conn
-                    .status
-                    .as_ref()
-                    .map_or_else(|| "—".to_owned(), |s| format_bytes(s.stats.rx_bytes));
+                let rx =
+                    status_opt.map_or_else(|| "—".to_owned(), |s| format_bytes(s.stats.rx_bytes));
 
-                let hs = conn.status.as_ref().map_or_else(
+                let hs = status_opt.map_or_else(
                     || "—".to_owned(),
                     |s| {
                         s.stats
