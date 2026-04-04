@@ -63,12 +63,11 @@ impl LogBuffer {
     /// Returns an empty vector if the mutex is poisoned.
     #[must_use]
     pub fn get_buffer(&self) -> Vec<String> {
-        match self.buffer.lock() {
-            Ok(buf) => buf.iter().cloned().collect(),
-            Err(_) => {
-                warn!("LogBuffer mutex poisoned, returning empty buffer");
-                Vec::new()
-            }
+        if let Ok(buf) = self.buffer.lock() {
+            buf.iter().cloned().collect()
+        } else {
+            warn!("LogBuffer mutex poisoned, returning empty buffer");
+            Vec::new()
         }
     }
 }
@@ -79,7 +78,7 @@ struct LogVisitor(String);
 impl tracing::field::Visit for LogVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.0 = format!("{:?}", value);
+            self.0 = format!("{value:?}");
             if self.0.starts_with('"') && self.0.ends_with('"') {
                 self.0 = self.0[1..self.0.len() - 1].to_string();
             }
@@ -258,9 +257,8 @@ async fn handle_connection(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    let command = match read_command(&mut reader, &mut writer).await? {
-        Some(cmd) => cmd,
-        None => return Ok(false),
+    let Some(command) = read_command(&mut reader, &mut writer).await? else {
+        return Ok(false);
     };
 
     info!("Received command: {command:?}");
@@ -420,7 +418,7 @@ mod tests {
         buffer.add_line("line4".to_string());
         assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
 
-        // Check broadcast capacity matches buffer
-        assert_eq!(buffer.tx.max_capacity(), 3);
+        // Buffer capacity is 3
+        assert_eq!(buffer.buffer.lock().unwrap().capacity(), 3);
     }
 }
