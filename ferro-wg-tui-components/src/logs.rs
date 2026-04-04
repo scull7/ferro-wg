@@ -1,11 +1,11 @@
 //! Logs tab: scrollable log viewer.
 
 use crossterm::event::KeyEvent;
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
 

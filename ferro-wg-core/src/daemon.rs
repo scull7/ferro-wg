@@ -59,7 +59,12 @@ impl LogBuffer {
     /// Panics if the mutex is poisoned.
     #[must_use]
     pub fn get_buffer(&self) -> Vec<String> {
-        self.buffer.lock().expect("mutex poisoned").iter().cloned().collect()
+        self.buffer
+            .lock()
+            .expect("mutex poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -216,7 +221,8 @@ async fn handle_connection(
             let response = handle_command(manager, &cmd).await;
 
             // Check for shutdown before sending response.
-            let is_shutdown = matches!(response, DaemonResponse::Ok) && matches!(cmd, DaemonCommand::Shutdown);
+            let is_shutdown =
+                matches!(response, DaemonResponse::Ok) && matches!(cmd, DaemonCommand::Shutdown);
 
             let _ = send_response(&mut writer, &response).await;
 
