@@ -7,6 +7,8 @@
 pub mod toml;
 pub mod wg_quick;
 
+use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
@@ -17,173 +19,15 @@ use crate::key::{PresharedKey, PrivateKey, PublicKey};
 /// Maximum allowed length for a connection or peer name.
 const MAX_NAME_LEN: usize = 64;
 
-/// Validate a connection or peer name.
-///
-/// Valid names are non-empty, at most [`MAX_NAME_LEN`] characters, and
-/// contain only ASCII alphanumerics, hyphens (`-`), or underscores (`_`).
-/// This keeps names safe for use in filenames, log messages, and future
-/// interface-name derivation.
-///
-/// # Errors
-///
-/// Returns [`ConfigError::InvalidValue`] describing which constraint was
-/// violated.
-fn validate_name(field: &'static str, name: &str) -> Result<(), ConfigError> {
-    if name.is_empty() {
-        return Err(ConfigError::InvalidValue {
-            field,
-            reason: "name must not be empty".into(),
-        });
-    }
-    if name.len() > MAX_NAME_LEN {
-        return Err(ConfigError::InvalidValue {
-            field,
-            reason: format!(
-                "name {name:?} is {} characters; maximum is {MAX_NAME_LEN}",
-                name.len()
-            ),
-        });
-    }
-    if let Some(bad) = name
-        .chars()
-        .find(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_'))
-    {
-        return Err(ConfigError::InvalidValue {
-            field,
-            reason: format!(
-                "name {name:?} contains invalid character {bad:?}; \
-                 only ASCII alphanumerics, hyphens, and underscores are allowed"
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Complete `WireGuard` interface configuration (our side of the tunnel).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InterfaceConfig {
-    /// Our private key.
-    pub private_key: PrivateKey,
-    /// UDP listen port (0 = random).
-    #[serde(default)]
-    pub listen_port: u16,
-    /// Local tunnel addresses (e.g. `10.0.0.2/24`).
-    #[serde(default)]
-    pub addresses: Vec<String>,
-    /// DNS servers to use when the tunnel is active.
-    #[serde(default)]
-    pub dns: Vec<IpAddr>,
-    /// DNS search domains when the tunnel is active.
-    ///
-    /// Non-IP entries from a `wg-quick` `DNS = ...` line land here (e.g.
-    /// `DNS = 1.1.1.1, corp.internal` → `dns_search = ["corp.internal"]`).
-    #[serde(default)]
-    pub dns_search: Vec<String>,
-    /// Maximum transmission unit (0 = auto).
-    #[serde(default)]
-    pub mtu: u16,
-    /// Firewall mark for outgoing packets (Linux only).
-    #[serde(default)]
-    pub fwmark: u32,
-    /// Commands to run before bringing the interface up.
-    #[serde(default)]
-    pub pre_up: Vec<String>,
-    /// Commands to run after bringing the interface up.
-    #[serde(default)]
-    pub post_up: Vec<String>,
-    /// Commands to run before tearing the interface down.
-    #[serde(default)]
-    pub pre_down: Vec<String>,
-    /// Commands to run after tearing the interface down.
-    #[serde(default)]
-    pub post_down: Vec<String>,
-}
-
-/// A single `WireGuard` peer configuration (remote side).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerConfig {
-    /// Human-readable name for this peer (not part of the WG protocol).
-    #[serde(default)]
-    pub name: String,
-    /// The peer's public key.
-    pub public_key: PublicKey,
-    /// Optional preshared key for additional symmetric encryption.
-    #[serde(default)]
-    pub preshared_key: Option<PresharedKey>,
-    /// The peer's endpoint (`host:port`). Supports both IP addresses and
-    /// hostnames (resolved at connection time). `None` for receive-only peers.
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    /// IP ranges to route through this peer (CIDR notation).
-    #[serde(default)]
-    pub allowed_ips: Vec<String>,
-    /// Send keepalive packets every N seconds (0 = disabled).
-    #[serde(default)]
-    pub persistent_keepalive: u16,
-}
-
-/// A single `WireGuard` connection (interface + peers).
-///
-/// Each connection has its own private key and can connect to one or more
-/// peers. This maps 1:1 to a `wg-quick` `.conf` file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WgConfig {
-    /// Interface (our side) configuration.
-    pub interface: InterfaceConfig,
-    /// Peer configurations.
-    #[serde(default)]
-    pub peers: Vec<PeerConfig>,
-}
-
-impl WgConfig {
-    /// Validate the configuration, returning the first error found.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::MissingField`] if no peers are configured,
-    /// or [`ConfigError::InvalidValue`] if a peer has no allowed IPs.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.peers.is_empty() {
-            return Err(ConfigError::MissingField("peers"));
-        }
-        for (i, peer) in self.peers.iter().enumerate() {
-            if !peer.name.is_empty() {
-                validate_name("peer.name", &peer.name).map_err(|e| ConfigError::InvalidValue {
-                    field: "peer.name",
-                    reason: format!("peer {i}: {e}"),
-                })?;
-            }
-            if peer.allowed_ips.is_empty() {
-                return Err(ConfigError::InvalidValue {
-                    field: "allowed_ips",
-                    reason: format!("peer {i} has no allowed IPs"),
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Top-level application config: a map of named connections.
-///
-/// Each connection has its own interface (private key, addresses) and peers.
-/// This allows managing multiple datacenter VPNs that each issued their own
-/// `WireGuard` identity.
-///
-/// ```toml
-/// [connections.mia]
-/// interface = { private_key = "...", ... }
-/// peers = [{ name = "mia-dc", ... }]
-///
-/// [connections.tus1]
-/// interface = { private_key = "...", ... }
-/// peers = [{ name = "tus1-dc", ... }]
-/// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
-    /// Named connections, keyed by connection name (e.g. "mia", "tus1").
+    /// All configured connections, keyed by name.
+    pub connections: BTreeMap<String, Connection>,
+
+    /// Log display configuration.
     #[serde(default)]
-    pub connections: std::collections::BTreeMap<String, WgConfig>,
+    pub log_display: LogDisplayConfig,
 }
 
 impl AppConfig {

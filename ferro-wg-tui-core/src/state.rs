@@ -378,7 +378,10 @@ mod tests {
         for (name, peers) in entries {
             connections.insert((*name).to_string(), make_wg_config(peers.clone()));
         }
-        AppConfig { connections }
+        AppConfig {
+            connections,
+            log_display: Default::default(),
+        }
     }
 
     fn make_peer_status(name: &str, connected: bool) -> PeerStatus {
