@@ -95,6 +95,134 @@ where
     }
 }
 
+/// Set socket permissions to allow unprivileged connections.
+///
+/// # Errors
+///
+/// Returns an error if permissions cannot be set.
+#[cfg(unix)]
+fn set_socket_permissions(socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_socket_permissions(_socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+/// Set up the Unix listener for IPC connections.
+///
+/// # Errors
+///
+/// Returns an error if the socket file cannot be removed or bound.
+fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error::Error>> {
+    // Remove stale socket file.
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+
+    let listener = UnixListener::bind(socket_path)?;
+    Ok(listener)
+}
+
+/// Handle a StreamLogs connection by sending buffered logs then streaming new ones.
+///
+/// # Errors
+///
+/// Returns an error if sending responses fails.
+async fn handle_stream_logs(
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    log_buffer: &LogBuffer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Send buffered logs first
+    let buf = log_buffer.get_buffer();
+    for line in buf {
+        let resp = DaemonResponse::LogLine(line);
+        if send_response(&mut writer, &resp).await.is_err() {
+            return Ok(());
+        }
+    }
+    // Then stream new logs
+    let mut rx = log_buffer.tx.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(line) => {
+                let resp = DaemonResponse::LogLine(line);
+                if send_response(&mut writer, &resp).await.is_err() {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Handle a single client connection.
+///
+/// Returns `true` if shutdown was requested.
+///
+/// # Errors
+///
+/// Returns an error on socket I/O issues.
+async fn handle_connection(
+    listener: &UnixListener,
+    manager: &mut TunnelManager,
+    config_path: &Path,
+    log_buffer: &LogBuffer,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let (stream, _addr) = listener.accept().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    // Read one command per connection.
+    match reader.read_line(&mut line).await {
+        Ok(0) => return Ok(false), // EOF
+        Ok(_) => {}
+        Err(e) => {
+            warn!("Read error: {e}");
+            return Ok(false);
+        }
+    }
+
+    let command: DaemonCommand = match ipc::decode_message(&line) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            let resp = DaemonResponse::Error(format!("invalid command: {e}"));
+            let _ = send_response(&mut writer, &resp).await;
+            return Ok(false);
+        }
+    };
+
+    info!("Received command: {command:?}");
+
+    match command {
+        DaemonCommand::StreamLogs => {
+            handle_stream_logs(writer, log_buffer).await?;
+            Ok(false)
+        }
+        cmd => {
+            // Reload config for commands that need the latest connections.
+            if needs_config_reload(&cmd) {
+                reload_config(manager, config_path);
+            }
+
+            let response = handle_command(manager, &cmd).await;
+
+            // Check for shutdown before sending response.
+            let is_shutdown = matches!(response, DaemonResponse::Ok) && matches!(cmd, DaemonCommand::Shutdown);
+
+            let _ = send_response(&mut writer, &response).await;
+
+            Ok(is_shutdown)
+        }
+    }
+}
+
 /// Run the IPC server loop.
 ///
 /// Listens on a Unix socket and handles commands from clients.
@@ -110,19 +238,8 @@ pub async fn run(
     socket_path: &Path,
     log_buffer: LogBuffer,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Remove stale socket file.
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
-
-    let listener = UnixListener::bind(socket_path)?;
-
-    // Allow unprivileged users to connect to the daemon socket.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
-    }
+    let listener = setup_listener(socket_path)?;
+    set_socket_permissions(socket_path)?;
 
     info!("Listening on {}", socket_path.display());
 
@@ -130,81 +247,13 @@ pub async fn run(
     let config_path = config_path.to_owned();
 
     loop {
-        let (stream, _addr) = listener.accept().await?;
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-
-        // Read one command per connection.
-        match reader.read_line(&mut line).await {
-            Ok(0) => continue, // EOF
-            Ok(_) => {}
-            Err(e) => {
-                warn!("Read error: {e}");
-                continue;
-            }
-        }
-
-        let command: DaemonCommand = match ipc::decode_message(&line) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                let resp = DaemonResponse::Error(format!("invalid command: {e}"));
-                let _ = send_response(&mut writer, &resp).await;
-                continue;
-            }
-        };
-
-        info!("Received command: {command:?}");
-
-        match command {
-            DaemonCommand::StreamLogs => {
-                // Send buffered logs first
-                let buf = log_buffer.get_buffer();
-                for line in buf {
-                    let resp = DaemonResponse::LogLine(line);
-                    if send_response(&mut writer, &resp).await.is_err() {
-                        break;
-                    }
-                }
-                // Then stream new logs
-                let mut rx = log_buffer.tx.subscribe();
-                loop {
-                    match rx.recv().await {
-                        Ok(line) => {
-                            let resp = DaemonResponse::LogLine(line);
-                            if send_response(&mut writer, &resp).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                        Err(_) => {}
-                    }
-                }
-            }
-            cmd => {
-                // Reload config for commands that need the latest connections.
-                if needs_config_reload(&cmd) {
-                    reload_config(&mut manager, &config_path);
-                }
-
-                let response = handle_command(&mut manager, &cmd).await;
-
-                // Check for shutdown before sending response.
-                let is_shutdown = matches!(response, DaemonResponse::Ok)
-                    && matches!(cmd, DaemonCommand::Shutdown);
-
-                let _ = send_response(&mut writer, &response).await;
-
-                if is_shutdown {
-                    break;
-                }
-            }
+        if handle_connection(&listener, &mut manager, &config_path, &log_buffer).await? {
+            break; // Shutdown
         }
     }
 
     Ok(())
 }
-
 /// Check if a command should trigger a config reload.
 fn needs_config_reload(command: &DaemonCommand) -> bool {
     matches!(command, DaemonCommand::Up { .. } | DaemonCommand::Status)
