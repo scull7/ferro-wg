@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn log_buffer_add_line_and_overflow() {
-        let mut buffer = LogBuffer::new(3);
+        let buffer = LogBuffer::new(3);
         assert!(buffer.get_buffer().is_empty());
 
         buffer.add_line("line1".to_string());
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn log_buffer_broadcast() {
         let buffer = LogBuffer::new(10);
-        let mut rx = buffer.tx.subscribe();
+        let _rx = buffer.tx.subscribe();
 
         buffer.add_line("test".to_string());
         // Note: In a real test, we'd await rx.recv(), but since it's sync, we can't easily test broadcast here
