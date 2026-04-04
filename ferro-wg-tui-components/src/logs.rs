@@ -91,21 +91,6 @@ impl LogsComponent {
     /// - `show_timestamps`: include the `[HH:MM:SS]` prefix span.
     /// - `color_badges`: apply color to the `[LEVEL]` span; plain text otherwise.
     ///
-    /// # Errors
-    ///
-    /// Returns [`LogParseError::MalformedTimestamp`] when the line does not begin
-    /// with `HH:MM:SS `, or [`LogParseError::UnknownLevel`] when the level token
-    /// is not a recognised tracing level. Callers should fall back to a plain-text
-    /// span on error.
-    /// Parse a log line into styled spans for display.
-    ///
-    /// Expects lines in the format emitted by [`LogLayer`](ferro_wg_core::daemon::LogLayer):
-    /// `HH:MM:SS LEVEL target: message`.
-    ///
-    /// Display behaviour is controlled by `config`:
-    /// - `show_timestamps`: include the `[HH:MM:SS]` prefix span.
-    /// - `color_badges`: apply color to the `[LEVEL]` span; plain text otherwise.
-    ///
     /// The message portion of the span borrows directly from `line` via
     /// [`Cow::Borrowed`](std::borrow::Cow), avoiding an allocation for the
     /// (typically largest) part of each log entry.  Only the bracketed
