@@ -89,8 +89,8 @@ impl tracing::field::Visit for LogVisitor {
         if field.name() == "message" {
             self.0 = value.to_string();
         }
-        }
     }
+}
 
 impl<S> Layer<S> for LogBuffer
 where
@@ -232,7 +232,8 @@ async fn process_command(
     let response = handle_command(manager, cmd).await;
 
     // Check for shutdown before sending response.
-    let is_shutdown = matches!(response, DaemonResponse::Ok) && matches!(cmd, DaemonCommand::Shutdown);
+    let is_shutdown =
+        matches!(response, DaemonResponse::Ok) && matches!(cmd, DaemonCommand::Shutdown);
 
     let _ = send_response(writer, &response).await;
 
