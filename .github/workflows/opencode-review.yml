@@ -17,6 +17,10 @@ jobs:
         with:
           token: ${{ github.token }}
           persist-credentials: true
+      - name: Configure git identity for opencode
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
       - uses: anomalyco/opencode/github@latest
         env:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
