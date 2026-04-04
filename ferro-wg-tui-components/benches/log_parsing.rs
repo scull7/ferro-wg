@@ -1,6 +1,7 @@
 //! Performance benchmarks for `LogsComponent::parse_log_line`.
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use ferro_wg_core::config::LogDisplayConfig;
 use ferro_wg_tui_components::logs::LogsComponent;
 
 fn benchmark_log_parsing(c: &mut Criterion) {
@@ -13,10 +14,23 @@ fn benchmark_log_parsing(c: &mut Criterion) {
         "some malformed log message",                 // Malformed
     ];
 
+    let cfg_all = LogDisplayConfig {
+        show_timestamps: true,
+        color_badges: true,
+    };
+    let cfg_no_ts = LogDisplayConfig {
+        show_timestamps: false,
+        color_badges: true,
+    };
+    let cfg_no_color = LogDisplayConfig {
+        show_timestamps: true,
+        color_badges: false,
+    };
+
     c.bench_function("parse_log_lines", |b| {
         b.iter(|| {
             for line in &test_lines {
-                black_box(LogsComponent::parse_log_line(line, true, true));
+                black_box(LogsComponent::parse_log_line(line, &cfg_all));
             }
         });
     });
@@ -24,7 +38,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
     c.bench_function("parse_log_lines_no_timestamps", |b| {
         b.iter(|| {
             for line in &test_lines {
-                black_box(LogsComponent::parse_log_line(line, false, true));
+                black_box(LogsComponent::parse_log_line(line, &cfg_no_ts));
             }
         });
     });
@@ -32,7 +46,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
     c.bench_function("parse_log_lines_no_colors", |b| {
         b.iter(|| {
             for line in &test_lines {
-                black_box(LogsComponent::parse_log_line(line, true, false));
+                black_box(LogsComponent::parse_log_line(line, &cfg_no_color));
             }
         });
     });
