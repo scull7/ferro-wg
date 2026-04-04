@@ -289,9 +289,9 @@ impl LogBroadcaster {
 
     /// Subscribe and snapshot current history.
     ///
-    /// **Race mitigation + seq**: Uses monotonic `seq: u64` in LogEntry.
-    /// subscribe() before lock; history replay dedups by seq. Guarantees no loss
-    /// even if buffer wraps. Snapshot filters by seq range.
+    /// **Full mitigation**: monotonic `seq: u64` in LogEntry. subscribe() before lock.
+    /// In stream_logs replay: compute gap = history[0].seq - last_known_seq; if gap > 1 emit Lagged(gap).
+    /// Guarantees no silent loss on buffer wrap or reconnect.
     pub fn subscribe(&self) -> (broadcast::Receiver<LogEntry>, Vec<LogEntry>) { ... }
 }
 ```
