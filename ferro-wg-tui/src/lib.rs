@@ -232,25 +232,25 @@ async fn event_loop(
     // Spawn log streaming task.
     let log_lines = Arc::clone(&state.log_lines);
     tasks.spawn(async move {
-        match client::stream_logs().await {
-            Ok(mut rx) => {
-                while let Some(line) = rx.recv().await {
-                    match log_lines.lock() {
-                        Ok(mut buf) => {
-                            if buf.len() == buf.capacity() {
-                                buf.pop_front();
-                            }
-                            buf.push_back(line);
-                        }
-                        Err(_) => {
-                            warn!("Log buffer mutex poisoned, skipping log append");
-                        }
-                    }
-                }
-            }
+        let mut rx = match client::stream_logs().await {
+            Ok(rx) => rx,
             Err(e) => {
                 warn!("Failed to stream logs: {e}");
+                return;
             }
+        };
+        while let Some(line) = rx.recv().await {
+            let mut buf = match log_lines.lock() {
+                Ok(buf) => buf,
+                Err(_) => {
+                    warn!("Log buffer mutex poisoned, skipping log append");
+                    continue;
+                }
+            };
+            if buf.len() == buf.capacity() {
+                buf.pop_front();
+            }
+            buf.push_back(line);
         }
     });
 
