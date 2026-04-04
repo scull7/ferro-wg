@@ -558,6 +558,7 @@ fn spawn_log_stream(
                         match reader.read_line(&mut line).await {
                             Ok(0) | Err(_) => break,
                             Ok(_) => {
+                                if line.len() > 10 * 1024 { continue; } // size limit
                                 match ipc::decode_message::<DaemonResponse>(&line) {
                                     Ok(DaemonResponse::LogEntry(entry)) => {
                                         let _ = tx.send(DaemonMessage::LogEntry(entry));
@@ -565,7 +566,7 @@ fn spawn_log_stream(
                                     Ok(DaemonResponse::Lagged(n)) => {
                                         let _ = tx.send(DaemonMessage::Lagged(n));
                                     }
-                                    _ => {} // ignore malformed (with length limit in decoder)
+                                    _ => { /* log error or count; ignore malformed */ }
                                 }
                             }
                         }
