@@ -402,4 +402,48 @@ mod tests {
         let state = three_connection_state();
         render_overview_sized(&state, 80, 0);
     }
+
+    // ── Unicode connection name tests ─────────────────────────────────────────
+
+    #[test]
+    fn overview_cjk_connection_names_no_panic() {
+        let mut connections = BTreeMap::new();
+        connections.insert("東京-vps".to_string(), make_wg_config());
+        connections.insert("大阪-cdn".to_string(), make_wg_config());
+        let state = AppState::new(AppConfig { connections });
+        let content = render_overview(&state);
+        assert!(content.contains("Overview"), "panel title must be present");
+    }
+
+    #[test]
+    fn overview_emoji_connection_names_no_panic() {
+        let mut connections = BTreeMap::new();
+        connections.insert("🌐-global".to_string(), make_wg_config());
+        connections.insert("🔒-vpn".to_string(), make_wg_config());
+        let state = AppState::new(AppConfig { connections });
+        render_overview(&state); // must not panic
+    }
+
+    // ── Extreme connection count tests ────────────────────────────────────────
+
+    #[test]
+    fn overview_hundred_connections_no_panic() {
+        let mut connections = BTreeMap::new();
+        for i in 0..100 {
+            connections.insert(format!("conn{i:03}"), make_wg_config());
+        }
+        let state = AppState::new(AppConfig { connections });
+        render_overview(&state); // must not panic
+    }
+
+    #[test]
+    fn overview_hundred_connections_selected_last_no_panic() {
+        let mut connections = BTreeMap::new();
+        for i in 0..100 {
+            connections.insert(format!("conn{i:03}"), make_wg_config());
+        }
+        let mut state = AppState::new(AppConfig { connections });
+        state.selected_connection = 99;
+        render_overview(&state); // must not panic
+    }
 }

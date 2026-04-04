@@ -170,7 +170,9 @@ impl AppState {
         self.connections.get(self.selected_connection)
     }
 
-    /// Returns the currently focused connection mutably.
+    /// Returns the currently focused connection mutably, if any.
+    ///
+    /// Returns `None` when `connections` is empty.
     pub fn active_connection_mut(&mut self) -> Option<&mut ConnectionView> {
         self.connections.get_mut(self.selected_connection)
     }
@@ -180,6 +182,9 @@ impl AppState {
     /// This is Phase 1 of the two-phase dispatch cycle. After this
     /// returns, the caller should forward the action to all components
     /// via [`Component::update()`](crate::component::Component::update).
+    ///
+    /// `SelectConnection(i)` with an out-of-bounds index is silently
+    /// ignored and emits a `tracing::warn!` log entry; it does not panic.
     pub fn dispatch(&mut self, action: &Action) {
         match action {
             Action::Quit => self.running = false,
