@@ -661,14 +661,14 @@ visible. When `scroll_offset > 0` (user has scrolled up), the view freezes.
 
 **Eviction-aware scrolling (critical fix):** 
 `LogBuffer` has `evicted_count: u64` (init 0, `wrapping_add` on pop_front).
-`LogsComponent` has `old_evicted: u64` (init 0).
-In `update()`/`render()`:
+In `filtered()`: `absolute_index = self.evicted_count as usize + i` for each entry.
+`LogsComponent` has `old_evicted: u64` (init 0). In update/render:
 ```rust
 let delta = state.log_buffer.evicted_count.saturating_sub(self.old_evicted);
 self.scroll_offset = self.scroll_offset.saturating_sub(delta as usize);
 self.old_evicted = state.log_buffer.evicted_count;
 ```
-`filtered()` yields `(absolute_idx, &entry)`. Test with mocks for scroll + eviction + search.
+Test rigorously with eviction + scroll + search mocks.
 
 **Search infrastructure:** `LogsComponent` owns its search query string
 (`search_query: String`) and search mode flag (`in_search: bool`) locally. The
