@@ -1,13 +1,13 @@
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use tracing::warn;
 
 use ferro_wg_core::config::LogDisplayConfig;
-use ferro_wg_tui_core::{Action, AppState, Component};
+use ferro_wg_tui_core::{Action, AppState, Component, Theme};
 
 /// Errors that can occur when parsing a structured log line.
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -77,18 +77,19 @@ impl LogsComponent {
 
     /// Return the [`Style`] to apply to a level badge.
     ///
-    /// When `color_badges` is `false` the returned style is unstyled (default).
+    /// Colors are drawn from `theme` so they stay consistent with the active
+    /// palette. When `color_badges` is `false` the returned style is unstyled.
     #[must_use]
-    pub fn level_style(level: &str, color_badges: bool) -> Style {
+    pub fn level_style(level: &str, color_badges: bool, theme: &Theme) -> Style {
         if !color_badges {
             return Style::default();
         }
         let color = match level {
-            "TRACE" => Color::Gray,
-            "DEBUG" => Color::Blue,
-            "INFO" => Color::Green,
-            "WARN" => Color::Yellow,
-            "ERROR" => Color::Red,
+            "TRACE" => theme.muted,
+            "DEBUG" => theme.accent,
+            "INFO" => theme.success,
+            "WARN" => theme.warning,
+            "ERROR" => theme.error,
             _ => return Style::default(),
         };
         Style::default().fg(color)
@@ -114,7 +115,7 @@ impl LogsComponent {
 
     /// Parse a log line into styled spans for display.
     ///
-    /// Expects lines in the format emitted by [`LogLayer`](ferro_wg_core::daemon::LogLayer):
+    /// Expects lines in the format emitted by `LogLayer`:
     /// `HH:MM:SS LEVEL target: message`.
     ///
     /// Display behaviour is controlled by `config`:
@@ -123,7 +124,7 @@ impl LogsComponent {
     ///
     /// The message portion of the span borrows directly from `line` via
     /// [`Cow::Borrowed`](std::borrow::Cow), avoiding an allocation for the
-    /// (typically largest) part of each log entry.  Only the bracketed
+    /// (typically largest) part of each log entry. Only the bracketed
     /// `[HH:MM:SS]` and `[LEVEL]` labels require a heap allocation.
     ///
     /// # Errors
@@ -135,6 +136,7 @@ impl LogsComponent {
     pub fn parse_log_line<'a>(
         line: &'a str,
         config: &LogDisplayConfig,
+        theme: &Theme,
     ) -> Result<Vec<Span<'a>>, LogParseError> {
         let line = line.trim();
 
@@ -145,13 +147,13 @@ impl LogsComponent {
         if config.show_timestamps {
             spans.push(Span::styled(
                 format!("[{timestamp}]"),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme.accent),
             ));
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
             format!("[{level}]"),
-            Self::level_style(level, config.color_badges),
+            Self::level_style(level, config.color_badges, theme),
         ));
         spans.push(Span::raw(" "));
         // `message` borrows directly from `line` — no allocation needed.
@@ -285,7 +287,7 @@ impl Component for LogsComponent {
                 .skip(offset)
                 .take(self.scroll_state.view_height)
                 .map(|l| {
-                    let spans = Self::parse_log_line(l, config)
+                    let spans = Self::parse_log_line(l, config, theme)
                         .unwrap_or_else(|_| vec![Span::raw(l.as_str())]);
                     Line::from(spans)
                 })
@@ -308,8 +310,6 @@ impl Component for LogsComponent {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Color;
-
     use super::*;
 
     fn cfg(show_timestamps: bool, color_badges: bool) -> LogDisplayConfig {
@@ -317,6 +317,10 @@ mod tests {
             show_timestamps,
             color_badges,
         }
+    }
+
+    fn mocha() -> Theme {
+        Theme::mocha()
     }
 
     // --- parse_timestamp ---
@@ -338,21 +342,22 @@ mod tests {
 
     #[test]
     fn level_style_all_known_levels() {
+        let theme = mocha();
         let cases = [
-            ("TRACE", Color::Gray),
-            ("DEBUG", Color::Blue),
-            ("INFO", Color::Green),
-            ("WARN", Color::Yellow),
-            ("ERROR", Color::Red),
+            ("TRACE", theme.muted),
+            ("DEBUG", theme.accent),
+            ("INFO", theme.success),
+            ("WARN", theme.warning),
+            ("ERROR", theme.error),
         ];
         for (level, expected) in cases {
             assert_eq!(
-                LogsComponent::level_style(level, true).fg,
+                LogsComponent::level_style(level, true, &theme).fg,
                 Some(expected),
                 "level={level} with color"
             );
             assert_eq!(
-                LogsComponent::level_style(level, false).fg,
+                LogsComponent::level_style(level, false, &theme).fg,
                 None,
                 "level={level} without color"
             );
@@ -361,25 +366,29 @@ mod tests {
 
     #[test]
     fn level_style_unknown_level() {
-        assert_eq!(LogsComponent::level_style("CUSTOM", true), Style::default());
+        assert_eq!(
+            LogsComponent::level_style("CUSTOM", true, &mocha()),
+            Style::default()
+        );
     }
 
     // --- parse_log_line: success paths ---
 
     #[test]
     fn parse_log_line_full_structure() {
-        // Verifies all five spans and their content/style for a well-formed line.
+        let theme = mocha();
         let spans = LogsComponent::parse_log_line(
             "12:34:56 INFO ferro_wg_core::tunnel::mod: Connection abc is up",
             &cfg(true, true),
+            &theme,
         )
         .unwrap();
 
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[0].content, "[12:34:56]");
-        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[0].style.fg, Some(theme.accent));
         assert_eq!(spans[2].content, "[INFO]");
-        assert_eq!(spans[2].style.fg, Some(Color::Green));
+        assert_eq!(spans[2].style.fg, Some(theme.success));
         assert_eq!(
             spans[4].content,
             "ferro_wg_core::tunnel::mod: Connection abc is up"
@@ -388,17 +397,17 @@ mod tests {
 
     #[test]
     fn parse_log_line_all_known_levels() {
-        // Covers every tracing level: badge content and color are correct for each.
+        let theme = mocha();
         let cases = [
-            ("TRACE", Color::Gray),
-            ("DEBUG", Color::Blue),
-            ("INFO", Color::Green),
-            ("WARN", Color::Yellow),
-            ("ERROR", Color::Red),
+            ("TRACE", theme.muted),
+            ("DEBUG", theme.accent),
+            ("INFO", theme.success),
+            ("WARN", theme.warning),
+            ("ERROR", theme.error),
         ];
         for (level, expected_color) in cases {
             let line = format!("12:34:56 {level} target: message");
-            let spans = LogsComponent::parse_log_line(&line, &cfg(true, true))
+            let spans = LogsComponent::parse_log_line(&line, &cfg(true, true), &theme)
                 .unwrap_or_else(|e| panic!("level={level}: {e}"));
             assert_eq!(spans[2].content, format!("[{level}]"), "level={level}");
             assert_eq!(spans[2].style.fg, Some(expected_color), "level={level}");
@@ -407,22 +416,26 @@ mod tests {
 
     #[test]
     fn parse_log_line_no_timestamp_hides_prefix() {
+        let theme = mocha();
         let spans = LogsComponent::parse_log_line(
             "12:34:56 INFO ferro_wg_core::tunnel: msg",
             &cfg(false, true),
+            &theme,
         )
         .unwrap();
         // No timestamp + space → 3 spans: [LEVEL], space, message.
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "[INFO]");
-        assert_eq!(spans[0].style.fg, Some(Color::Green));
+        assert_eq!(spans[0].style.fg, Some(theme.success));
     }
 
     #[test]
     fn parse_log_line_no_color_plain_level_badge() {
+        let theme = mocha();
         let spans = LogsComponent::parse_log_line(
             "12:34:56 INFO ferro_wg_core::tunnel: msg",
             &cfg(true, false),
+            &theme,
         )
         .unwrap();
         assert_eq!(spans.len(), 5);
@@ -435,23 +448,24 @@ mod tests {
 
     #[test]
     fn parse_log_line_malformed_timestamp() {
-        // Both legacy format (no timestamp) and fully unstructured lines
-        // produce MalformedTimestamp.
+        let theme = mocha();
         let cases = [
             "INFO ferro_wg_core::tunnel::mod: Connection abc is up",
             "some random log message",
         ];
         for line in cases {
-            let err = LogsComponent::parse_log_line(line, &cfg(true, true)).unwrap_err();
+            let err = LogsComponent::parse_log_line(line, &cfg(true, true), &theme).unwrap_err();
             assert_eq!(err, LogParseError::MalformedTimestamp, "line={line:?}");
         }
     }
 
     #[test]
     fn parse_log_line_unknown_level_errs() {
+        let theme = mocha();
         let err = LogsComponent::parse_log_line(
             "12:34:56 CUSTOM ferro_wg_core::tunnel: msg",
             &cfg(true, true),
+            &theme,
         )
         .unwrap_err();
         assert_eq!(err, LogParseError::UnknownLevel("CUSTOM".to_owned()));

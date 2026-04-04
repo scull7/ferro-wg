@@ -3,6 +3,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ferro_wg_core::config::LogDisplayConfig;
 use ferro_wg_tui_components::logs::LogsComponent;
+use ferro_wg_tui_core::Theme;
 
 fn benchmark_log_parsing(c: &mut Criterion) {
     let test_lines = vec![
@@ -27,10 +28,12 @@ fn benchmark_log_parsing(c: &mut Criterion) {
         color_badges: false,
     };
 
+    let theme = Theme::mocha();
+
     c.bench_function("parse_log_lines", |b| {
         b.iter(|| {
             for line in &test_lines {
-                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_all));
+                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_all, &theme));
             }
         });
     });
@@ -38,7 +41,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
     c.bench_function("parse_log_lines_no_timestamps", |b| {
         b.iter(|| {
             for line in &test_lines {
-                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_ts));
+                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_ts, &theme));
             }
         });
     });
@@ -46,7 +49,7 @@ fn benchmark_log_parsing(c: &mut Criterion) {
     c.bench_function("parse_log_lines_no_colors", |b| {
         b.iter(|| {
             for line in &test_lines {
-                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_color));
+                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_color, &theme));
             }
         });
     });
