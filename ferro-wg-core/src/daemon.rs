@@ -35,7 +35,7 @@ impl LogBuffer {
     /// Create a new log buffer with maximum capacity.
     #[must_use]
     pub fn new(max_lines: usize) -> Self {
-        let (tx, _) = broadcast::channel(100);
+        let (tx, _) = broadcast::channel(max_lines);
         Self {
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_lines))),
             tx,
