@@ -44,27 +44,32 @@ impl LogBuffer {
 
     /// Add a log line to the buffer and broadcast it.
     fn add_line(&self, line: String) {
-        let mut buf = self.buffer.lock().expect("mutex poisoned");
-        if buf.len() == buf.capacity() {
-            buf.pop_front();
+        match self.buffer.lock() {
+            Ok(mut buf) => {
+                if buf.len() == buf.capacity() {
+                    buf.pop_front();
+                }
+                buf.push_back(line.clone());
+                let _ = self.tx.send(line);
+            }
+            Err(_) => {
+                warn!("LogBuffer mutex poisoned, skipping log line");
+            }
         }
-        buf.push_back(line.clone());
-        let _ = self.tx.send(line);
     }
 
     /// Get a copy of the current buffer.
     ///
-    /// # Panics
-    ///
-    /// Panics if the mutex is poisoned.
+    /// Returns an empty vector if the mutex is poisoned.
     #[must_use]
     pub fn get_buffer(&self) -> Vec<String> {
-        self.buffer
-            .lock()
-            .expect("mutex poisoned")
-            .iter()
-            .cloned()
-            .collect()
+        match self.buffer.lock() {
+            Ok(buf) => buf.iter().cloned().collect(),
+            Err(_) => {
+                warn!("LogBuffer mutex poisoned, returning empty buffer");
+                Vec::new()
+            }
+        }
     }
 }
 

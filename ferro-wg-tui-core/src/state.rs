@@ -167,16 +167,18 @@ impl AppState {
     }
 
     /// Append a log line to the log buffer, maintaining bounded size.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the mutex is poisoned.
     pub fn append_log(&self, line: String) {
-        let mut buf = self.log_lines.lock().expect("mutex poisoned");
-        if buf.len() == buf.capacity() {
-            buf.pop_front();
+        match self.log_lines.lock() {
+            Ok(mut buf) => {
+                if buf.len() == buf.capacity() {
+                    buf.pop_front();
+                }
+                buf.push_back(line);
+            }
+            Err(_) => {
+                warn!("Log buffer mutex poisoned, skipping log append");
+            }
         }
-        buf.push_back(line);
     }
 
     /// Returns the currently focused connection, if any.
