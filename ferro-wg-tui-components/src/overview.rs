@@ -10,6 +10,17 @@ use ferro_wg_tui_core::{
     Action, AppState, Component, ConnectionState, Tab, format_bytes, format_handshake_age,
 };
 
+// Overview table column widths. Must sum to 100 for the percentage columns
+// (the `#` column uses a fixed Length(3) that ratatui accounts for separately).
+const COL_INDEX_W: u16 = 3; // "#"          fixed chars
+const COL_NAME_W: u16 = 18; // "Name"       %
+const COL_STATUS_W: u16 = 17; // "Status"    %
+const COL_BACKEND_W: u16 = 12; // "Backend"  %
+const COL_IFACE_W: u16 = 12; // "Interface"  %
+const COL_TX_W: u16 = 10; // "Tx"           %
+const COL_RX_W: u16 = 10; // "Rx"           %
+const COL_HANDSHAKE_W: u16 = 21; // "Last Handshake" %
+
 /// Aggregate health table showing all configured connections at a glance.
 ///
 /// One row per connection with live stats sourced from the last daemon
@@ -141,14 +152,14 @@ impl Component for OverviewComponent {
         let table = Table::new(
             rows,
             [
-                Constraint::Length(3),
-                Constraint::Percentage(18),
-                Constraint::Percentage(17),
-                Constraint::Percentage(12),
-                Constraint::Percentage(12),
-                Constraint::Percentage(10),
-                Constraint::Percentage(10),
-                Constraint::Percentage(21),
+                Constraint::Length(COL_INDEX_W),
+                Constraint::Percentage(COL_NAME_W),
+                Constraint::Percentage(COL_STATUS_W),
+                Constraint::Percentage(COL_BACKEND_W),
+                Constraint::Percentage(COL_IFACE_W),
+                Constraint::Percentage(COL_TX_W),
+                Constraint::Percentage(COL_RX_W),
+                Constraint::Percentage(COL_HANDSHAKE_W),
             ],
         )
         .header(header)
