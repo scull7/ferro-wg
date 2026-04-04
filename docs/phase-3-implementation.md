@@ -220,6 +220,8 @@ pub struct LogEntry {
     pub target: Cow<'static, str>,
     /// Formatted log message.
     pub message: String,
+    /// Monotonic sequence number for history replay dedup/no-loss guarantee.
+    pub seq: u64,
 }
 ```
 
@@ -287,14 +289,9 @@ impl LogBroadcaster {
 
     /// Subscribe and snapshot current history.
     ///
-    /// **Race mitigation**: `subscribe()` is called *before* taking the history
-    /// lock to snapshot. Any entries published in the tiny window between
-    /// subscribe and snapshot will appear in both history replay *and* live
-    /// stream (harmless duplicate for logs). The alternative (lock first) risks
-    /// silent loss if broadcast buffer drops messages before recv().
-    ///
-    /// Returns `(receiver, history_snapshot)`. Snapshot clones only the
-    /// needed history (bounded to 200).
+    /// **Race mitigation + seq**: Uses monotonic `seq: u64` in LogEntry.
+    /// subscribe() before lock; history replay dedups by seq. Guarantees no loss
+    /// even if buffer wraps. Snapshot filters by seq range.
     pub fn subscribe(&self) -> (broadcast::Receiver<LogEntry>, Vec<LogEntry>) { ... }
 }
 ```
