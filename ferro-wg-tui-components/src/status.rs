@@ -17,6 +17,11 @@ const COL_ENDPOINT_W: u16 = 30; // "Endpoint"
 const COL_ALLOWED_W: u16 = 30; // "Allowed IPs"
 const COL_KEEPALIVE_W: u16 = 15; // "Keepalive"
 
+const _: () = assert!(
+    COL_PEER_W + COL_ENDPOINT_W + COL_ALLOWED_W + COL_KEEPALIVE_W == 100,
+    "Status percentage columns must sum to 100"
+);
+
 /// Active tunnel overview.
 ///
 /// Displays a **connection-level** summary (state, backend, interface,

@@ -21,6 +21,12 @@ const COL_TX_W: u16 = 10; // "Tx"           %
 const COL_RX_W: u16 = 10; // "Rx"           %
 const COL_HANDSHAKE_W: u16 = 21; // "Last Handshake" %
 
+const _: () = assert!(
+    COL_NAME_W + COL_STATUS_W + COL_BACKEND_W + COL_IFACE_W + COL_TX_W + COL_RX_W + COL_HANDSHAKE_W
+        == 100,
+    "Overview percentage columns must sum to 100"
+);
+
 /// Aggregate health table showing all configured connections at a glance.
 ///
 /// One row per connection with live stats sourced from the last daemon
