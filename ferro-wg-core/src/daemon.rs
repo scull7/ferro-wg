@@ -329,23 +329,24 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             ref connection_name,
             backend,
         } => {
-            let result = match connection_name {
-                Some(name) => manager.up(name, backend).await,
-                None => manager.up_all(backend).await,
+            let result = if let Some(ref name) = connection_name {
+                manager.up(name, backend).await
+            } else {
+                manager.up_all(backend).await
             };
-            match result {
-                Ok(()) => DaemonResponse::Ok,
-                Err(e) => DaemonResponse::Error(e.to_string()),
-            }
+            result.map_or_else(
+                |e| DaemonResponse::Error(e.to_string()),
+                |_| DaemonResponse::Ok,
+            )
         }
         DaemonCommand::Down {
             ref connection_name,
         } => {
-            if let Some(name) = connection_name {
-                match manager.down(name) {
-                    Ok(()) => DaemonResponse::Ok,
-                    Err(e) => DaemonResponse::Error(e.to_string()),
-                }
+            if let Some(ref name) = connection_name {
+                manager.down(name).map_or_else(
+                    |e| DaemonResponse::Error(e.to_string()),
+                    |_| DaemonResponse::Ok,
+                )
             } else {
                 manager.down_all();
                 DaemonResponse::Ok
@@ -359,10 +360,10 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             if let Err(e) = manager.down(connection_name) {
                 warn!("Down before switch: {e}");
             }
-            match manager.up(connection_name, backend).await {
-                Ok(()) => DaemonResponse::Ok,
-                Err(e) => DaemonResponse::Error(e.to_string()),
-            }
+            manager.up(connection_name, backend).await.map_or_else(
+                |e| DaemonResponse::Error(e.to_string()),
+                |_| DaemonResponse::Ok,
+            )
         }
         DaemonCommand::Shutdown => DaemonResponse::Ok,
         DaemonCommand::StreamLogs => {
