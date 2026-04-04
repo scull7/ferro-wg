@@ -306,10 +306,11 @@ pub struct TuiTracingLayer {
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TuiTracingLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: ...) {
-        // Extract fields, build LogEntry (non-blocking).
-        // Forward via mpsc to async task that does broadcast.send() to avoid
-        // any sync blocking in tracing pipeline.
-        self.broadcaster.publish(entry);  // uses internal mpsc forwarder task
+        // Extract, build LogEntry. Use bounded mpsc::Sender::try_send (drop on full).
+        // Dedicated async task forwards to broadcast.send() + history update.
+        if self.broadcaster.try_send(entry).is_err() {
+            // count dropped
+        }
     }
 }
 ```
