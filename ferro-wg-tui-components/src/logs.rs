@@ -188,6 +188,18 @@ impl LogsComponent {
         self.scroll_state.auto_scroll = true;
     }
 
+    /// Lock `log_lines` and return the current line count.
+    ///
+    /// Returns `None` (and emits a warning) if the mutex is poisoned.
+    fn total_lines(state: &AppState) -> Option<usize> {
+        if let Ok(lines) = state.log_lines.lock() {
+            Some(lines.len())
+        } else {
+            warn!("log_lines mutex poisoned in handle_key");
+            None
+        }
+    }
+
     /// Compute the first visible line index for the current render pass.
     ///
     /// When `auto_scroll` is enabled the offset tracks the bottom of the log;
@@ -220,26 +232,23 @@ impl Component for LogsComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
         use crossterm::event::KeyCode;
 
-        let Ok(log_lines) = state.log_lines.lock() else {
-            return None;
-        };
-        let total_lines = log_lines.len();
-
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.scroll_up();
-                None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_down(total_lines);
                 None
             }
             KeyCode::Char('g') => {
                 self.jump_to_top();
                 None
             }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let total = Self::total_lines(state)?;
+                self.scroll_down(total);
+                None
+            }
             KeyCode::Char('G') => {
-                self.jump_to_bottom(total_lines);
+                let total = Self::total_lines(state)?;
+                self.jump_to_bottom(total);
                 None
             }
             _ => None,
