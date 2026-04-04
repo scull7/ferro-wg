@@ -3,7 +3,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use tracing::warn;
 
 use ferro_wg_core::config::LogDisplayConfig;
@@ -21,7 +21,22 @@ pub enum LogParseError {
 }
 
 /// Logs tab: scrollable log viewer with parsed log lines.
-pub struct LogsComponent;
+#[derive(Debug, Clone)]
+pub struct LogsComponent {
+    /// Current scroll state for the log viewer.
+    scroll_state: ScrollState,
+}
+
+/// Scroll state for the logs component.
+#[derive(Debug, Clone)]
+pub struct ScrollState {
+    /// The index of the first visible log line in the `log_lines` `VecDeque`.
+    pub offset: usize,
+    /// Whether to automatically scroll to the bottom when new logs are added.
+    pub auto_scroll: bool,
+    /// The number of lines that fit in the current view area.
+    pub view_height: usize,
+}
 
 impl LogsComponent {
     /// Extract the `HH:MM:SS` timestamp from the start of a log line.
@@ -129,10 +144,53 @@ impl LogsComponent {
         Ok(spans)
     }
 
+    /// Scroll up by one line toward older entries, disabling auto-scroll.
+    pub fn scroll_up(&mut self) {
+        if self.scroll_state.offset > 0 {
+            self.scroll_state.offset -= 1;
+            self.scroll_state.auto_scroll = false;
+        }
+    }
+
+    /// Scroll down by one line toward newer entries, disabling auto-scroll.
+    pub fn scroll_down(&mut self, total_lines: usize) {
+        let max_offset = total_lines.saturating_sub(self.scroll_state.view_height);
+        if self.scroll_state.offset < max_offset {
+            self.scroll_state.offset += 1;
+            self.scroll_state.auto_scroll = false;
+        }
+    }
+
+    /// Jump to the oldest entry (top), disabling auto-scroll.
+    pub fn jump_to_top(&mut self) {
+        self.scroll_state.offset = 0;
+        self.scroll_state.auto_scroll = false;
+    }
+
+    /// Jump to the newest entry (bottom), enabling auto-scroll.
+    pub fn jump_to_bottom(&mut self, total_lines: usize) {
+        self.scroll_state.offset = total_lines.saturating_sub(self.scroll_state.view_height);
+        self.scroll_state.auto_scroll = true;
+    }
+
+    /// Update the view height and adjust offset if auto-scroll is enabled.
+    pub fn update_view_height(&mut self, height: usize, total_lines: usize) {
+        self.scroll_state.view_height = height;
+        if self.scroll_state.auto_scroll {
+            self.scroll_state.offset = total_lines.saturating_sub(height);
+        }
+    }
+
     /// Create a new logs component.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            scroll_state: ScrollState {
+                offset: 0,
+                auto_scroll: true,
+                view_height: 0,
+            },
+        }
     }
 }
 
@@ -143,9 +201,33 @@ impl Default for LogsComponent {
 }
 
 impl Component for LogsComponent {
-    fn handle_key(&mut self, _key: KeyEvent, _state: &AppState) -> Option<Action> {
-        // No interactive elements yet (future: scroll, filter).
-        None
+    fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
+        use crossterm::event::KeyCode;
+
+        let Ok(log_lines) = state.log_lines.lock() else {
+            return None;
+        };
+        let total_lines = log_lines.len();
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll_up();
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_down(total_lines);
+                None
+            }
+            KeyCode::Char('g') => {
+                self.jump_to_top();
+                None
+            }
+            KeyCode::Char('G') => {
+                self.jump_to_bottom(total_lines);
+                None
+            }
+            _ => None,
+        }
     }
 
     fn update(&mut self, _action: &Action, _state: &AppState) {
@@ -161,6 +243,9 @@ impl Component for LogsComponent {
             return;
         };
 
+        let total_lines = log_lines.len();
+        self.update_view_height(area.height.saturating_sub(2) as usize, total_lines); // subtract block borders
+
         let lines: Vec<Line<'_>> = if log_lines.is_empty() {
             vec![Line::from(Span::styled(
                 "(no log entries yet)",
@@ -169,6 +254,8 @@ impl Component for LogsComponent {
         } else {
             log_lines
                 .iter()
+                .skip(self.scroll_state.offset)
+                .take(self.scroll_state.view_height)
                 .map(|l| {
                     let spans = Self::parse_log_line(l, config)
                         .unwrap_or_else(|_| vec![Span::raw(l.as_str())]);
@@ -179,6 +266,16 @@ impl Component for LogsComponent {
 
         let paragraph = Paragraph::new(lines).block(theme.panel_block("Logs"));
         frame.render_widget(paragraph, area);
+
+        // Render scrollbar
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(total_lines)
+            .position(self.scroll_state.offset);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
 
@@ -331,5 +428,88 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, LogParseError::UnknownLevel("CUSTOM".to_owned()));
+    }
+
+    // --- ScrollState tests ---
+
+    #[test]
+    fn scroll_up_decreases_offset_when_possible() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.offset = 5;
+        component.scroll_up();
+        assert_eq!(component.scroll_state.offset, 4);
+        assert!(!component.scroll_state.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_up_does_nothing_at_zero_offset() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.offset = 0;
+        component.scroll_up();
+        assert_eq!(component.scroll_state.offset, 0);
+        assert!(component.scroll_state.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_increases_offset_when_possible() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.view_height = 10;
+        component.scroll_state.offset = 0;
+        component.scroll_down(20); // total_lines = 20
+        assert_eq!(component.scroll_state.offset, 1);
+        assert!(!component.scroll_state.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_does_nothing_at_max_offset() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.view_height = 10;
+        component.scroll_state.offset = 10; // max_offset = 20 - 10 = 10
+        component.scroll_down(20);
+        assert_eq!(component.scroll_state.offset, 10);
+        assert!(component.scroll_state.auto_scroll);
+    }
+
+    #[test]
+    fn jump_to_top_sets_offset_to_zero_and_disables_auto_scroll() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.offset = 15;
+        component.scroll_state.auto_scroll = true;
+        component.jump_to_top();
+        assert_eq!(component.scroll_state.offset, 0);
+        assert!(!component.scroll_state.auto_scroll);
+    }
+
+    #[test]
+    fn jump_to_bottom_sets_offset_to_max_and_enables_auto_scroll() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.view_height = 5;
+        component.scroll_state.offset = 0;
+        component.scroll_state.auto_scroll = false;
+        component.jump_to_bottom(25);
+        assert_eq!(component.scroll_state.offset, 20); // 25 - 5 = 20
+        assert!(component.scroll_state.auto_scroll);
+    }
+
+    #[test]
+    fn update_view_height_adjusts_offset_when_auto_scroll_enabled() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.view_height = 10;
+        component.scroll_state.offset = 5;
+        component.scroll_state.auto_scroll = true;
+        component.update_view_height(5, 15); // new height 5, total 15
+        assert_eq!(component.scroll_state.view_height, 5);
+        assert_eq!(component.scroll_state.offset, 10); // 15 - 5 = 10
+    }
+
+    #[test]
+    fn update_view_height_does_not_adjust_offset_when_auto_scroll_disabled() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.view_height = 10;
+        component.scroll_state.offset = 5;
+        component.scroll_state.auto_scroll = false;
+        component.update_view_height(5, 15);
+        assert_eq!(component.scroll_state.view_height, 5);
+        assert_eq!(component.scroll_state.offset, 5);
     }
 }
