@@ -2,16 +2,23 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::{Cell, Row, Table, TableState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
 use ferro_wg_tui_core::{
     Action, AppState, Component, ConnectionState, format_bytes, format_handshake_age,
 };
 
-/// Active tunnels overview showing connection state, traffic, and
-/// handshake age for each peer.
+/// Active tunnel overview.
+///
+/// Displays a **connection-level** summary (state, backend, interface,
+/// aggregate Rx/Tx bytes, last handshake) above a **per-peer** table
+/// (name, endpoint, allowed IPs, keepalive interval).
+///
+/// Traffic and handshake metrics are whole-tunnel totals reported by the
+/// backend — they are **not** per-peer measurements.
 pub struct StatusComponent {
     /// Per-component table selection state.
     table_state: TableState,
@@ -80,46 +87,97 @@ impl Component for StatusComponent {
         let theme = &state.theme;
 
         let Some(conn) = state.active_connection() else {
-            let para = ratatui::widgets::Paragraph::new("No connections configured.")
+            let para = Paragraph::new("No connections configured.")
                 .block(theme.panel_block("Status"))
                 .style(Style::default().fg(theme.muted));
             frame.render_widget(para, area);
             return;
         };
 
-        // Connection-level status and stats.
-        let (is_connected, hs, rx, tx) = conn.status.as_ref().map_or(
-            (false, "-".to_owned(), "-".to_owned(), "-".to_owned()),
-            |s| {
-                let hs = s
-                    .stats
-                    .last_handshake
-                    .map_or_else(|| "-".to_owned(), format_handshake_age);
-                let rx = format_bytes(s.stats.rx_bytes);
-                let tx = format_bytes(s.stats.tx_bytes);
-                (s.state == ConnectionState::Connected, hs, rx, tx)
-            },
-        );
+        // Render the outer border once; work inside the inner area.
+        let block = theme.panel_block("Status");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
 
-        let header = Row::new(vec!["Peer", "Endpoint", "Status", "Rx", "Tx", "Handshake"])
-            .style(theme.header_style());
+        // Split inner area: 2-line connection summary, then the peer table.
+        let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
 
-        let (status_str, status_style): (&'static str, Style) = if is_connected {
-            ("connected", Style::default().fg(theme.success))
+        // ── Connection-level summary ──────────────────────────────────────────
+        let (is_connected, state_str, hs, rx, tx, backend_str, iface_str) =
+            conn.status.as_ref().map_or(
+                (
+                    false,
+                    "down",
+                    "-".to_owned(),
+                    "-".to_owned(),
+                    "-".to_owned(),
+                    "-".to_owned(),
+                    "-".to_owned(),
+                ),
+                |s| {
+                    let connected = s.state == ConnectionState::Connected;
+                    let hs = s
+                        .stats
+                        .last_handshake
+                        .map_or_else(|| "-".to_owned(), format_handshake_age);
+                    let rx = format_bytes(s.stats.rx_bytes);
+                    let tx = format_bytes(s.stats.tx_bytes);
+                    let backend = s.backend.to_string();
+                    let iface = s.interface.clone().unwrap_or_else(|| "-".to_owned());
+                    (connected, if connected { "connected" } else { "down" }, hs, rx, tx, backend, iface)
+                },
+            );
+
+        let state_style = if is_connected {
+            Style::default().fg(theme.success)
         } else {
-            ("down", Style::default().fg(theme.muted))
+            Style::default().fg(theme.muted)
         };
+        let label = Style::default().fg(theme.muted);
+
+        let summary = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("State: ", label),
+                Span::styled(state_str, state_style),
+                Span::raw("  "),
+                Span::styled("Backend: ", label),
+                Span::raw(backend_str),
+                Span::raw("  "),
+                Span::styled("Interface: ", label),
+                Span::raw(iface_str),
+            ]),
+            Line::from(vec![
+                Span::styled("Rx: ", label),
+                Span::raw(rx),
+                Span::raw("  "),
+                Span::styled("Tx: ", label),
+                Span::raw(tx),
+                Span::raw("  "),
+                Span::styled("Handshake: ", label),
+                Span::raw(hs),
+                Span::styled("  (connection totals, not per-peer)", label),
+            ]),
+        ]);
+        frame.render_widget(summary, chunks[0]);
+
+        // ── Per-peer table ────────────────────────────────────────────────────
+        let header = Row::new(vec!["Peer", "Endpoint", "Allowed IPs", "Keepalive"])
+            .style(theme.header_style());
 
         let rows: Vec<Row<'_>> = state
             .filtered_peers()
             .map(|p| {
+                let allowed = p.allowed_ips.join(", ");
+                let keepalive = if p.persistent_keepalive == 0 {
+                    "off".to_owned()
+                } else {
+                    format!("{}s", p.persistent_keepalive)
+                };
                 Row::new(vec![
-                    Cell::from(p.name.as_str()),
-                    Cell::from(p.endpoint.as_deref().unwrap_or("-")),
-                    Cell::from(status_str).style(status_style),
-                    Cell::from(rx.as_str()),
-                    Cell::from(tx.as_str()),
-                    Cell::from(hs.as_str()),
+                    Cell::from(p.name.clone()),
+                    Cell::from(p.endpoint.clone().unwrap_or_else(|| "-".to_owned())),
+                    Cell::from(allowed),
+                    Cell::from(keepalive),
                 ])
             })
             .collect();
@@ -127,19 +185,16 @@ impl Component for StatusComponent {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(20),
                 Constraint::Percentage(25),
-                Constraint::Percentage(12),
-                Constraint::Percentage(12),
-                Constraint::Percentage(12),
-                Constraint::Percentage(19),
+                Constraint::Percentage(30),
+                Constraint::Percentage(30),
+                Constraint::Percentage(15),
             ],
         )
         .header(header)
-        .block(theme.panel_block("Status"))
         .row_highlight_style(theme.highlight_style());
 
-        frame.render_stateful_widget(table, area, &mut self.table_state);
+        frame.render_stateful_widget(table, chunks[1], &mut self.table_state);
     }
 }
 
