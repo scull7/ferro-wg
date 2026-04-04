@@ -16,7 +16,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -69,6 +69,87 @@ enum DaemonMessage {
     Unreachable,
 }
 
+/// Process pending daemon messages and dispatch actions.
+fn handle_daemon_messages(
+    daemon_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+    state: &mut AppState,
+    components: &mut [Box<dyn Component>],
+    tab_bar: &mut TabBarComponent,
+    status_bar: &mut StatusBarComponent,
+) {
+    while let Ok(msg) = daemon_rx.try_recv() {
+        let actions: Vec<Action> = match msg {
+            DaemonMessage::StatusUpdate(peers) => vec![Action::UpdatePeers(peers)],
+            DaemonMessage::CommandOk(msg) => vec![Action::DaemonOk(msg)],
+            DaemonMessage::CommandError(msg) => vec![Action::DaemonError(msg)],
+            DaemonMessage::Unreachable => vec![
+                Action::DaemonConnectivityChanged(false),
+                Action::DaemonError("daemon is not running".into()),
+            ],
+        };
+        for action in &actions {
+            dispatch_all(state, action, components, tab_bar, status_bar);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Render the UI to the terminal.
+fn render_ui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &AppState,
+    components: &mut [Box<dyn Component>],
+    tab_bar: &mut TabBarComponent,
+    status_bar: &mut StatusBarComponent,
+    connection_bar: &mut ConnectionBarComponent,
+    show_bar: bool,
+    chunks: &[ratatui::layout::Rect],
+) -> Result<(), Box<dyn std::error::Error>> {
+    terminal.draw(|frame| {
+        tab_bar.render(frame, chunks[0], false, state);
+        if show_bar {
+            connection_bar.render(frame, chunks[1], false, state);
+        }
+        components[state.active_tab.index()].render(frame, chunks[2], true, state);
+        status_bar.render(frame, chunks[3], false, state);
+    })?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Handle a single application event.
+fn handle_app_event(
+    event: &AppEvent,
+    state: &mut AppState,
+    components: &mut [Box<dyn Component>],
+    tab_bar: &mut TabBarComponent,
+    status_bar: &mut StatusBarComponent,
+    connection_bar: &mut ConnectionBarComponent,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+    poll_in_flight: &Arc<AtomicBool>,
+) {
+    match *event {
+        AppEvent::Key(key) => {
+            let action = if state.input_mode == InputMode::Search {
+                status_bar.handle_key(key, state)
+            } else {
+                handle_global_key(key)
+                    .or_else(|| connection_bar.handle_key(key, state))
+                    .or_else(|| components[state.active_tab.index()].handle_key(key, state))
+            };
+
+            if let Some(ref action) = action {
+                dispatch_all(state, action, components, tab_bar, status_bar);
+                maybe_spawn_command(action, daemon_tx, tasks);
+            }
+        }
+        AppEvent::Tick => {
+            spawn_status_poll(daemon_tx, poll_in_flight, tasks);
+        }
+    }
+}
+
 /// Convert a daemon client error into a [`DaemonMessage`].
 ///
 /// Centralizes the boundary between typed errors and UI-facing
@@ -116,7 +197,6 @@ pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>
     result
 }
 
-#[allow(clippy::too_many_lines)]
 /// Drive the TUI event loop until the user quits.
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -170,83 +250,63 @@ async fn event_loop(
 
     while state.running {
         // Drain daemon messages (non-blocking).
-        while let Ok(msg) = daemon_rx.try_recv() {
-            let actions: Vec<Action> = match msg {
-                DaemonMessage::StatusUpdate(peers) => vec![Action::UpdatePeers(peers)],
-                DaemonMessage::CommandOk(msg) => vec![Action::DaemonOk(msg)],
-                DaemonMessage::CommandError(msg) => vec![Action::DaemonError(msg)],
-                DaemonMessage::Unreachable => vec![
-                    Action::DaemonConnectivityChanged(false),
-                    Action::DaemonError("daemon is not running".into()),
-                ],
-            };
-            for action in &actions {
-                dispatch_all(
-                    &mut state,
-                    action,
-                    &mut components,
-                    &mut tab_bar,
-                    &mut status_bar,
-                );
-            }
-        }
+        handle_daemon_messages(
+            &mut daemon_rx,
+            &mut state,
+            &mut components,
+            &mut tab_bar,
+            &mut status_bar,
+        );
 
         // Clear expired feedback.
         state.clear_expired_feedback();
 
         // Render.
-        terminal.draw(|frame| {
-            let show_bar = state.connections.len() > 1
-                && frame.area().height >= MIN_HEIGHT_FOR_CONNECTION_BAR
-                && frame.area().width >= MIN_WIDTH_FOR_CONNECTION_BAR;
-            let bar_height = u16::from(show_bar);
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(TAB_BAR_HEIGHT),    // Tab bar
-                    Constraint::Length(bar_height),        // Connection bar (0 when hidden)
-                    Constraint::Min(0),                    // Main content
-                    Constraint::Length(STATUS_BAR_HEIGHT), // Status bar / search
-                ])
-                .split(frame.area());
-            debug_assert_layout(&chunks, frame.area(), show_bar);
+        let terminal_size = terminal.size()?;
+        let show_bar = state.connections.len() > 1
+            && terminal_size.height >= MIN_HEIGHT_FOR_CONNECTION_BAR
+            && terminal_size.width >= MIN_WIDTH_FOR_CONNECTION_BAR;
+        let bar_height = u16::from(show_bar);
+        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(TAB_BAR_HEIGHT),    // Tab bar
+                Constraint::Length(bar_height),        // Connection bar (0 when hidden)
+                Constraint::Min(0),                    // Main content
+                Constraint::Length(STATUS_BAR_HEIGHT), // Status bar / search
+            ])
+            .split(area);
+        debug_assert_layout(&chunks, area, show_bar);
 
-            tab_bar.render(frame, chunks[0], false, &state);
-            if show_bar {
-                connection_bar.render(frame, chunks[1], false, &state);
-            }
-            components[state.active_tab.index()].render(frame, chunks[2], true, &state);
-            status_bar.render(frame, chunks[3], false, &state);
-        })?;
+        render_ui(
+            terminal,
+            &state,
+            &mut components,
+            &mut tab_bar,
+            &mut status_bar,
+            &mut connection_bar,
+            show_bar,
+            &chunks,
+        )?;
 
         match events.next().await {
-            Some(AppEvent::Key(key)) => {
-                let action = if state.input_mode == InputMode::Search {
-                    status_bar.handle_key(key, &state)
-                } else {
-                    handle_global_key(key)
-                        .or_else(|| connection_bar.handle_key(key, &state))
-                        .or_else(|| components[state.active_tab.index()].handle_key(key, &state))
-                };
-
-                if let Some(ref action) = action {
-                    dispatch_all(
-                        &mut state,
-                        action,
-                        &mut components,
-                        &mut tab_bar,
-                        &mut status_bar,
-                    );
-                    maybe_spawn_command(action, &daemon_tx, &mut tasks);
-                }
-            }
-            Some(AppEvent::Tick) => {
-                spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks);
+            Some(event) => {
+                handle_app_event(
+                    &event,
+                    &mut state,
+                    &mut components,
+                    &mut tab_bar,
+                    &mut status_bar,
+                    &mut connection_bar,
+                    &daemon_tx,
+                    &mut tasks,
+                    &poll_in_flight,
+                );
             }
             None => break,
         }
     }
-
     // Abort remaining background tasks on exit.
     tasks.abort_all();
 
