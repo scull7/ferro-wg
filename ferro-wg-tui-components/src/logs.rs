@@ -94,16 +94,36 @@ impl LogsComponent {
     /// with `HH:MM:SS `, or [`LogParseError::UnknownLevel`] when the level token
     /// is not a recognised tracing level. Callers should fall back to a plain-text
     /// span on error.
-    pub fn parse_log_line(
-        line: &str,
+    /// Parse a log line into styled spans for display.
+    ///
+    /// Expects lines in the format emitted by [`LogLayer`](ferro_wg_core::daemon::LogLayer):
+    /// `HH:MM:SS LEVEL target: message`.
+    ///
+    /// Display behaviour is controlled by `config`:
+    /// - `show_timestamps`: include the `[HH:MM:SS]` prefix span.
+    /// - `color_badges`: apply color to the `[LEVEL]` span; plain text otherwise.
+    ///
+    /// The message portion of the span borrows directly from `line` via
+    /// [`Cow::Borrowed`](std::borrow::Cow), avoiding an allocation for the
+    /// (typically largest) part of each log entry.  Only the bracketed
+    /// `[HH:MM:SS]` and `[LEVEL]` labels require a heap allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogParseError::MalformedTimestamp`] when the line does not begin
+    /// with `HH:MM:SS `, or [`LogParseError::UnknownLevel`] when the level token
+    /// is not a recognised tracing level. Callers should fall back to a plain-text
+    /// span on error.
+    pub fn parse_log_line<'a>(
+        line: &'a str,
         config: &LogDisplayConfig,
-    ) -> Result<Vec<Span<'static>>, LogParseError> {
+    ) -> Result<Vec<Span<'a>>, LogParseError> {
         let line = line.trim();
 
         let timestamp = Self::parse_timestamp(line).ok_or(LogParseError::MalformedTimestamp)?;
         let (level, message) = Self::extract_level_message(&line[9..])?;
 
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(5);
+        let mut spans: Vec<Span<'a>> = Vec::with_capacity(5);
         if config.show_timestamps {
             spans.push(Span::styled(
                 format!("[{timestamp}]"),
@@ -116,7 +136,8 @@ impl LogsComponent {
             Self::level_style(level, config.color_badges),
         ));
         spans.push(Span::raw(" "));
-        spans.push(Span::raw(message.to_owned()));
+        // `message` borrows directly from `line` — no allocation needed.
+        spans.push(Span::raw(message));
         Ok(spans)
     }
 
@@ -162,7 +183,7 @@ impl Component for LogsComponent {
                 .iter()
                 .map(|l| {
                     let spans = Self::parse_log_line(l, config)
-                        .unwrap_or_else(|_| vec![Span::raw(l.clone())]);
+                        .unwrap_or_else(|_| vec![Span::raw(l.as_str())]);
                     Line::from(spans)
                 })
                 .collect()
@@ -264,11 +285,9 @@ mod tests {
             ("ERROR", Color::Red),
         ];
         for (level, expected_color) in cases {
-            let spans = LogsComponent::parse_log_line(
-                &format!("12:34:56 {level} target: message"),
-                &cfg(true, true),
-            )
-            .unwrap_or_else(|e| panic!("level={level}: {e}"));
+            let line = format!("12:34:56 {level} target: message");
+            let spans = LogsComponent::parse_log_line(&line, &cfg(true, true))
+                .unwrap_or_else(|e| panic!("level={level}: {e}"));
             assert_eq!(spans[2].content, format!("[{level}]"), "level={level}");
             assert_eq!(spans[2].style.fg, Some(expected_color), "level={level}");
         }
