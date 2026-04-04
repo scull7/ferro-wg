@@ -30,16 +30,19 @@ impl LogsComponent {
     /// `HH:MM:SS ` (digits, colons, trailing space), `None` otherwise.
     #[must_use]
     pub fn parse_timestamp(line: &str) -> Option<&str> {
-        // Byte indexing is safe and correct here: the timestamp is always ASCII,
-        // so each byte corresponds to exactly one character, and matching ASCII
-        // literals rules out any multi-byte UTF-8 continuation bytes.
-        let bytes = line.as_bytes();
-        let valid = bytes.len() >= 9
-            && bytes[2] == b':'
-            && bytes[5] == b':'
-            && bytes[8] == b' '
-            && bytes[0..8].iter().all(|&b| b.is_ascii_digit() || b == b':');
-        if valid { Some(&line[0..8]) } else { None }
+        let mut chars = line.chars();
+        let valid = chars.next()?.is_ascii_digit()
+            && chars.next()?.is_ascii_digit()
+            && chars.next()? == ':'
+            && chars.next()?.is_ascii_digit()
+            && chars.next()?.is_ascii_digit()
+            && chars.next()? == ':'
+            && chars.next()?.is_ascii_digit()
+            && chars.next()?.is_ascii_digit()
+            && chars.next()? == ' ';
+        // All 8 preceding chars are ASCII (digits/colons), so byte offset 8 is
+        // a valid char boundary and `line[..8]` is always a well-formed str.
+        if valid { Some(&line[..8]) } else { None }
     }
 
     /// Return the [`Style`] to apply to a level badge.
