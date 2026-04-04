@@ -132,7 +132,7 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
     Ok(listener)
 }
 
-/// Handle a StreamLogs connection by sending buffered logs then streaming new ones.
+/// Handle a `StreamLogs` connection by sending buffered logs then streaming new ones.
 ///
 /// # Errors
 ///
