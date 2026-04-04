@@ -20,6 +20,9 @@ pub enum LogParseError {
     UnknownLevel(String),
 }
 
+/// Number of rows consumed by the panel block's top and bottom borders.
+const BLOCK_BORDER_HEIGHT: u16 = 2;
+
 /// Logs tab: scrollable log viewer with parsed log lines.
 #[derive(Debug, Clone)]
 pub struct LogsComponent {
@@ -173,11 +176,16 @@ impl LogsComponent {
         self.scroll_state.auto_scroll = true;
     }
 
-    /// Update the view height and adjust offset if auto-scroll is enabled.
-    pub fn update_view_height(&mut self, height: usize, total_lines: usize) {
-        self.scroll_state.view_height = height;
+    /// Compute the first visible line index for the current render pass.
+    ///
+    /// When `auto_scroll` is enabled the offset tracks the bottom of the log;
+    /// otherwise the manually-scrolled `offset` is used unchanged.
+    /// This is a pure calculation — it never modifies `self`.
+    fn display_offset(&self, total_lines: usize) -> usize {
         if self.scroll_state.auto_scroll {
-            self.scroll_state.offset = total_lines.saturating_sub(height);
+            total_lines.saturating_sub(self.scroll_state.view_height)
+        } else {
+            self.scroll_state.offset
         }
     }
 
@@ -244,7 +252,10 @@ impl Component for LogsComponent {
         };
 
         let total_lines = log_lines.len();
-        self.update_view_height(area.height.saturating_sub(2) as usize, total_lines); // subtract block borders
+        // Cache view_height so handle_key can compute valid scroll bounds.
+        // This is the only write allowed in render; offset is never touched here.
+        self.scroll_state.view_height = area.height.saturating_sub(BLOCK_BORDER_HEIGHT) as usize;
+        let offset = self.display_offset(total_lines);
 
         let lines: Vec<Line<'_>> = if log_lines.is_empty() {
             vec![Line::from(Span::styled(
@@ -254,7 +265,7 @@ impl Component for LogsComponent {
         } else {
             log_lines
                 .iter()
-                .skip(self.scroll_state.offset)
+                .skip(offset)
                 .take(self.scroll_state.view_height)
                 .map(|l| {
                     let spans = Self::parse_log_line(l, config)
@@ -267,14 +278,13 @@ impl Component for LogsComponent {
         let paragraph = Paragraph::new(lines).block(theme.panel_block("Logs"));
         frame.render_widget(paragraph, area);
 
-        // Render scrollbar
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(total_lines)
-            .position(self.scroll_state.offset);
+            .position(offset);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
@@ -492,24 +502,26 @@ mod tests {
     }
 
     #[test]
-    fn update_view_height_adjusts_offset_when_auto_scroll_enabled() {
+    fn display_offset_auto_scroll_clamps_to_bottom() {
         let mut component = LogsComponent::new();
-        component.scroll_state.view_height = 10;
-        component.scroll_state.offset = 5;
-        component.scroll_state.auto_scroll = true;
-        component.update_view_height(5, 15); // new height 5, total 15
-        assert_eq!(component.scroll_state.view_height, 5);
-        assert_eq!(component.scroll_state.offset, 10); // 15 - 5 = 10
+        component.scroll_state.view_height = 5;
+        // auto_scroll is true by default; offset must track the bottom.
+        assert_eq!(component.display_offset(20), 15); // 20 - 5
     }
 
     #[test]
-    fn update_view_height_does_not_adjust_offset_when_auto_scroll_disabled() {
+    fn display_offset_manual_scroll_uses_stored_offset() {
         let mut component = LogsComponent::new();
-        component.scroll_state.view_height = 10;
-        component.scroll_state.offset = 5;
         component.scroll_state.auto_scroll = false;
-        component.update_view_height(5, 15);
-        assert_eq!(component.scroll_state.view_height, 5);
-        assert_eq!(component.scroll_state.offset, 5);
+        component.scroll_state.offset = 7;
+        component.scroll_state.view_height = 5;
+        assert_eq!(component.display_offset(20), 7);
+    }
+
+    #[test]
+    fn display_offset_auto_scroll_saturates_at_zero_when_content_fits() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.view_height = 30;
+        assert_eq!(component.display_offset(10), 0); // 10 < 30 → saturates
     }
 }
