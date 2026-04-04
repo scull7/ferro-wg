@@ -9,16 +9,91 @@
 //! handling `Up` and `Status` commands, so newly imported connections
 //! are picked up without restarting.
 
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
+use tracing_subscriber::Layer;
 
 use crate::config::AppConfig;
 use crate::config::toml::load_app_config;
 use crate::ipc::{self, DaemonCommand, DaemonResponse};
 use crate::tunnel::TunnelManager;
+
+/// Buffer for daemon logs with broadcasting capability.
+#[derive(Clone)]
+pub struct LogBuffer {
+    buffer: Arc<Mutex<VecDeque<String>>>,
+    tx: broadcast::Sender<String>,
+}
+
+impl LogBuffer {
+    /// Create a new log buffer with maximum capacity.
+    #[must_use]
+    pub fn new(max_lines: usize) -> Self {
+        let (tx, _) = broadcast::channel(100);
+        Self {
+            buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_lines))),
+            tx,
+        }
+    }
+
+    /// Add a log line to the buffer and broadcast it.
+    fn add_line(&self, line: String) {
+        let mut buf = self.buffer.lock().unwrap();
+        if buf.len() == buf.capacity() {
+            buf.pop_front();
+        }
+        buf.push_back(line.clone());
+        let _ = self.tx.send(line);
+    }
+
+    /// Get a copy of the current buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned.
+    #[must_use]
+    pub fn get_buffer(&self) -> Vec<String> {
+        self.buffer.lock().unwrap().iter().cloned().collect()
+    }
+}
+
+/// Visitor to extract log message from tracing event.
+struct LogVisitor(String);
+
+impl tracing::field::Visit for LogVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}").trim_matches('"').to_string();
+        }
+    }
+}
+
+impl<S> Layer<S> for LogBuffer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = LogVisitor(String::new());
+        event.record(&mut visitor);
+        let line = format!(
+            "{} {}: {}",
+            event.metadata().level(),
+            event.metadata().target(),
+            visitor.0
+        );
+        self.add_line(line);
+    }
+}
 
 /// Run the IPC server loop.
 ///
@@ -33,6 +108,7 @@ pub async fn run(
     config: AppConfig,
     config_path: &Path,
     socket_path: &Path,
+    log_buffer: LogBuffer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Remove stale socket file.
     if socket_path.exists() {
@@ -80,27 +156,49 @@ pub async fn run(
 
         info!("Received command: {command:?}");
 
-        // Reload config for commands that need the latest connections.
-        if needs_config_reload(&command) {
-            reload_config(&mut manager, &config_path);
-        }
+        match command {
+            DaemonCommand::StreamLogs => {
+                // Send buffered logs first
+                let buf = log_buffer.get_buffer();
+                for line in buf {
+                    let resp = DaemonResponse::LogLine(line);
+                    if send_response(&mut writer, &resp).await.is_err() {
+                        break;
+                    }
+                }
+                // Then stream new logs
+                let mut rx = log_buffer.tx.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(line) => {
+                            let resp = DaemonResponse::LogLine(line);
+                            if send_response(&mut writer, &resp).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(_) => {}
+                    }
+                }
+            }
+            cmd => {
+                // Reload config for commands that need the latest connections.
+                if needs_config_reload(&cmd) {
+                    reload_config(&mut manager, &config_path);
+                }
 
-        let response = handle_command(&mut manager, command).await;
+                let response = handle_command(&mut manager, &cmd).await;
 
-        // Check for shutdown before sending response.
-        let is_shutdown = matches!(response, DaemonResponse::Ok)
-            && matches!(
-                ipc::decode_message::<DaemonCommand>(&line),
-                Ok(DaemonCommand::Shutdown)
-            );
+                // Check for shutdown before sending response.
+                let is_shutdown = matches!(response, DaemonResponse::Ok)
+                    && matches!(cmd, DaemonCommand::Shutdown);
 
-        let _ = send_response(&mut writer, &response).await;
+                let _ = send_response(&mut writer, &response).await;
 
-        if is_shutdown {
-            info!("Shutdown requested, exiting");
-            manager.down_all();
-            let _ = std::fs::remove_file(socket_path);
-            break;
+                if is_shutdown {
+                    break;
+                }
+            }
         }
     }
 
@@ -124,14 +222,14 @@ fn reload_config(manager: &mut TunnelManager, config_path: &Path) {
 }
 
 /// Dispatch a command to the tunnel manager and produce a response.
-async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> DaemonResponse {
-    match command {
+async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) -> DaemonResponse {
+    match *command {
         DaemonCommand::Up {
-            connection_name,
+            ref connection_name,
             backend,
         } => {
             let result = match connection_name {
-                Some(name) => manager.up(&name, backend).await,
+                Some(name) => manager.up(name, backend).await,
                 None => manager.up_all(backend).await,
             };
             match result {
@@ -139,9 +237,11 @@ async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> 
                 Err(e) => DaemonResponse::Error(e.to_string()),
             }
         }
-        DaemonCommand::Down { connection_name } => {
+        DaemonCommand::Down {
+            ref connection_name,
+        } => {
             if let Some(name) = connection_name {
-                match manager.down(&name) {
+                match manager.down(name) {
                     Ok(()) => DaemonResponse::Ok,
                     Err(e) => DaemonResponse::Error(e.to_string()),
                 }
@@ -152,18 +252,19 @@ async fn handle_command(manager: &mut TunnelManager, command: DaemonCommand) -> 
         }
         DaemonCommand::Status => DaemonResponse::Status(manager.status()),
         DaemonCommand::SwitchBackend {
-            connection_name,
+            ref connection_name,
             backend,
         } => {
-            if let Err(e) = manager.down(&connection_name) {
+            if let Err(e) = manager.down(connection_name) {
                 warn!("Down before switch: {e}");
             }
-            match manager.up(&connection_name, backend).await {
+            match manager.up(connection_name, backend).await {
                 Ok(()) => DaemonResponse::Ok,
                 Err(e) => DaemonResponse::Error(e.to_string()),
             }
         }
         DaemonCommand::Shutdown => DaemonResponse::Ok,
+        DaemonCommand::StreamLogs => unreachable!("StreamLogs handled in server loop"),
     }
 }
 

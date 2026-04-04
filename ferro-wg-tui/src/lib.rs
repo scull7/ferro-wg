@@ -32,6 +32,7 @@ use ferro_wg_tui_components::{
     PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
+use tracing::warn;
 
 use event::{AppEvent, EventHandler};
 
@@ -146,6 +147,25 @@ async fn event_loop(
 
     // Track background tasks for clean shutdown.
     let mut tasks = JoinSet::new();
+
+    // Spawn log streaming task.
+    let log_lines = Arc::clone(&state.log_lines);
+    tasks.spawn(async move {
+        match client::stream_logs().await {
+            Ok(mut rx) => {
+                while let Some(line) = rx.recv().await {
+                    let mut buf = log_lines.lock().unwrap();
+                    if buf.len() == buf.capacity() {
+                        buf.pop_front();
+                    }
+                    buf.push_back(line);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to stream logs: {e}");
+            }
+        }
+    });
 
     while state.running {
         // Drain daemon messages (non-blocking).
@@ -367,6 +387,7 @@ fn maybe_spawn_command(
         let msg = match client::send_command(&cmd).await {
             Ok(DaemonResponse::Ok) => DaemonMessage::CommandOk(description),
             Ok(DaemonResponse::Error(e)) => DaemonMessage::CommandError(e),
+            Ok(DaemonResponse::LogLine(_)) => unreachable!("LogLine only for streaming"),
             Err(e) => error_to_message(&e),
             Ok(DaemonResponse::Status(_)) => return,
         };

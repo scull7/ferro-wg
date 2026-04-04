@@ -5,6 +5,8 @@
 //! receive `&AppState` for read-only access during rendering and key
 //! handling.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ferro_wg_core::config::{AppConfig, WgConfig};
@@ -121,7 +123,7 @@ pub struct AppState {
     /// Always 0 when `connections` is empty.
     pub selected_connection: usize,
     /// Log lines for the Logs tab.
-    pub log_lines: Vec<String>,
+    pub log_lines: Arc<Mutex<VecDeque<String>>>,
     /// Active color theme.
     pub theme: Theme,
     /// Whether the daemon is currently reachable.
@@ -157,11 +159,24 @@ impl AppState {
             search_query: String::new(),
             connections,
             selected_connection: 0,
-            log_lines: Vec::new(),
+            log_lines: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             theme: Theme::mocha(),
             daemon_connected: false,
             feedback: None,
         }
+    }
+
+    /// Append a log line to the log buffer, maintaining bounded size.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned.
+    pub fn append_log(&self, line: String) {
+        let mut buf = self.log_lines.lock().unwrap();
+        if buf.len() == buf.capacity() {
+            buf.pop_front();
+        }
+        buf.push_back(line);
     }
 
     /// Returns the currently focused connection, if any.

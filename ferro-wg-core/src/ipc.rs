@@ -36,6 +36,8 @@ pub enum DaemonCommand {
     },
     /// Ask the daemon to shut down cleanly.
     Shutdown,
+    /// Request to stream daemon logs in real-time.
+    StreamLogs,
 }
 
 /// Responses sent from the daemon to the CLI/TUI.
@@ -47,6 +49,8 @@ pub enum DaemonResponse {
     Error(String),
     /// Current status of all peers.
     Status(Vec<PeerStatus>),
+    /// A single log line from the daemon.
+    LogLine(String),
 }
 
 /// Runtime status of a single connection, reported by the daemon.
@@ -147,6 +151,17 @@ mod tests {
     }
 
     #[test]
+    fn response_logline_roundtrip() {
+        let resp = DaemonResponse::LogLine(
+            "2024-10-04T12:34:56.789 INFO ferro_wg_daemon::server: Listening on /tmp/ferro-wg.sock"
+                .into(),
+        );
+        let encoded = encode_message(&resp).expect("encode");
+        let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
+        assert!(matches!(decoded, DaemonResponse::LogLine(ref s) if s.starts_with("2024-10-04")));
+    }
+
+    #[test]
     fn all_commands_serialize() {
         let commands = vec![
             DaemonCommand::Up {
@@ -162,6 +177,7 @@ mod tests {
                 backend: BackendKind::Neptun,
             },
             DaemonCommand::Shutdown,
+            DaemonCommand::StreamLogs,
         ];
         for cmd in &commands {
             let encoded = encode_message(cmd).expect("encode");

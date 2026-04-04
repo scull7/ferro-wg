@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 use cli::{Cli, Command};
 use ferro_wg_core::config;
 use ferro_wg_core::config::AppConfig;
+use ferro_wg_core::daemon::LogBuffer;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, SOCKET_PATH};
 use ferro_wg_core::key::PrivateKey;
@@ -112,6 +113,7 @@ fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 
@@ -130,6 +132,7 @@ fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 
@@ -201,6 +204,7 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Ok => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 
@@ -269,11 +273,13 @@ fn cmd_daemon(
     println!("Connections: {}", conn_names.join(", "));
     println!("Press Ctrl+C to stop.\n");
 
+    let log_buffer = LogBuffer::new(1000);
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(ferro_wg_core::daemon::run(
         app_config,
         config_path,
         &socket_path,
+        log_buffer,
     ))?;
     Ok(())
 }
@@ -289,6 +295,7 @@ fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
+        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
     }
 }
 

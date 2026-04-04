@@ -9,7 +9,9 @@ mod server;
 use std::path::PathBuf;
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt};
+
+use ferro_wg_core::daemon::LogBuffer;
 
 /// Privileged `WireGuard` tunnel daemon.
 #[derive(Debug, Parser)]
@@ -37,9 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         1 => "debug",
         _ => "trace",
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .init();
+
+    let log_buffer = LogBuffer::new(1000);
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(EnvFilter::new(filter)))
+        .with(log_buffer.clone());
+    tracing::subscriber::set_global_default(subscriber).expect("set global subscriber");
 
     // Load config.
     let config = ferro_wg_core::config::toml::load_app_config(&cli.config)?;
@@ -50,5 +55,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Run the IPC server.
-    server::run(config, &cli.config, &cli.socket).await
+    server::run(config, &cli.config, &cli.socket, log_buffer).await
 }
