@@ -116,6 +116,7 @@ pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>
     result
 }
 
+#[allow(clippy::too_many_lines)]
 /// Drive the TUI event loop until the user quits.
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
