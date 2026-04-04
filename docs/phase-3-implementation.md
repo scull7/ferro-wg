@@ -666,14 +666,14 @@ visible. When `scroll_offset > 0` (user has scrolled up), the view freezes.
 
 **Eviction-aware scrolling (critical fix):** 
 `LogBuffer` has `evicted_count: u64` (init 0, `wrapping_add` on pop_front).
-In `filtered()`: `absolute_index = self.evicted_count as usize + i` for each entry.
-`LogsComponent` has `old_evicted: u64` (init 0). In update/render:
+In `filtered()`: `absolute_index = self.evicted_count as usize + i`.
+`LogsComponent` has `old_evicted: u64` (init 0). In update/render (if scroll_offset > 0):
 ```rust
 let delta = state.log_buffer.evicted_count.saturating_sub(self.old_evicted);
-self.scroll_offset = self.scroll_offset.saturating_sub(delta as usize);
+self.scroll_offset = self.scroll_offset.saturating_add(delta as usize);
 self.old_evicted = state.log_buffer.evicted_count;
 ```
-Test rigorously with eviction + scroll + search mocks.
+Clamps to viewport. Rigorous tests for multi-eviction, pinned vs scrolled, with search.
 
 **Search infrastructure:** `LogsComponent` owns its search query string
 (`search_query: String`) and search mode flag (`in_search: bool`) locally. The
@@ -754,7 +754,7 @@ component (other components have no use for it).
 | `logs_renders_disconnected_banner` | `state.log_stream_connected == false` → banner text present |
 | `logs_title_reflects_filters` | `level_filter = Warn`, `connection_filter = ActiveConnection`, active connection "mia" → title contains `[WARN+] [mia]` |
 | `logs_global_events_shown_in_connection_filter` | Entry with `connection_name: None` → visible even in `ActiveConnection` mode |
-| `logs_scroll_adjusts_on_eviction` | Buffer at capacity; new entry pushed while `scroll_offset > 0` → `scroll_offset` decremented by 1 |
+| `logs_scroll_adjusts_on_eviction` | Buffer at capacity; new entry pushed while `scroll_offset > 0` → `scroll_offset` adjusted via delta (saturating_add); no jump, viewport stable |
 | `logs_invalid_timestamp_renders_fallback` | `timestamp_ms` outside valid `chrono` range → renders `"??:??:??"` without panic |
 
 ---
