@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
 use ferro_wg_tui_core::{
-    Action, AppState, Component, ConnectionState, format_bytes, format_handshake_age,
+    Action, AppState, Component, ConnectionState, Theme, format_bytes, format_handshake_age,
 };
 
 // Status tab peer table column widths (percentages). Must sum to 100.
@@ -52,6 +52,33 @@ impl StatusComponent {
     /// Get the name of the active connection, if any.
     fn active_connection_name(state: &AppState) -> Option<String> {
         state.active_connection().map(|c| c.name.clone())
+    }
+
+    /// Build per-peer table rows for the active connection.
+    ///
+    /// Absent endpoints are rendered as `"—"` in the muted style.
+    fn peer_rows(state: &AppState, theme: &Theme) -> Vec<Row<'static>> {
+        state
+            .filtered_peers()
+            .map(|p| {
+                let allowed = p.allowed_ips.join(", ");
+                let keepalive = if p.persistent_keepalive == 0 {
+                    "off".to_owned()
+                } else {
+                    format!("{}s", p.persistent_keepalive)
+                };
+                let (endpoint, ep_style): (String, Style) = p.endpoint.as_ref().map_or_else(
+                    || ("—".to_owned(), Style::default().fg(theme.muted)),
+                    |ep| (ep.clone(), Style::default()),
+                );
+                Row::new(vec![
+                    Cell::from(p.name.clone()),
+                    Cell::from(endpoint).style(ep_style),
+                    Cell::from(allowed),
+                    Cell::from(keepalive),
+                ])
+            })
+            .collect()
     }
 }
 
@@ -112,6 +139,7 @@ impl Component for StatusComponent {
 
         // Split inner area: 2-line connection summary, then the peer table.
         let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
+        debug_assert_eq!(chunks.len(), 2, "Status inner layout must yield exactly 2 chunks");
 
         // ── Connection-level summary ──────────────────────────────────────────
         let (is_connected, state_str, hs, rx, tx, backend_str, iface_str) =
@@ -119,26 +147,31 @@ impl Component for StatusComponent {
                 (
                     false,
                     "down",
-                    "-".to_owned(),
-                    "-".to_owned(),
-                    "-".to_owned(),
-                    "-".to_owned(),
-                    "-".to_owned(),
+                    "—".to_owned(),
+                    "—".to_owned(),
+                    "—".to_owned(),
+                    "—".to_owned(),
+                    "—".to_owned(),
                 ),
                 |s| {
                     let connected = s.state == ConnectionState::Connected;
                     let hs = s
                         .stats
                         .last_handshake
-                        .map_or_else(|| "-".to_owned(), format_handshake_age);
+                        .map_or_else(|| "—".to_owned(), format_handshake_age);
                     let rx = format_bytes(s.stats.rx_bytes);
                     let tx = format_bytes(s.stats.tx_bytes);
                     let backend = s.backend.to_string();
-                    let iface = s.interface.clone().unwrap_or_else(|| "-".to_owned());
+                    let iface = s.interface.clone().unwrap_or_else(|| "—".to_owned());
                     (connected, if connected { "connected" } else { "down" }, hs, rx, tx, backend, iface)
                 },
             );
 
+        // Placeholder style: muted when status has not yet been polled.
+        let placeholder_style = conn
+            .status
+            .as_ref()
+            .map_or(Style::default().fg(theme.muted), |_| Style::default());
         let state_style = if is_connected {
             Style::default().fg(theme.success)
         } else {
@@ -152,20 +185,20 @@ impl Component for StatusComponent {
                 Span::styled(state_str, state_style),
                 Span::raw("  "),
                 Span::styled("Backend: ", label),
-                Span::raw(backend_str),
+                Span::styled(backend_str, placeholder_style),
                 Span::raw("  "),
                 Span::styled("Interface: ", label),
-                Span::raw(iface_str),
+                Span::styled(iface_str, placeholder_style),
             ]),
             Line::from(vec![
                 Span::styled("Rx: ", label),
-                Span::raw(rx),
+                Span::styled(rx, placeholder_style),
                 Span::raw("  "),
                 Span::styled("Tx: ", label),
-                Span::raw(tx),
+                Span::styled(tx, placeholder_style),
                 Span::raw("  "),
                 Span::styled("Handshake: ", label),
-                Span::raw(hs),
+                Span::styled(hs, placeholder_style),
                 Span::styled("  (connection totals, not per-peer)", label),
             ]),
         ]);
@@ -175,23 +208,7 @@ impl Component for StatusComponent {
         let header = Row::new(vec!["Peer", "Endpoint", "Allowed IPs", "Keepalive"])
             .style(theme.header_style());
 
-        let rows: Vec<Row<'_>> = state
-            .filtered_peers()
-            .map(|p| {
-                let allowed = p.allowed_ips.join(", ");
-                let keepalive = if p.persistent_keepalive == 0 {
-                    "off".to_owned()
-                } else {
-                    format!("{}s", p.persistent_keepalive)
-                };
-                Row::new(vec![
-                    Cell::from(p.name.clone()),
-                    Cell::from(p.endpoint.clone().unwrap_or_else(|| "-".to_owned())),
-                    Cell::from(allowed),
-                    Cell::from(keepalive),
-                ])
-            })
-            .collect();
+        let rows = Self::peer_rows(state, theme);
 
         let table = Table::new(
             rows,

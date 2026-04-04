@@ -92,12 +92,13 @@ impl Component for CompareComponent {
                 } else {
                     Style::default().fg(theme.error)
                 };
+                let placeholder = Cell::from("—").style(Style::default().fg(theme.muted));
                 Row::new(vec![
                     Cell::from(*name),
                     Cell::from(avail).style(avail_style),
-                    Cell::from("-"),
-                    Cell::from("-"),
-                    Cell::from("-"),
+                    placeholder.clone(),
+                    placeholder.clone(),
+                    placeholder,
                 ])
             })
             .collect();
