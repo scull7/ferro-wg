@@ -193,14 +193,6 @@ impl AppState {
             self.connections.get_mut(self.selected_connection)
         }
 
-        /// Dispatch an action, mutating shared state.
-        ///
-        /// This is Phase 1 of the two-phase dispatch cycle. After this
-        /// returns, the caller should forward the action to all components
-        /// via [`Component::update()`](crate::component::Component::update).
-        ///
-        /// `SelectConnection(i)` with an out-of-bounds index is silently
-        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
         /// Handle UI-related actions (tabs, search, quit).
         fn handle_ui_action(&mut self, action: &Action) {
             match action {
@@ -284,7 +276,7 @@ impl AppState {
                                 interface: s.interface.clone(),
                             });
                         } else {
-                            warn!(connection_name = %s.connection_name, "UpdatePeers received status for unknown connection");
+                            warn!(connection_name = %s.name, "UpdatePeers received status for unknown connection");
                         }
                     }
                     // Clamp in case connections changed (defensive; static in Phase 2).
@@ -323,6 +315,14 @@ impl AppState {
             }
         }
 
+        /// Dispatch an action to update the application state.
+        ///
+        /// This is the central hub for all state mutations. After dispatch
+        /// returns, the caller should forward the action to all components
+        /// via [`Component::update()`](crate::component::Component::update).
+        ///
+        /// `SelectConnection(i)` with an out-of-bounds index is silently
+        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
         /// Dispatch an action to update the application state.
         ///
         /// This is the central hub for all state mutations. After dispatch

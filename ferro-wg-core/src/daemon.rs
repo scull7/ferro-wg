@@ -329,7 +329,7 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             ref connection_name,
             backend,
         } => {
-            let result = if let Some(ref name) = connection_name {
+            let result = if let Some(name) = connection_name {
                 manager.up(name, backend).await
             } else {
                 manager.up_all(backend).await
@@ -342,7 +342,7 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
         DaemonCommand::Down {
             ref connection_name,
         } => {
-            if let Some(ref name) = connection_name {
+            if let Some(name) = connection_name {
                 manager.down(name).map_or_else(
                     |e| DaemonResponse::Error(e.to_string()),
                     |_| DaemonResponse::Ok,
