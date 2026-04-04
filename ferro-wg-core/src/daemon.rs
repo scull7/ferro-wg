@@ -132,6 +132,7 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
 /// # Errors
 ///
 /// Returns an error if sending responses fails.
+#[tracing::instrument(skip(writer, log_buffer))]
 async fn handle_stream_logs(
     mut writer: tokio::net::unix::OwnedWriteHalf,
     log_buffer: &LogBuffer,
@@ -168,6 +169,7 @@ async fn handle_stream_logs(
 /// # Errors
 ///
 /// Returns an error on socket I/O issues.
+#[tracing::instrument(skip(manager, log_buffer))]
 async fn handle_connection(
     listener: &UnixListener,
     manager: &mut TunnelManager,
@@ -232,6 +234,7 @@ async fn handle_connection(
 /// # Errors
 ///
 /// Returns an error if the socket cannot be bound.
+#[tracing::instrument(skip(config, log_buffer))]
 pub async fn run(
     config: AppConfig,
     config_path: &Path,
@@ -271,6 +274,7 @@ fn reload_config(manager: &mut TunnelManager, config_path: &Path) {
 }
 
 /// Dispatch a command to the tunnel manager and produce a response.
+#[tracing::instrument(skip(manager))]
 async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) -> DaemonResponse {
     match *command {
         DaemonCommand::Up {
