@@ -309,11 +309,10 @@ pub struct TuiTracingLayer {
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TuiTracingLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: ...) {
-        // Extract level, target, message; build LogEntry with
-        // timestamp_ms = SystemTime::now() ms since UNIX_EPOCH.
-        // connection_name is extracted from a structured field named
-        // "connection_name" if present, otherwise None.
-        self.broadcaster.publish(entry);
+        // Extract fields, build LogEntry (non-blocking).
+        // Forward via mpsc to async task that does broadcast.send() to avoid
+        // any sync blocking in tracing pipeline.
+        self.broadcaster.publish(entry);  // uses internal mpsc forwarder task
     }
 }
 ```
