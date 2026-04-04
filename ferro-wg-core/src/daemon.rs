@@ -172,6 +172,63 @@ async fn handle_stream_logs(
     Ok(())
 }
 
+/// Read and decode a command from the client stream.
+///
+/// # Errors
+///
+/// Returns an error if reading or decoding fails.
+async fn read_command(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Result<Option<DaemonCommand>, Box<dyn std::error::Error>> {
+    let mut line = String::new();
+
+    // Read one command per connection.
+    match reader.read_line(&mut line).await {
+        Ok(0) => return Ok(None), // EOF
+        Ok(_) => {}
+        Err(e) => {
+            warn!("Read error: {e}");
+            return Ok(None);
+        }
+    }
+
+    match ipc::decode_message(&line) {
+        Ok(cmd) => Ok(Some(cmd)),
+        Err(e) => {
+            let resp = DaemonResponse::Error(format!("invalid command: {e}"));
+            let _ = send_response(writer, &resp).await;
+            Ok(None)
+        }
+    }
+}
+
+/// Process a non-streaming command.
+///
+/// # Errors
+///
+/// Returns an error if sending response fails.
+async fn process_command(
+    cmd: &DaemonCommand,
+    manager: &mut TunnelManager,
+    config_path: &Path,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    // Reload config for commands that need the latest connections.
+    if needs_config_reload(cmd) {
+        reload_config(manager, config_path);
+    }
+
+    let response = handle_command(manager, cmd).await;
+
+    // Check for shutdown before sending response.
+    let is_shutdown = matches!(response, DaemonResponse::Ok) && matches!(cmd, DaemonCommand::Shutdown);
+
+    let _ = send_response(writer, &response).await;
+
+    Ok(is_shutdown)
+}
+
 /// Handle a single client connection.
 ///
 /// Returns `true` if shutdown was requested.
@@ -189,25 +246,10 @@ async fn handle_connection(
     let (stream, _addr) = listener.accept().await?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
 
-    // Read one command per connection.
-    match reader.read_line(&mut line).await {
-        Ok(0) => return Ok(false), // EOF
-        Ok(_) => {}
-        Err(e) => {
-            warn!("Read error: {e}");
-            return Ok(false);
-        }
-    }
-
-    let command: DaemonCommand = match ipc::decode_message(&line) {
-        Ok(cmd) => cmd,
-        Err(e) => {
-            let resp = DaemonResponse::Error(format!("invalid command: {e}"));
-            let _ = send_response(&mut writer, &resp).await;
-            return Ok(false);
-        }
+    let command = match read_command(&mut reader, &mut writer).await? {
+        Some(cmd) => cmd,
+        None => return Ok(false),
     };
 
     info!("Received command: {command:?}");
@@ -217,22 +259,7 @@ async fn handle_connection(
             handle_stream_logs(writer, log_buffer).await?;
             Ok(false)
         }
-        cmd => {
-            // Reload config for commands that need the latest connections.
-            if needs_config_reload(&cmd) {
-                reload_config(manager, config_path);
-            }
-
-            let response = handle_command(manager, &cmd).await;
-
-            // Check for shutdown before sending response.
-            let is_shutdown =
-                matches!(response, DaemonResponse::Ok) && matches!(cmd, DaemonCommand::Shutdown);
-
-            let _ = send_response(&mut writer, &response).await;
-
-            Ok(is_shutdown)
-        }
+        cmd => process_command(&cmd, manager, config_path, &mut writer).await,
     }
 }
 
