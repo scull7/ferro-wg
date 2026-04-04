@@ -89,14 +89,17 @@ impl Component for PeersComponent {
             .map(|p| {
                 let pk = p.public_key.to_base64();
                 let short_pk = format!("{}...", &pk[..10]);
-                let endpoint = p.endpoint.clone().unwrap_or_else(|| "-".into());
+                let (endpoint, ep_style): (String, Style) = p.endpoint.as_ref().map_or_else(
+                    || ("—".to_owned(), Style::default().fg(theme.muted)),
+                    |ep| (ep.clone(), Style::default()),
+                );
                 let allowed = p.allowed_ips.join(", ");
                 let keepalive = format!("{}s", p.persistent_keepalive);
 
                 Row::new(vec![
                     Cell::from(p.name.clone()),
                     Cell::from(short_pk),
-                    Cell::from(endpoint),
+                    Cell::from(endpoint).style(ep_style),
                     Cell::from(allowed),
                     Cell::from(keepalive),
                 ])

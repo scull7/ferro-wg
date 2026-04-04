@@ -68,19 +68,19 @@ impl Component for ConfigComponent {
             ]),
             Line::from(vec![
                 Span::styled("Address: ", label_style),
-                Span::raw(if addrs.is_empty() {
-                    "(none)".to_owned()
+                if addrs.is_empty() {
+                    Span::styled("(none)", Style::default().fg(theme.muted))
                 } else {
-                    addrs
-                }),
+                    Span::raw(addrs)
+                },
             ]),
             Line::from(vec![
                 Span::styled("DNS: ", label_style),
-                Span::raw(if dns.is_empty() {
-                    "(none)".to_owned()
+                if dns.is_empty() {
+                    Span::styled("(none)", Style::default().fg(theme.muted))
                 } else {
-                    dns.join(", ")
-                }),
+                    Span::raw(dns.join(", "))
+                },
             ]),
             Line::from(vec![
                 Span::styled("MTU: ", label_style),

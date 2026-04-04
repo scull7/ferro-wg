@@ -170,7 +170,9 @@ impl AppState {
         self.connections.get(self.selected_connection)
     }
 
-    /// Returns the currently focused connection mutably.
+    /// Returns the currently focused connection mutably, if any.
+    ///
+    /// Returns `None` when `connections` is empty.
     pub fn active_connection_mut(&mut self) -> Option<&mut ConnectionView> {
         self.connections.get_mut(self.selected_connection)
     }
@@ -180,6 +182,9 @@ impl AppState {
     /// This is Phase 1 of the two-phase dispatch cycle. After this
     /// returns, the caller should forward the action to all components
     /// via [`Component::update()`](crate::component::Component::update).
+    ///
+    /// `SelectConnection(i)` with an out-of-bounds index is silently
+    /// ignored and emits a `tracing::warn!` log entry; it does not panic.
     pub fn dispatch(&mut self, action: &Action) {
         match action {
             Action::Quit => self.running = false,
@@ -234,7 +239,11 @@ impl AppState {
             Action::UpdatePeers(statuses) => {
                 self.daemon_connected = true;
                 for s in statuses {
-                    if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
+                    if let Some(conn) = self
+                        .connections
+                        .iter_mut()
+                        .find(|c| c.name == s.connection_name)
+                    {
                         let state = if s.connected {
                             ConnectionState::Connected
                         } else {
@@ -248,7 +257,7 @@ impl AppState {
                             interface: s.interface.clone(),
                         });
                     } else {
-                        warn!(name = %s.name, "UpdatePeers received status for unknown connection");
+                        warn!(connection_name = %s.connection_name, "UpdatePeers received status for unknown connection");
                     }
                 }
                 // Clamp in case connections changed (defensive; static in Phase 2).
@@ -372,7 +381,7 @@ mod tests {
 
     fn make_peer_status(name: &str, connected: bool) -> PeerStatus {
         PeerStatus {
-            name: name.into(),
+            connection_name: name.into(),
             connected,
             backend: BackendKind::Boringtun,
             stats: TunnelStats::default(),

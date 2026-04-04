@@ -99,7 +99,7 @@ fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// Bring tunnel(s) up via the daemon.
 fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let cmd = DaemonCommand::Up {
-        peer_name: peer.map(ToOwned::to_owned),
+        connection_name: peer.map(ToOwned::to_owned),
         backend: BackendKind::Boringtun,
     };
     let response = daemon_command(&cmd)?;
@@ -118,7 +118,7 @@ fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 /// Tear down tunnel(s) via the daemon.
 fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let cmd = DaemonCommand::Down {
-        peer_name: peer.map(ToOwned::to_owned),
+        connection_name: peer.map(ToOwned::to_owned),
     };
     let response = daemon_command(&cmd)?;
 
@@ -159,14 +159,17 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 let iface = peer.interface.as_deref().unwrap_or("-");
                 let endpoint = peer.endpoint.as_deref().unwrap_or("-");
 
-                println!("connection: {}", peer.name);
+                println!("connection: {}", peer.connection_name);
                 println!("  status: {status}");
                 println!("  backend: {}", peer.backend);
                 println!("  endpoint: {endpoint}");
                 println!("  interface: {iface}");
 
                 // Show config details if available.
-                if let Some(wg) = app_config.as_ref().and_then(|c| c.get(&peer.name)) {
+                if let Some(wg) = app_config
+                    .as_ref()
+                    .and_then(|c| c.get(&peer.connection_name))
+                {
                     println!(
                         "  public key: {}",
                         wg.interface.private_key.public_key().to_base64()

@@ -14,6 +14,51 @@ use serde::{Deserialize, Serialize};
 use crate::error::ConfigError;
 use crate::key::{PresharedKey, PrivateKey, PublicKey};
 
+/// Maximum allowed length for a connection or peer name.
+const MAX_NAME_LEN: usize = 64;
+
+/// Validate a connection or peer name.
+///
+/// Valid names are non-empty, at most [`MAX_NAME_LEN`] characters, and
+/// contain only ASCII alphanumerics, hyphens (`-`), or underscores (`_`).
+/// This keeps names safe for use in filenames, log messages, and future
+/// interface-name derivation.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::InvalidValue`] describing which constraint was
+/// violated.
+fn validate_name(field: &'static str, name: &str) -> Result<(), ConfigError> {
+    if name.is_empty() {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: "name must not be empty".into(),
+        });
+    }
+    if name.len() > MAX_NAME_LEN {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: format!(
+                "name {name:?} is {} characters; maximum is {MAX_NAME_LEN}",
+                name.len()
+            ),
+        });
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_'))
+    {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: format!(
+                "name {name:?} contains invalid character {bad:?}; \
+                 only ASCII alphanumerics, hyphens, and underscores are allowed"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Complete `WireGuard` interface configuration (our side of the tunnel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceConfig {
@@ -102,6 +147,12 @@ impl WgConfig {
             return Err(ConfigError::MissingField("peers"));
         }
         for (i, peer) in self.peers.iter().enumerate() {
+            if !peer.name.is_empty() {
+                validate_name("peer.name", &peer.name).map_err(|e| ConfigError::InvalidValue {
+                    field: "peer.name",
+                    reason: format!("peer {i}: {e}"),
+                })?;
+            }
             if peer.allowed_ips.is_empty() {
                 return Err(ConfigError::InvalidValue {
                     field: "allowed_ips",
@@ -147,6 +198,10 @@ impl AppConfig {
             return Err(ConfigError::MissingField("connections"));
         }
         for (name, conn) in &self.connections {
+            validate_name("connection name", name).map_err(|e| ConfigError::InvalidValue {
+                field: "connection name",
+                reason: format!("{name}: {e}"),
+            })?;
             conn.validate().map_err(|e| ConfigError::InvalidValue {
                 field: "connections",
                 reason: format!("{name}: {e}"),
@@ -254,5 +309,108 @@ mod tests {
         };
         assert!(peer.endpoint.is_none());
         assert!(peer.preshared_key.is_none());
+    }
+
+    // ── validate_name unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn validate_name_accepts_valid_names() {
+        for name in &["mia", "ord01", "tus1", "my-vpn", "vpn_home", "A1-B2_C3"] {
+            assert!(
+                validate_name("test", name).is_ok(),
+                "expected {name:?} to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_name_rejects_empty() {
+        let err = validate_name("test", "").unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { field: "test", .. }
+        ));
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn validate_name_rejects_too_long() {
+        let long = "a".repeat(MAX_NAME_LEN + 1);
+        let err = validate_name("test", &long).unwrap_err();
+        assert!(err.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn validate_name_rejects_invalid_chars() {
+        for name in &["has space", "has/slash", "has.dot", "has@at", "has!bang"] {
+            let err = validate_name("test", name).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid character"),
+                "expected invalid-char error for {name:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_name_rejects_unicode() {
+        let err = validate_name("test", "café").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    // ── AppConfig connection-name validation ──────────────────────────────────
+
+    fn app_config_with_name(name: &str) -> AppConfig {
+        let mut connections = std::collections::BTreeMap::new();
+        connections.insert(name.to_string(), sample_config());
+        AppConfig { connections }
+    }
+
+    #[test]
+    fn app_config_valid_connection_name_passes() {
+        assert!(app_config_with_name("mia").validate().is_ok());
+    }
+
+    #[test]
+    fn app_config_invalid_connection_name_fails() {
+        let err = app_config_with_name("bad name!").validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue {
+                field: "connection name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn app_config_overlong_connection_name_fails() {
+        let err = app_config_with_name(&"x".repeat(MAX_NAME_LEN + 1))
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("maximum"));
+    }
+
+    // ── WgConfig peer-name validation ─────────────────────────────────────────
+
+    #[test]
+    fn wg_config_invalid_peer_name_fails() {
+        let mut cfg = sample_config();
+        cfg.peers[0].name = "bad peer!".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue {
+                field: "peer.name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn wg_config_empty_peer_name_passes() {
+        // Empty peer name is allowed (name is optional in the protocol).
+        let mut cfg = sample_config();
+        cfg.peers[0].name = String::new();
+        assert!(cfg.validate().is_ok());
     }
 }
