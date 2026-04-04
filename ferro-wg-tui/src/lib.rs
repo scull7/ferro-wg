@@ -290,20 +290,20 @@ fn maybe_spawn_command(
     let (cmd, description) = match action {
         Action::ConnectPeer(name) => (
             DaemonCommand::Up {
-                peer_name: Some(name.clone()),
+                connection_name: Some(name.clone()),
                 backend: BackendKind::Boringtun,
             },
             format!("Brought up: {name}"),
         ),
         Action::DisconnectPeer(name) => (
             DaemonCommand::Down {
-                peer_name: Some(name.clone()),
+                connection_name: Some(name.clone()),
             },
             format!("Tore down: {name}"),
         ),
         Action::CyclePeerBackend(name) => (
             DaemonCommand::SwitchBackend {
-                peer_name: name.clone(),
+                connection_name: name.clone(),
                 backend: BackendKind::Neptun, // TODO: cycle through available backends
             },
             format!("Switched backend: {name}"),

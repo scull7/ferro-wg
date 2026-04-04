@@ -13,24 +13,24 @@ pub const SOCKET_PATH: &str = "/tmp/ferro-wg.sock";
 /// Commands sent from the CLI/TUI to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonCommand {
-    /// Bring up tunnel(s). `None` means all configured peers.
+    /// Bring up tunnel(s). `None` means all configured connections.
     Up {
-        /// Which peer to connect (by name). `None` = all.
-        peer_name: Option<String>,
+        /// Which connection to bring up (by name). `None` = all.
+        connection_name: Option<String>,
         /// Which backend to use.
         backend: BackendKind,
     },
-    /// Tear down tunnel(s). `None` means all active peers.
+    /// Tear down tunnel(s). `None` means all active connections.
     Down {
-        /// Which peer to disconnect (by name). `None` = all.
-        peer_name: Option<String>,
+        /// Which connection to tear down (by name). `None` = all.
+        connection_name: Option<String>,
     },
-    /// Request current status of all peers.
+    /// Request current status of all connections.
     Status,
-    /// Switch a peer's backend (disconnects and reconnects).
+    /// Switch a connection's backend (disconnects and reconnects).
     SwitchBackend {
-        /// Peer name.
-        peer_name: String,
+        /// Connection name.
+        connection_name: String,
         /// New backend to use.
         backend: BackendKind,
     },
@@ -49,11 +49,11 @@ pub enum DaemonResponse {
     Status(Vec<PeerStatus>),
 }
 
-/// Runtime status of a single peer, reported by the daemon.
+/// Runtime status of a single connection, reported by the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerStatus {
-    /// The peer's configured name.
-    pub name: String,
+    /// The connection's configured name (matches `AppConfig` connection keys).
+    pub connection_name: String,
     /// Whether the tunnel is connected.
     pub connected: bool,
     /// Which backend is active.
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn command_roundtrip() {
         let cmd = DaemonCommand::Up {
-            peer_name: Some("dc-mia".into()),
+            connection_name: Some("dc-mia".into()),
             backend: BackendKind::Boringtun,
         };
         let encoded = encode_message(&cmd).expect("encode");
@@ -102,7 +102,7 @@ mod tests {
         assert!(matches!(
             decoded,
             DaemonCommand::Up {
-                peer_name: Some(ref n),
+                connection_name: Some(ref n),
                 backend: BackendKind::Boringtun,
             } if n == "dc-mia"
         ));
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn response_status_roundtrip() {
         let resp = DaemonResponse::Status(vec![PeerStatus {
-            name: "mia".into(),
+            connection_name: "mia".into(),
             connected: true,
             backend: BackendKind::Neptun,
             stats: TunnelStats::default(),
@@ -130,7 +130,7 @@ mod tests {
         let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
         if let DaemonResponse::Status(peers) = decoded {
             assert_eq!(peers.len(), 1);
-            assert_eq!(peers[0].name, "mia");
+            assert_eq!(peers[0].connection_name, "mia");
             assert!(peers[0].connected);
             assert_eq!(peers[0].interface.as_deref(), Some("utun4"));
         } else {
@@ -150,15 +150,15 @@ mod tests {
     fn all_commands_serialize() {
         let commands = vec![
             DaemonCommand::Up {
-                peer_name: None,
+                connection_name: None,
                 backend: BackendKind::Gotatun,
             },
             DaemonCommand::Down {
-                peer_name: Some("test".into()),
+                connection_name: Some("test".into()),
             },
             DaemonCommand::Status,
             DaemonCommand::SwitchBackend {
-                peer_name: "test".into(),
+                connection_name: "test".into(),
                 backend: BackendKind::Neptun,
             },
             DaemonCommand::Shutdown,
