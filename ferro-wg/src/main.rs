@@ -273,7 +273,7 @@ fn cmd_daemon(
     println!("Connections: {}", conn_names.join(", "));
     println!("Press Ctrl+C to stop.\n");
 
-    let (log_tx, log_rx) = tokio::sync::broadcast::channel(1000);
+    let (log_tx, log_rx) = tokio::sync::broadcast::channel(10000);
     let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel(1000);
     let log_buffer = ferro_wg_core::daemon::LogBuffer::new(1000, sync_tx);
 
