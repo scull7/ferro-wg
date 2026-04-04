@@ -206,7 +206,7 @@ impl Component for ConnectionBarComponent {
         for i in view_start..=view_end {
             let conn = &state.connections[i];
             let (indicator, ind_style): (&'static str, Style) = match &conn.status {
-                None => ("?", Style::default().fg(theme.warning)),
+                None => ("?", Style::default().fg(theme.muted)),
                 Some(s) if s.state == ConnectionState::Connected => {
                     ("●", Style::default().fg(theme.success))
                 }
