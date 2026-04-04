@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -20,14 +22,76 @@ pub enum LogParseError {
     UnknownLevel(String),
 }
 
+/// Minimum log severity visible in the Logs tab.
+///
+/// Variants are ordered lowest-to-highest so that `entry_level >= self.min_level`
+/// is the only filter predicate needed. TRACE is intentionally absent — TRACE
+/// lines always pass the filter (fail-open), consistent with how rare TRACE
+/// output is in production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    /// Show all lines (DEBUG and above). This is the default.
+    Debug,
+    /// Show INFO, WARN, and ERROR lines only.
+    Info,
+    /// Show WARN and ERROR lines only.
+    Warn,
+    /// Show ERROR lines only.
+    Error,
+}
+
+impl LogLevel {
+    /// Advance to the next severity threshold, wrapping from `Error` back to `Debug`.
+    ///
+    /// Cycle order: `Debug` → `Info` → `Warn` → `Error` → `Debug`.
+    #[must_use]
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Debug => Self::Info,
+            Self::Info => Self::Warn,
+            Self::Warn => Self::Error,
+            Self::Error => Self::Debug,
+        }
+    }
+
+    /// Short label used in the Logs block title (e.g. `"INFO+"`).
+    #[must_use]
+    pub fn title_label(self) -> &'static str {
+        match self {
+            Self::Debug => "DEBUG+",
+            Self::Info => "INFO+",
+            Self::Warn => "WARN+",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+/// Convert a level token string (as returned by [`LogsComponent::extract_level_message`])
+/// into a [`LogLevel`].
+///
+/// Returns `None` for `"TRACE"` and any unrecognised token — callers must treat
+/// `None` as **pass** (fail-open: unrecognised / TRACE lines are always shown).
+fn parse_log_level(level: &str) -> Option<LogLevel> {
+    match level {
+        "DEBUG" => Some(LogLevel::Debug),
+        "INFO" => Some(LogLevel::Info),
+        "WARN" => Some(LogLevel::Warn),
+        "ERROR" => Some(LogLevel::Error),
+        _ => None,
+    }
+}
+
 /// Number of rows consumed by the panel block's top and bottom borders.
 const BLOCK_BORDER_HEIGHT: u16 = 2;
 
-/// Logs tab: scrollable log viewer with parsed log lines.
+/// Logs tab: scrollable log viewer with parsed log lines and level filtering.
 #[derive(Debug, Clone)]
 pub struct LogsComponent {
     /// Current scroll state for the log viewer.
     scroll_state: ScrollState,
+    /// Minimum severity to display. Lines below this threshold are hidden at
+    /// render time but are never removed from the shared buffer.
+    min_level: LogLevel,
 }
 
 /// Scroll state for the logs component.
@@ -190,12 +254,52 @@ impl LogsComponent {
         self.scroll_state.auto_scroll = true;
     }
 
-    /// Lock `log_lines` and return the current line count.
+    /// Cycle the minimum visible level: `Debug` → `Info` → `Warn` → `Error` → `Debug`.
+    ///
+    /// Resets `auto_scroll` to `true` so the view jumps to the bottom of the
+    /// newly filtered result set, and clears the stored offset to avoid stale state.
+    pub fn cycle_level(&mut self) {
+        self.min_level = self.min_level.cycle();
+        self.scroll_state.auto_scroll = true;
+        self.scroll_state.offset = 0;
+    }
+
+    /// Return `true` when `line` should be visible under the current level filter.
+    ///
+    /// Fails open: lines that cannot be parsed (malformed timestamp, unknown or
+    /// TRACE level) are always shown regardless of `min_level`.
+    fn line_passes_filter(&self, line: &str) -> bool {
+        // `parse_timestamp` returns the 8-byte "HH:MM:SS" slice; `+ 1` skips
+        // the trailing space, matching the `&line[9..]` offset in `parse_log_line`.
+        let Some(ts) = Self::parse_timestamp(line) else {
+            return true;
+        };
+        match Self::extract_level_message(&line[ts.len() + 1..]) {
+            Ok((level_str, _)) => {
+                parse_log_level(level_str).is_none_or(|lvl| lvl >= self.min_level)
+            }
+            Err(_) => true,
+        }
+    }
+
+    /// Return references to all lines in `buf` that pass the current level filter.
+    ///
+    /// At `LogLevel::Debug` (the default) no per-line parsing is performed —
+    /// all entries are returned directly as a fast path.
+    fn filtered_lines<'a>(&self, buf: &'a VecDeque<String>) -> Vec<&'a String> {
+        if self.min_level == LogLevel::Debug {
+            return buf.iter().collect();
+        }
+        buf.iter().filter(|l| self.line_passes_filter(l)).collect()
+    }
+
+    /// Lock `log_lines` and return the number of lines that pass the current
+    /// level filter.
     ///
     /// Returns `None` (and emits a warning) if the mutex is poisoned.
-    fn total_lines(state: &AppState) -> Option<usize> {
+    fn filtered_total(&self, state: &AppState) -> Option<usize> {
         if let Ok(lines) = state.log_lines.lock() {
-            Some(lines.len())
+            Some(self.filtered_lines(&lines).len())
         } else {
             warn!("log_lines mutex poisoned in handle_key");
             None
@@ -220,6 +324,7 @@ impl LogsComponent {
     pub fn new() -> Self {
         Self {
             scroll_state: ScrollState::default(),
+            min_level: LogLevel::Debug,
         }
     }
 }
@@ -244,13 +349,17 @@ impl Component for LogsComponent {
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let total = Self::total_lines(state)?;
+                let total = self.filtered_total(state)?;
                 self.scroll_down(total);
                 None
             }
             KeyCode::Char('G') => {
-                let total = Self::total_lines(state)?;
+                let total = self.filtered_total(state)?;
                 self.jump_to_bottom(total);
+                None
+            }
+            KeyCode::Char('l') => {
+                self.cycle_level();
                 None
             }
             _ => None,
@@ -270,19 +379,22 @@ impl Component for LogsComponent {
             return;
         };
 
-        let total_lines = log_lines.len();
+        // Build the filtered view. At LogLevel::Debug this is a fast no-op.
+        let filtered = self.filtered_lines(&log_lines);
+        let total_filtered = filtered.len();
+
         // Cache view_height so handle_key can compute valid scroll bounds.
         // This is the only write allowed in render; offset is never touched here.
         self.scroll_state.view_height = area.height.saturating_sub(BLOCK_BORDER_HEIGHT) as usize;
-        let offset = self.display_offset(total_lines);
+        let offset = self.display_offset(total_filtered);
 
-        let lines: Vec<Line<'_>> = if log_lines.is_empty() {
+        let lines: Vec<Line<'_>> = if filtered.is_empty() {
             vec![Line::from(Span::styled(
                 "(no log entries yet)",
                 Style::default().fg(theme.muted),
             ))]
         } else {
-            log_lines
+            filtered
                 .iter()
                 .skip(offset)
                 .take(self.scroll_state.view_height)
@@ -294,7 +406,8 @@ impl Component for LogsComponent {
                 .collect()
         };
 
-        let paragraph = Paragraph::new(lines).block(theme.panel_block("Logs"));
+        let title = format!("Logs [{}]", self.min_level.title_label());
+        let paragraph = Paragraph::new(lines).block(theme.panel_block(&title));
         frame.render_widget(paragraph, area);
 
         let scrollbar = Scrollbar::default()
@@ -302,7 +415,7 @@ impl Component for LogsComponent {
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
         let mut scrollbar_state = ScrollbarState::default()
-            .content_length(total_lines)
+            .content_length(total_filtered)
             .position(offset);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
@@ -321,6 +434,56 @@ mod tests {
 
     fn mocha() -> Theme {
         Theme::mocha()
+    }
+
+    // --- LogLevel ---
+
+    #[test]
+    fn log_level_ordering_is_debug_lt_error() {
+        assert!(LogLevel::Debug < LogLevel::Info);
+        assert!(LogLevel::Info < LogLevel::Warn);
+        assert!(LogLevel::Warn < LogLevel::Error);
+    }
+
+    #[test]
+    fn log_level_cycle_wraps_through_all_four() {
+        let level = LogLevel::Debug;
+        let level = level.cycle();
+        assert_eq!(level, LogLevel::Info);
+        let level = level.cycle();
+        assert_eq!(level, LogLevel::Warn);
+        let level = level.cycle();
+        assert_eq!(level, LogLevel::Error);
+        let level = level.cycle();
+        assert_eq!(level, LogLevel::Debug);
+    }
+
+    #[test]
+    fn log_level_title_labels() {
+        assert_eq!(LogLevel::Debug.title_label(), "DEBUG+");
+        assert_eq!(LogLevel::Info.title_label(), "INFO+");
+        assert_eq!(LogLevel::Warn.title_label(), "WARN+");
+        assert_eq!(LogLevel::Error.title_label(), "ERROR");
+    }
+
+    // --- parse_log_level ---
+
+    #[test]
+    fn parse_log_level_known_levels() {
+        assert_eq!(parse_log_level("DEBUG"), Some(LogLevel::Debug));
+        assert_eq!(parse_log_level("INFO"), Some(LogLevel::Info));
+        assert_eq!(parse_log_level("WARN"), Some(LogLevel::Warn));
+        assert_eq!(parse_log_level("ERROR"), Some(LogLevel::Error));
+    }
+
+    #[test]
+    fn parse_log_level_trace_returns_none() {
+        assert_eq!(parse_log_level("TRACE"), None);
+    }
+
+    #[test]
+    fn parse_log_level_unknown_returns_none() {
+        assert_eq!(parse_log_level("CUSTOM"), None);
     }
 
     // --- parse_timestamp ---
@@ -469,6 +632,136 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, LogParseError::UnknownLevel("CUSTOM".to_owned()));
+    }
+
+    // --- line_passes_filter ---
+
+    #[test]
+    fn filter_at_debug_passes_all() {
+        let component = LogsComponent::new(); // min_level = Debug
+        let lines = [
+            "12:34:56 DEBUG t: msg",
+            "12:34:56 INFO t: msg",
+            "12:34:56 WARN t: msg",
+            "12:34:56 ERROR t: msg",
+            "12:34:56 TRACE t: msg",
+            "some malformed garbage",
+        ];
+        for line in lines {
+            assert!(
+                component.line_passes_filter(line),
+                "expected pass: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_at_info_hides_debug() {
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Info;
+
+        assert!(!component.line_passes_filter("12:34:56 DEBUG t: msg"));
+        assert!(component.line_passes_filter("12:34:56 INFO t: msg"));
+        assert!(component.line_passes_filter("12:34:56 WARN t: msg"));
+        assert!(component.line_passes_filter("12:34:56 ERROR t: msg"));
+    }
+
+    #[test]
+    fn filter_at_warn_hides_info() {
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Warn;
+
+        assert!(!component.line_passes_filter("12:34:56 DEBUG t: msg"));
+        assert!(!component.line_passes_filter("12:34:56 INFO t: msg"));
+        assert!(component.line_passes_filter("12:34:56 WARN t: msg"));
+        assert!(component.line_passes_filter("12:34:56 ERROR t: msg"));
+    }
+
+    #[test]
+    fn filter_at_error_only_passes_error() {
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Error;
+
+        assert!(!component.line_passes_filter("12:34:56 DEBUG t: msg"));
+        assert!(!component.line_passes_filter("12:34:56 INFO t: msg"));
+        assert!(!component.line_passes_filter("12:34:56 WARN t: msg"));
+        assert!(component.line_passes_filter("12:34:56 ERROR t: msg"));
+    }
+
+    #[test]
+    fn filter_trace_always_passes() {
+        // TRACE is not in LogLevel; parse_log_level returns None → fail-open.
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Error;
+        assert!(component.line_passes_filter("12:34:56 TRACE t: msg"));
+    }
+
+    #[test]
+    fn filter_malformed_always_passes() {
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Error;
+        assert!(component.line_passes_filter("some random garbage"));
+    }
+
+    // --- filtered_lines ---
+
+    fn make_buf(lines: &[&str]) -> VecDeque<String> {
+        lines.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn filtered_lines_debug_fast_path_returns_all() {
+        let component = LogsComponent::new(); // min_level = Debug
+        let buf = make_buf(&[
+            "12:34:56 DEBUG t: a",
+            "12:34:56 INFO t: b",
+            "12:34:56 WARN t: c",
+            "12:34:56 ERROR t: d",
+        ]);
+        assert_eq!(component.filtered_lines(&buf).len(), 4);
+    }
+
+    #[test]
+    fn filtered_lines_filters_below_threshold() {
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Warn;
+        let buf = make_buf(&[
+            "12:34:56 DEBUG t: a",
+            "12:34:56 INFO t: b",
+            "12:34:56 WARN t: c",
+            "12:34:56 ERROR t: d",
+        ]);
+        let result = component.filtered_lines(&buf);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("WARN"));
+        assert!(result[1].contains("ERROR"));
+    }
+
+    #[test]
+    fn filtered_lines_empty_buffer() {
+        let component = LogsComponent::new();
+        let buf: VecDeque<String> = VecDeque::new();
+        assert!(component.filtered_lines(&buf).is_empty());
+    }
+
+    // --- cycle_level ---
+
+    #[test]
+    fn cycle_level_advances_min_level() {
+        let mut component = LogsComponent::new();
+        assert_eq!(component.min_level, LogLevel::Debug);
+        component.cycle_level();
+        assert_eq!(component.min_level, LogLevel::Info);
+    }
+
+    #[test]
+    fn cycle_level_resets_auto_scroll_and_offset() {
+        let mut component = LogsComponent::new();
+        component.scroll_state.auto_scroll = false;
+        component.scroll_state.offset = 42;
+        component.cycle_level();
+        assert!(component.scroll_state.auto_scroll);
+        assert_eq!(component.scroll_state.offset, 0);
     }
 
     // --- ScrollState tests ---
