@@ -15,11 +15,33 @@ use ferro_wg_tui_core::{Action, AppState, Component, ConnectionState};
 /// before the display is truncated with a `…` suffix.
 const MAX_DISPLAY_NAME_LEN: usize = 20;
 
+/// Number of rows this component occupies in the layout when shown.
+///
+/// The bar renders a single [`ratatui::widgets::Paragraph`] line with no border.
+pub const CONNECTION_BAR_HEIGHT: u16 = 1;
+
 /// Column width of the `" Connections: "` prefix shown when all entries fit.
 const PREFIX_WIDTH: usize = 14;
 
 /// Column width of the `" >"` right-overflow indicator.
 const RIGHT_INDICATOR_WIDTH: usize = 2;
+
+/// Minimum terminal width at which this bar renders useful content.
+///
+/// Equal to `PREFIX_WIDTH`(14) + `RIGHT_INDICATOR_WIDTH`(2) + 24 columns of
+/// entry budget = 40.  The 24-column budget is enough for the viewport
+/// algorithm to show the selected entry and at least one neighbour.
+///
+/// The compile-time assertion below keeps this literal in sync with its
+/// constituent constants so the build breaks if `PREFIX_WIDTH` or
+/// `RIGHT_INDICATOR_WIDTH` ever change without a corresponding update here.
+/// The host layout should suppress the bar below this value.
+pub const MIN_USEFUL_WIDTH: u16 = 40;
+
+const _: () = assert!(
+    MIN_USEFUL_WIDTH as usize == PREFIX_WIDTH + RIGHT_INDICATOR_WIDTH + 24,
+    "MIN_USEFUL_WIDTH is out of sync with PREFIX_WIDTH / RIGHT_INDICATOR_WIDTH"
+);
 
 /// Return a display-ready version of `name`, truncating with `…` when it
 /// exceeds [`MAX_DISPLAY_NAME_LEN`] characters.
@@ -84,7 +106,21 @@ fn entry_width(index: usize, display_name: &str, selected: bool) -> usize {
 ///   optional `RIGHT_INDICATOR_WIDTH`(2) ≤ `area_width` ✓
 /// * `start > 0` (left overflow): `LEFT_INDICATOR_WIDTH`(2) + entries +
 ///   optional `RIGHT_INDICATOR_WIDTH`(2) ≤ `area_width − 12` ≤ `area_width` ✓
+///
+/// # Panics
+///
+/// Panics in debug builds if `entry_widths` is empty or if
+/// `selected >= entry_widths.len()`.
 fn viewport(entry_widths: &[usize], selected: usize, area_width: usize) -> (usize, usize) {
+    debug_assert!(
+        !entry_widths.is_empty(),
+        "viewport: entry_widths must not be empty"
+    );
+    debug_assert!(
+        selected < entry_widths.len(),
+        "viewport: selected={selected} out of bounds (entry_widths.len()={})",
+        entry_widths.len()
+    );
     let n = entry_widths.len();
 
     // Fast path: everything fits with the full prefix, no overflow indicators.
@@ -802,6 +838,78 @@ mod tests {
         assert_eq!(
             comp.handle_key(KeyEvent::from(KeyCode::Char('q')), &state),
             None
+        );
+    }
+
+    // ── Unicode name tests ───────────────────────────────────────────────────
+
+    /// CJK characters have display width 2 per char, but `chars().count()`
+    /// returns 1 per char.  The bar must not panic even when the visual width
+    /// estimate is off.
+    #[test]
+    fn cjk_names_no_panic() {
+        let mut connections = BTreeMap::new();
+        connections.insert("東京01".to_string(), make_wg_config());
+        connections.insert("大阪02".to_string(), make_wg_config());
+        connections.insert("名古屋".to_string(), make_wg_config());
+        let state = AppState::new(AppConfig { connections });
+        render_bar(&state, 80); // must not panic
+    }
+
+    #[test]
+    fn emoji_names_no_panic() {
+        let mut connections = BTreeMap::new();
+        connections.insert("🌐-us-east".to_string(), make_wg_config());
+        connections.insert("🔒-secure".to_string(), make_wg_config());
+        let state = AppState::new(AppConfig { connections });
+        render_bar(&state, 80); // must not panic
+    }
+
+    #[test]
+    fn long_cjk_name_truncation_no_panic() {
+        // Names exceeding MAX_DISPLAY_NAME_LEN composed of wide chars must not panic.
+        let long_cjk = "東".repeat(MAX_DISPLAY_NAME_LEN + 5);
+        let mut connections = BTreeMap::new();
+        connections.insert("anchor".to_string(), make_wg_config());
+        connections.insert(long_cjk, make_wg_config());
+        let state = AppState::new(AppConfig { connections });
+        render_bar(&state, 120); // must not panic
+    }
+
+    // ── Extreme connection count tests ───────────────────────────────────────
+
+    #[test]
+    fn one_thousand_connections_no_panic() {
+        let mut state = many_connection_state(1000);
+        state.selected_connection = 999;
+        render_bar(&state, 80); // must not panic
+    }
+
+    #[test]
+    fn one_thousand_connections_selected_middle_visible() {
+        // Use 4-digit zero-padding so lexicographic and numeric order agree
+        // (the shared many_connection_state helper uses :02 which interleaves
+        // 2- and 3-digit names when n > 99).
+        let mut connections = BTreeMap::new();
+        for i in 0..1000usize {
+            connections.insert(format!("c{i:04}"), make_wg_config());
+        }
+        let mut state = AppState::new(AppConfig { connections });
+        state.selected_connection = 500; // "c0500"
+        let content = render_bar(&state, 120);
+        assert!(
+            content.contains("c0500"),
+            "selected 'c0500' must be visible at 1000 connections: {content:?}"
+        );
+    }
+
+    #[test]
+    fn one_thousand_connections_selected_first_no_left_indicator() {
+        let state = many_connection_state(1000); // selected = 0
+        let content = render_bar(&state, 80);
+        assert!(
+            !content.contains('<'),
+            "no '<' expected when selected is first of 1000: {content:?}"
         );
     }
 }
