@@ -28,24 +28,33 @@ use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, ConnectionBarComponent, LogsComponent, OverviewComponent,
     PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
 };
+use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_WIDTH};
+use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
+use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
 use event::{AppEvent, EventHandler};
 
+/// Minimum rows reserved for the main content area.
+///
+/// Policy constant: ensures the content pane is never squeezed to zero rows
+/// when the connection bar is shown.
+const MIN_CONTENT_HEIGHT: u16 = 1;
+
 /// Minimum terminal height at which the connection bar is shown.
 ///
-/// Layout rows: 3 (tab bar) + 1 (connection bar) + 1 (content) + 3 (status bar) = 8.
-/// Below this threshold the bar is suppressed so the content area never
-/// collapses to zero rows.
-const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 = 8;
+/// Derived directly from each component's own height measurement so this
+/// threshold automatically tracks any layout changes to surrounding
+/// components.  Below this value the bar is suppressed so the content area
+/// never collapses below [`MIN_CONTENT_HEIGHT`].
+const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 =
+    TAB_BAR_HEIGHT + CONNECTION_BAR_HEIGHT + MIN_CONTENT_HEIGHT + STATUS_BAR_HEIGHT;
 
 /// Minimum terminal width at which the connection bar is shown.
 ///
-/// Below this threshold the `" Connections: "` prefix (14 cols) plus at least
-/// one entry would overflow or clip beyond usefulness.  40 columns gives the
-/// viewport algorithm enough budget (`40 − 16 = 24`) to display the selected
-/// entry and at least one neighbour.
-const MIN_WIDTH_FOR_CONNECTION_BAR: u16 = 40;
+/// Delegates to [`MIN_USEFUL_WIDTH`] so this threshold stays in sync with any
+/// changes to the bar's prefix or indicator strings.
+const MIN_WIDTH_FOR_CONNECTION_BAR: u16 = MIN_USEFUL_WIDTH;
 
 /// Messages sent from background daemon tasks to the event loop.
 enum DaemonMessage {
@@ -81,8 +90,12 @@ fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
 ///
 /// # Errors
 ///
-/// Returns an error if terminal setup, event handling, or teardown
-/// fails.
+/// Returns an error if:
+/// - The terminal cannot be put into raw mode (`crossterm::terminal::enable_raw_mode`)
+/// - Entering or leaving the alternate screen fails (`crossterm::execute!`)
+/// - The [`Terminal`] backend cannot be created or cleared
+/// - A terminal draw call fails (e.g. the underlying writer returns an I/O error)
+/// - The event handler fails to read a terminal event
 pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
@@ -169,12 +182,13 @@ async fn event_loop(
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),          // Tab bar
-                    Constraint::Length(bar_height), // Connection bar (0 when hidden)
-                    Constraint::Min(0),             // Main content
-                    Constraint::Length(3),          // Status bar / search
+                    Constraint::Length(TAB_BAR_HEIGHT),    // Tab bar
+                    Constraint::Length(bar_height),        // Connection bar (0 when hidden)
+                    Constraint::Min(0),                    // Main content
+                    Constraint::Length(STATUS_BAR_HEIGHT), // Status bar / search
                 ])
                 .split(frame.area());
+            debug_assert_layout(&chunks, frame.area(), show_bar);
 
             tab_bar.render(frame, chunks[0], false, &state);
             if show_bar {
@@ -216,6 +230,38 @@ async fn event_loop(
     tasks.abort_all();
 
     Ok(())
+}
+
+/// Assert that the top-level layout chunks have the expected dimensions.
+///
+/// Only active in debug builds (`debug_assert!`). Called once per frame
+/// immediately after the layout split so mismatches surface in testing.
+fn debug_assert_layout(chunks: &[ratatui::layout::Rect], area: ratatui::layout::Rect, show_bar: bool) {
+    debug_assert_eq!(chunks.len(), 4, "top-level layout must yield exactly 4 chunks");
+    // Length constraints are satisfied in full when the terminal has
+    // enough rows for the two fixed chrome bands.
+    if area.height >= TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT {
+        debug_assert_eq!(
+            chunks[0].height,
+            TAB_BAR_HEIGHT,
+            "tab bar chunk height should be {TAB_BAR_HEIGHT}, got {}",
+            chunks[0].height
+        );
+        debug_assert_eq!(
+            chunks[3].height,
+            STATUS_BAR_HEIGHT,
+            "status bar chunk height should be {STATUS_BAR_HEIGHT}, got {}",
+            chunks[3].height
+        );
+    }
+    if show_bar {
+        debug_assert_eq!(
+            chunks[1].height,
+            CONNECTION_BAR_HEIGHT,
+            "connection bar chunk height should be {CONNECTION_BAR_HEIGHT}, got {}",
+            chunks[1].height
+        );
+    }
 }
 
 /// Dispatch an action to `AppState` and all components.

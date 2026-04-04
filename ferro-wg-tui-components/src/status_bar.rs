@@ -9,6 +9,12 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
+/// Number of rows this component occupies in the layout.
+///
+/// One row for the [`Borders::ALL`] top border, one for the content line, and
+/// one for the bottom border.
+pub const STATUS_BAR_HEIGHT: u16 = 3;
+
 /// Bottom-of-screen bar that displays help text in normal mode or a
 /// search input field in search mode.
 ///

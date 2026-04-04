@@ -8,6 +8,12 @@ use ratatui::widgets::{Block, Borders, Tabs};
 
 use ferro_wg_tui_core::{Action, AppState, Component, Tab};
 
+/// Number of rows this component occupies in the layout.
+///
+/// One row for the [`Borders::ALL`] top border, one for the tab titles, and
+/// one for the bottom border.
+pub const TAB_BAR_HEIGHT: u16 = 3;
+
 /// Top-of-screen tab bar showing all available tabs with numeric
 /// labels. Tab switching is handled by the global key handler, so
 /// this component is render-only.
