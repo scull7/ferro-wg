@@ -51,18 +51,19 @@ fn digit_count(mut n: usize) -> usize {
 
 /// Compute the column width of connection entry `index` (0-based).
 ///
-/// Uses `chars().count()` as a display-width proxy — valid for the ASCII
-/// and narrow-Unicode characters used in this component.
+/// `display_name` must already be truncated by the caller (via
+/// [`truncate_name`]) so that `display_name.chars().count()` is the true
+/// display width. Uses `chars().count()` as a display-width proxy — valid
+/// for the ASCII and narrow-Unicode characters used in this component.
 ///
 /// * **Selected** `"[N] <name> ●  "` — label + space + name + space + indicator + 2 spaces
 /// * **Unselected** `"[N]●  "` — label + indicator + 2 spaces
-fn entry_width(index: usize, name: &str, selected: bool) -> usize {
+fn entry_width(index: usize, display_name: &str, selected: bool) -> usize {
     // "[N]" = 2 brackets + number of digits in (index + 1)
     let label_width = 2 + digit_count(index + 1);
     if selected {
-        let name_width = truncate_name(name).chars().count();
         // space + name + space + indicator(1) + 2 trailing spaces
-        label_width + 1 + name_width + 1 + 1 + 2
+        label_width + 1 + display_name.chars().count() + 1 + 1 + 2
     } else {
         // indicator(1) + 2 trailing spaces
         label_width + 1 + 2
@@ -180,12 +181,19 @@ impl Component for ConnectionBarComponent {
         let n = state.connections.len();
         let sel = state.selected_connection;
 
-        // Pre-compute display width for each entry.
-        let widths: Vec<usize> = state
+        // Pre-compute truncated display names once; reused in both the widths
+        // pass and the spans loop so truncate_name is not called twice.
+        let display_names: Vec<Cow<'_, str>> = state
             .connections
             .iter()
+            .map(|conn| truncate_name(conn.name.as_str()))
+            .collect();
+
+        // Pre-compute display width for each entry.
+        let widths: Vec<usize> = display_names
+            .iter()
             .enumerate()
-            .map(|(i, conn)| entry_width(i, conn.name.as_str(), i == sel))
+            .map(|(i, name)| entry_width(i, name, i == sel))
             .collect();
 
         let (view_start, view_end) = viewport(&widths, sel, area.width as usize);
@@ -203,8 +211,14 @@ impl Component for ConnectionBarComponent {
             spans.push(Span::raw(" Connections: "));
         }
 
-        for i in view_start..=view_end {
-            let conn = &state.connections[i];
+        for (i, (conn, display_name)) in state
+            .connections
+            .iter()
+            .zip(display_names.iter())
+            .enumerate()
+            .take(view_end + 1)
+            .skip(view_start)
+        {
             let (indicator, ind_style): (&'static str, Style) = match &conn.status {
                 None => ("?", Style::default().fg(theme.muted)),
                 Some(s) if s.state == ConnectionState::Connected => {
@@ -218,7 +232,7 @@ impl Component for ConnectionBarComponent {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD);
                 spans.push(Span::styled(format!("[{}] ", i + 1), label_style));
-                spans.push(Span::styled(truncate_name(conn.name.as_str()), label_style));
+                spans.push(Span::styled(display_name.clone(), label_style));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(indicator, ind_style));
                 spans.push(Span::raw("  "));
@@ -361,18 +375,20 @@ mod tests {
 
     #[test]
     fn entry_width_selected_name_truncated_to_limit() {
-        // Name exactly at MAX_DISPLAY_NAME_LEN — no truncation.
+        // Name exactly at MAX_DISPLAY_NAME_LEN — truncate_name returns it as-is.
         let name = "a".repeat(MAX_DISPLAY_NAME_LEN);
+        let display = truncate_name(&name);
         // "[1] " (4) + 20 + " ●  " (4) = 28
-        assert_eq!(entry_width(0, &name, true), 4 + MAX_DISPLAY_NAME_LEN + 4);
+        assert_eq!(entry_width(0, &display, true), 4 + MAX_DISPLAY_NAME_LEN + 4);
     }
 
     #[test]
     fn entry_width_selected_name_over_limit_uses_truncated_width() {
-        // Name 5 chars over limit — truncated to MAX_DISPLAY_NAME_LEN + "…" (1 char).
+        // Name 5 chars over limit; caller truncates before passing to entry_width.
         let name = "a".repeat(MAX_DISPLAY_NAME_LEN + 5);
+        let display = truncate_name(&name); // MAX_DISPLAY_NAME_LEN chars + "…" = +1
         let expected = 4 + (MAX_DISPLAY_NAME_LEN + 1) + 4; // 4 = "[1] ", 4 = " ●  "
-        assert_eq!(entry_width(0, &name, true), expected);
+        assert_eq!(entry_width(0, &display, true), expected);
     }
 
     // ── viewport unit tests ──────────────────────────────────────────────────
