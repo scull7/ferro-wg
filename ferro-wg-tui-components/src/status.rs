@@ -213,10 +213,33 @@ impl Component for StatusComponent {
 mod tests {
     use std::collections::BTreeMap;
 
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
     use ferro_wg_core::config::{AppConfig, InterfaceConfig, PeerConfig, WgConfig};
+    use ferro_wg_core::error::BackendKind;
     use ferro_wg_core::key::PrivateKey;
-    use ferro_wg_tui_core::Tab;
+    use ferro_wg_core::stats::TunnelStats;
+    use ferro_wg_tui_core::{ConnectionState, ConnectionStatus, Tab};
+
+    fn render_status(state: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let mut comp = StatusComponent::new();
+                comp.render(frame, frame.area(), true, state);
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
 
     fn make_app_config_with_peers(peers: Vec<PeerConfig>) -> AppConfig {
         let mut connections = BTreeMap::new();
@@ -299,5 +322,94 @@ mod tests {
         assert_eq!(comp.table_state.selected(), Some(1));
         comp.update(&Action::SelectTab(Tab::Peers), &state);
         assert_eq!(comp.table_state.selected(), Some(0));
+    }
+
+    // ── Multi-peer render tests ───────────────────────────────────────────────
+
+    #[test]
+    fn status_renders_both_peer_names() {
+        let state = test_state(); // peer-a and peer-b
+        let content = render_status(&state, 120, 20);
+        assert!(content.contains("peer-a"), "expected 'peer-a' in: {content:?}");
+        assert!(content.contains("peer-b"), "expected 'peer-b' in: {content:?}");
+    }
+
+    #[test]
+    fn status_renders_distinct_peer_endpoints() {
+        let state = test_state();
+        let content = render_status(&state, 120, 20);
+        assert!(content.contains("1.2.3.4"), "expected endpoint '1.2.3.4' in: {content:?}");
+        assert!(content.contains("5.6.7.8"), "expected endpoint '5.6.7.8' in: {content:?}");
+    }
+
+    #[test]
+    fn status_renders_distinct_allowed_ips() {
+        let state = test_state();
+        let content = render_status(&state, 120, 20);
+        assert!(
+            content.contains("10.0.0.0/24"),
+            "expected '10.0.0.0/24' in: {content:?}"
+        );
+        assert!(
+            content.contains("10.0.1.0/24"),
+            "expected '10.0.1.0/24' in: {content:?}"
+        );
+    }
+
+    #[test]
+    fn status_renders_nonzero_keepalive_as_seconds() {
+        // test_state has persistent_keepalive=25 for both peers
+        let state = test_state();
+        let content = render_status(&state, 120, 20);
+        assert!(content.contains("25s"), "expected '25s' keepalive in: {content:?}");
+    }
+
+    #[test]
+    fn status_renders_zero_keepalive_as_off() {
+        let state = AppState::new(make_app_config_with_peers(vec![PeerConfig {
+            name: "peer-zero".into(),
+            public_key: PrivateKey::generate().public_key(),
+            preshared_key: None,
+            endpoint: Some("9.9.9.9:51820".into()),
+            allowed_ips: vec!["192.168.0.0/24".into()],
+            persistent_keepalive: 0,
+        }]));
+        let content = render_status(&state, 120, 20);
+        assert!(content.contains("off"), "expected 'off' for zero keepalive in: {content:?}");
+    }
+
+    #[test]
+    fn status_connected_summary_shows_connected() {
+        let mut state = test_state();
+        state.connections[0].status = Some(ConnectionStatus {
+            state: ConnectionState::Connected,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats::default(),
+            endpoint: None,
+            interface: Some("utun4".into()),
+        });
+        let content = render_status(&state, 120, 20);
+        assert!(
+            content.contains("connected"),
+            "expected 'connected' in summary: {content:?}"
+        );
+    }
+
+    #[test]
+    fn status_no_status_shows_down() {
+        // All connections have status: None — summary must read "down".
+        let state = test_state();
+        let content = render_status(&state, 120, 20);
+        assert!(content.contains("down"), "expected 'down' in summary: {content:?}");
+    }
+
+    #[test]
+    fn status_empty_config_shows_no_connections_message() {
+        let state = AppState::new(AppConfig::default());
+        let content = render_status(&state, 120, 20);
+        assert!(
+            content.contains("No connections configured"),
+            "expected 'No connections configured' in: {content:?}"
+        );
     }
 }
