@@ -11,11 +11,11 @@ Before writing any Rust code, invoke `/rust-practices` (per `CLAUDE.md`).
   timestamp formatting (`DateTime::from_timestamp_millis`, `Local` timezone).
 - Verify that the theme struct exposes the roles referenced in Step 5
   (`theme.error`, `theme.warning`, `theme.success`, `theme.muted`) before
-  writing render code. If the names differ, update this document.
-- `LogEntry.target` is a heap-allocated `String` but is almost always a
-  `'static` module-path literal from `tracing`. If profiling shows allocation
-  pressure here, consider `Cow<'static, str>`; leave as `String` initially for
-  simplicity.
+  writing render code. If the names differ, update this document. Add fallbacks.
+- `LogEntry.target` **MUST** use `Cow<'static, str>` to avoid unnecessary heap
+  allocations (tracing targets are almost always static). Do not leave as `String`.
+- Define constants with justification in code (e.g. `const HISTORY_CAP: usize = 200; // enough for 10s of burst at 20 logs/sec`).
+- Add defensive error handling: overflow checks on `timestamp_ms`, bounds on levels, robust IPC parsing with length limits.
 
 ---
 
@@ -53,7 +53,7 @@ stream reconnects automatically when the daemon restarts.
 | US-6 | As a user I want to filter logs to the currently selected connection | Pressing `c` toggles between "all connections" and "current connection only"; the block title reflects the active filter | 5 |
 | US-7 | As a user I want the view to auto-scroll when I'm reading the newest entries | When `scroll_offset == 0` (pinned to bottom), new entries scroll into view automatically; scrolling up freezes the view | 5 |
 | US-8 | As a user I want the buffer to wrap cleanly when it fills up | When the buffer reaches its capacity (default 1 000 entries), the oldest entry is evicted; no visible freeze or stutter | 3 |
-| US-9 | As a user I want the Logs tab to recover if the daemon restarts | The stream task reconnects automatically after a 2 s backoff; a "reconnecting…" indicator appears in the status bar during the gap | 4 |
+| US-9 | As a user I want the Logs tab to recover if the daemon restarts | The stream task reconnects automatically with exponential backoff+jitter; "reconnecting…" indicator in status bar; no socket hammering | 4 |
 | US-10 | As a daemon operator I want log capture to impose no performance penalty | The tracing `Layer` sends to a bounded `broadcast` channel (capacity 512); lagging subscribers are dropped with `RecvError::Lagged`, not blocking the daemon | 2 |
 
 ---
@@ -191,17 +191,16 @@ impl LogLevel {
 
     /// Advance to the next stricter minimum severity for UI filtering.
     ///
-    /// The UI cycle is `DEBUG → INFO → WARN → ERROR → DEBUG` (wrapping).
-    /// `Trace` is not part of the UI cycle; it is treated as `Debug` for
-    /// cycling purposes (i.e. `Trace.next_filter_level() == Info`).
-    /// "Next filter level" means fewer entries will be shown after the call.
+    /// UI cycle (user-visible only): `DEBUG → INFO → WARN → ERROR → DEBUG` (wrapping).
+    /// `Trace` is **never** part of the UI cycle (too verbose); `Trace.next_filter_level() == Info`.
+    /// This ensures consistent state. "Next filter level" means the filter becomes stricter
+    /// (fewer entries shown).
     pub fn next_filter_level(self) -> Self {
         match self {
-            Self::Trace => Self::Info,  // Trace not in UI cycle; skip to Info
-            Self::Debug => Self::Info,
+            Self::Trace | Self::Debug => Self::Info,
             Self::Info  => Self::Warn,
             Self::Warn  => Self::Error,
-            Self::Error => Self::Debug, // wrap back to Debug (not Trace)
+            Self::Error => Self::Debug,
         }
     }
 }
@@ -243,11 +242,14 @@ StreamLogs {
 },
 ```
 
-**New `DaemonResponse` variant:**
+**New `DaemonResponse` variants:**
 
 ```rust
 /// A single log entry pushed from an active `StreamLogs` subscription.
 LogEntry(LogEntry),
+/// Notifies subscriber that N entries were dropped due to slow consumption.
+/// Never stored in LogBuffer (avoids polluting/evicting real logs).
+Lagged(usize),
 ```
 
 #### Tests
@@ -286,19 +288,16 @@ impl LogBroadcaster {
     /// History is always updated regardless of channel state.
     pub fn publish(&self, entry: LogEntry) { ... }
 
-    /// Subscribe and snapshot current history atomically.
+    /// Subscribe and snapshot current history.
     ///
-    /// Acquires the history `Mutex`, calls `sender.subscribe()` while holding
-    /// the lock, then collects history into a `Vec` — all in one critical
-    /// section. This prevents the TOCTOU gap where entries published between
-    /// the snapshot and the first `recv()` would be missed: the receiver is
-    /// registered before the lock is released, so the broadcast ring-buffer
-    /// already holds any entries published after subscription.
+    /// **Race mitigation**: `subscribe()` is called *before* taking the history
+    /// lock to snapshot. Any entries published in the tiny window between
+    /// subscribe and snapshot will appear in both history replay *and* live
+    /// stream (harmless duplicate for logs). The alternative (lock first) risks
+    /// silent loss if broadcast buffer drops messages before recv().
     ///
-    /// The snapshot is a single `.iter().cloned().collect()` pass with no
-    /// intermediate allocations.
-    ///
-    /// Returns `(receiver, history_snapshot)`.
+    /// Returns `(receiver, history_snapshot)`. Snapshot clones only the
+    /// needed history (bounded to 200).
     pub fn subscribe(&self) -> (broadcast::Receiver<LogEntry>, Vec<LogEntry>) { ... }
 }
 ```
@@ -337,23 +336,26 @@ DaemonCommand::StreamLogs { connection_name, min_level } => {
 }
 ```
 
-`passes_filter()` contract (must never panic):
+`passes_filter()` **must never panic** (defensive impl required):
 
+```rust
+fn passes_filter(entry: &LogEntry, filter_conn: Option<&str>, min_level: LogLevel) -> bool {
+    if entry.level < min_level {  // uses Ord
+        return false;
+    }
+    let filter_conn = match filter_conn {
+        None => return true,  // no filter
+        Some(c) => c,
+    };
+    match &entry.connection_name {
+        None => true,  // global events always pass any filter
+        Some(name) => name == filter_conn,
+    }
+}
 ```
-passes_filter(entry, filter_connection, min_level):
-  - entry.level < min_level          → false  (level too low)
-  - filter_connection == None        → true   (no connection filter)
-  - entry.connection_name == None    → true   (global events always pass)
-  - entry.connection_name == filter_connection → true
-  - otherwise                        → false
-```
+Note: uses `&str` for filter to avoid clones; `String` comparison is safe (always valid UTF-8).
 
-`lag_warning_entry(n)` — a synthetic `LogEntry` with:
-- `level: LogLevel::Warn`
-- `connection_name: None`
-- `target: "ferro_wg::log_stream"`
-- `message: format!("[{n} log entries dropped — channel lagged]")`
-- `timestamp_ms`: current wall-clock UTC ms
+**Lag handling (critical fix)**: Do not synthesize `LogEntry` for `Lagged` — it would evict real log entries from buffer. Instead, add `DaemonResponse::Lagged(usize)` variant. The streaming handler sends this on `RecvError::Lagged(n)`. TUI treats it as transient status (banner or counter), **never** inserts into `LogBuffer`.
 
 `stream_logs()`:
 
@@ -380,9 +382,8 @@ async fn stream_logs(
                 }
             }
             Err(RecvError::Lagged(n)) => {
-                // Synthesize a warning entry so the TUI user knows entries were dropped.
-                let warn = lag_warning_entry(n);
-                let _ = send_entry(&mut writer, &warn).await;
+                // Send dedicated Lagged message (does NOT go into LogBuffer).
+                let _ = send_lagged(&mut writer, n).await;
             }
             Err(RecvError::Closed) => return,
         }
@@ -537,7 +538,9 @@ enum DaemonMessage {
     CommandError(String),
     Unreachable,
     LogEntry(LogEntry),          // ← new
+    LogStreamConnected,          // ← new (replaces synthetic LogEntry)
     LogStreamDisconnected,       // ← new
+    Lagged(usize),               // ← new for lag without polluting buffer
 }
 ```
 
@@ -552,20 +555,22 @@ fn spawn_log_stream(
         loop {
             match open_log_stream().await {
                 Ok(mut reader) => {
-                    let _ = tx.send(DaemonMessage::LogEntry(synthetic_connected_entry()));
-                    // Read LogEntry messages until EOF.
+                            let _ = tx.send(DaemonMessage::LogStreamConnected);
+                    // Read messages until EOF. Support both LogEntry and Lagged.
                     let mut line = String::new();
                     loop {
                         line.clear();
                         match reader.read_line(&mut line).await {
                             Ok(0) | Err(_) => break,
                             Ok(_) => {
-                                if let Ok(DaemonResponse::LogEntry(entry)) =
-                                    ipc::decode_message(&line)
-                                {
-                                    if tx.send(DaemonMessage::LogEntry(entry)).is_err() {
-                                        return; // TUI shut down
+                                match ipc::decode_message::<DaemonResponse>(&line) {
+                                    Ok(DaemonResponse::LogEntry(entry)) => {
+                                        let _ = tx.send(DaemonMessage::LogEntry(entry));
                                     }
+                                    Ok(DaemonResponse::Lagged(n)) => {
+                                        let _ = tx.send(DaemonMessage::Lagged(n));
+                                    }
+                                    _ => {} // ignore malformed (with length limit in decoder)
                                 }
                             }
                         }
@@ -602,15 +607,12 @@ In the `daemon_rx.try_recv()` drain loop:
 
 ```rust
 DaemonMessage::LogEntry(entry) => vec![Action::AppendLog(entry)],
+DaemonMessage::LogStreamConnected => vec![Action::LogStreamConnected],
 DaemonMessage::LogStreamDisconnected => vec![Action::LogStreamDisconnected],
+DaemonMessage::Lagged(n) => vec![Action::LogLagged(n)],  // updates status, no buffer insert
 ```
 
-`spawn_log_stream(&daemon_tx, &mut tasks)` is called once after the channel is
-created, before the event loop begins.
-
-The synthetic `connected_entry()` dispatches `Action::LogStreamConnected` via a
-`DaemonMessage::LogStreamConnected` variant (add this too) so the status bar
-can show the stream state.
+Add `LogLagged(usize)` to Actions. `spawn_log_stream` called once at startup. Use exponential backoff (with jitter) instead of fixed 2s sleep for reconnection.
 
 #### Tests
 
@@ -655,16 +657,13 @@ enum ConnectionFilter {
 | `G` | Jump to newest (`scroll_offset = 0`, re-enable auto-scroll) |
 | `l` | Cycle `level_filter` via `LogLevel::next_filter_level()`; reset `scroll_offset` to 0 |
 | `c` | Toggle `connection_filter` between `All` and `ActiveConnection`; reset `scroll_offset` to 0 |
-| `/` | Emit `Action::EnterSearch` (reuse existing search infrastructure) |
+| `/` | Enter search mode (component-local query; reuses only keybinding pattern) |
 
 Auto-scroll: when `scroll_offset == 0` and an `AppendLog` action arrives
 (observed via `update()`), scroll stays at 0 so the new entry is immediately
 visible. When `scroll_offset > 0` (user has scrolled up), the view freezes.
 
-**Scroll position on buffer eviction:** When the buffer evicts the oldest entry
-(front), `scroll_offset` must be decremented by 1 (clamped to 0) so the user's
-viewport stays anchored to the same content. Failing to do this causes a one-row
-upward jump for every eviction when the user is scrolled to the top.
+**Eviction-aware scrolling (critical fix):** `LogBuffer` tracks `evicted_count: u64` (monotonic). On `push()` when evicting, increment it. `filtered()` iterator yields with absolute index. `LogsComponent` adjusts `scroll_offset` by `new_evicted - old_evicted` on each render/update. This prevents any viewport jump even when viewing oldest entries or during high-rate eviction. No visible stutter.
 
 **Search infrastructure:** `LogsComponent` owns its search query string
 (`search_query: String`) and search mode flag (`in_search: bool`) locally. The
@@ -804,9 +803,8 @@ These spin up a mock daemon that:
 4. `l` cycles level filter; lower-level entries disappear without buffer loss.
 5. `c` toggles per-connection filtering; global daemon events are always shown.
 6. `/` search highlights matches within visible lines.
-7. Buffer wraps at 1 000 entries without stutter.
-8. Stream reconnects within 2 s of daemon restart; `log_stream_connected` reflects state.
-9. Status poll continues unaffected while the log stream runs.
-10. `cargo test --workspace --all-features`, `cargo clippy --all-targets
-    --all-features -- -D warnings -D clippy::pedantic`, and `cargo fmt --check`
-    all pass.
+ 7. Buffer wraps at 1 000 entries **without viewport jumps** (eviction-aware scroll).
+ 8. Lag events shown in status (no buffer pollution).
+ 9. Stream reconnects with exp backoff; no socket spam; `log_stream_connected` accurate.
+10. All filters, search, scroll, history replay work without races or panics.
+11. `cargo test --workspace --all-features`, `cargo clippy --all-targets --all-features -- -D warnings -D clippy::pedantic`, `cargo fmt --check` pass.
