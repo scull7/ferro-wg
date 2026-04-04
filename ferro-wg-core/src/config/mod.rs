@@ -7,6 +7,7 @@
 pub mod toml;
 pub mod wg_quick;
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
@@ -164,6 +165,30 @@ impl WgConfig {
     }
 }
 
+/// Controls how log lines are rendered in the Logs tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogDisplayConfig {
+    /// Prefix each log line with an `HH:MM:SS` timestamp badge.
+    #[serde(default = "default_true")]
+    pub show_timestamps: bool,
+    /// Color-code the log level badge (`ERROR`/`WARN`/`INFO`/`DEBUG`/`TRACE`).
+    #[serde(default = "default_true")]
+    pub color_badges: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for LogDisplayConfig {
+    fn default() -> Self {
+        Self {
+            show_timestamps: true,
+            color_badges: true,
+        }
+    }
+}
+
 /// Top-level application config: a map of named connections.
 ///
 /// Each connection has its own interface (private key, addresses) and peers.
@@ -183,7 +208,10 @@ impl WgConfig {
 pub struct AppConfig {
     /// Named connections, keyed by connection name (e.g. "mia", "tus1").
     #[serde(default)]
-    pub connections: std::collections::BTreeMap<String, WgConfig>,
+    pub connections: BTreeMap<String, WgConfig>,
+    /// Log display preferences (timestamps, color badges).
+    #[serde(default)]
+    pub log_display: LogDisplayConfig,
 }
 
 impl AppConfig {
@@ -311,6 +339,24 @@ mod tests {
         assert!(peer.preshared_key.is_none());
     }
 
+    #[test]
+    fn log_display_config_defaults_to_enabled() {
+        let cfg = LogDisplayConfig::default();
+        assert!(cfg.show_timestamps);
+        assert!(cfg.color_badges);
+    }
+
+    #[test]
+    fn log_display_config_roundtrip() {
+        let cfg = LogDisplayConfig {
+            show_timestamps: false,
+            color_badges: true,
+        };
+        let toml_str = ::toml::to_string_pretty(&cfg).expect("serialize");
+        let back: LogDisplayConfig = ::toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(back, cfg);
+    }
+
     // ── validate_name unit tests ──────────────────────────────────────────────
 
     #[test]
@@ -362,7 +408,10 @@ mod tests {
     fn app_config_with_name(name: &str) -> AppConfig {
         let mut connections = std::collections::BTreeMap::new();
         connections.insert(name.to_string(), sample_config());
-        AppConfig { connections }
+        AppConfig {
+            connections,
+            log_display: LogDisplayConfig::default(),
+        }
     }
 
     #[test]

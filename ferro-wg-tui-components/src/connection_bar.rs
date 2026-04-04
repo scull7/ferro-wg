@@ -329,7 +329,10 @@ mod tests {
         connections.insert("mia".to_string(), make_wg_config());
         connections.insert("ord01".to_string(), make_wg_config());
         connections.insert("tus1".to_string(), make_wg_config());
-        AppState::new(AppConfig { connections })
+        AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        })
     }
 
     fn many_connection_state(n: usize) -> AppState {
@@ -337,7 +340,10 @@ mod tests {
         for i in 0..n {
             connections.insert(format!("c{i:02}"), make_wg_config());
         }
-        AppState::new(AppConfig { connections })
+        AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        })
     }
 
     fn render_bar(state: &AppState, width: u16) -> String {
@@ -480,7 +486,10 @@ mod tests {
     fn connection_bar_hidden_single() {
         let mut connections = BTreeMap::new();
         connections.insert("mia".to_string(), make_wg_config());
-        let state = AppState::new(AppConfig { connections });
+        let state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         let content = render_bar(&state, 80);
         assert!(content.trim().is_empty());
     }
@@ -631,7 +640,10 @@ mod tests {
         let mut connections = BTreeMap::new();
         connections.insert("anchor".to_string(), make_wg_config()); // index 0
         connections.insert(long_name.clone(), make_wg_config()); // index 1
-        let mut state = AppState::new(AppConfig { connections });
+        let mut state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         state.selected_connection = 1; // select the long-named connection
         let content = render_bar(&state, 120);
         assert!(
@@ -661,7 +673,10 @@ mod tests {
         let mut connections = BTreeMap::new();
         connections.insert("anchor".to_string(), make_wg_config());
         connections.insert(exact_name.clone(), make_wg_config());
-        let mut state = AppState::new(AppConfig { connections });
+        let mut state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         // BTreeMap sorts: "anchor" < "bbb...", so exact_name is at index 1.
         state.selected_connection = 1;
         let content = render_bar(&state, 120);
@@ -852,7 +867,10 @@ mod tests {
         connections.insert("東京01".to_string(), make_wg_config());
         connections.insert("大阪02".to_string(), make_wg_config());
         connections.insert("名古屋".to_string(), make_wg_config());
-        let state = AppState::new(AppConfig { connections });
+        let state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         render_bar(&state, 80); // must not panic
     }
 
@@ -861,7 +879,10 @@ mod tests {
         let mut connections = BTreeMap::new();
         connections.insert("🌐-us-east".to_string(), make_wg_config());
         connections.insert("🔒-secure".to_string(), make_wg_config());
-        let state = AppState::new(AppConfig { connections });
+        let state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         render_bar(&state, 80); // must not panic
     }
 
@@ -872,7 +893,10 @@ mod tests {
         let mut connections = BTreeMap::new();
         connections.insert("anchor".to_string(), make_wg_config());
         connections.insert(long_cjk, make_wg_config());
-        let state = AppState::new(AppConfig { connections });
+        let state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         render_bar(&state, 120); // must not panic
     }
 
@@ -894,7 +918,10 @@ mod tests {
         for i in 0..1000usize {
             connections.insert(format!("c{i:04}"), make_wg_config());
         }
-        let mut state = AppState::new(AppConfig { connections });
+        let mut state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         state.selected_connection = 500; // "c0500"
         let content = render_bar(&state, 120);
         assert!(

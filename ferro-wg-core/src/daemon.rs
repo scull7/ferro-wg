@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use chrono::Local;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -135,8 +136,10 @@ where
     ) {
         let mut visitor = LogVisitor(String::new());
         event.record(&mut visitor);
+        let timestamp = Local::now().format("%H:%M:%S");
         let line = format!(
-            "{} {}: {}",
+            "{} {} {}: {}",
+            timestamp,
             event.metadata().level(),
             event.metadata().target(),
             visitor.0

@@ -153,7 +153,10 @@ mod tests {
                 peers,
             },
         );
-        AppConfig { connections }
+        AppConfig {
+            connections,
+            ..AppConfig::default()
+        }
     }
 
     fn test_state() -> AppState {

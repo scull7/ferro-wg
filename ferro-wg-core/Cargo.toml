@@ -20,6 +20,9 @@ thiserror = "2"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 
+# Time formatting
+chrono = "0.4"
+
 # Crypto key types (shared by all backends)
 x25519-dalek = { version = "2", features = ["static_secrets", "serde"] }
 base64 = "0.22"

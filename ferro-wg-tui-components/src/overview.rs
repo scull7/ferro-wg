@@ -219,7 +219,10 @@ mod tests {
         connections.insert("mia".to_string(), make_wg_config());
         connections.insert("ord01".to_string(), make_wg_config());
         connections.insert("tus1".to_string(), make_wg_config());
-        AppState::new(AppConfig { connections })
+        AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        })
     }
 
     fn connected_status() -> ConnectionStatus {
@@ -409,7 +412,10 @@ mod tests {
         let mut connections = BTreeMap::new();
         connections.insert("東京-vps".to_string(), make_wg_config());
         connections.insert("大阪-cdn".to_string(), make_wg_config());
-        let state = AppState::new(AppConfig { connections });
+        let state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         let content = render_overview(&state);
         assert!(content.contains("Overview"), "panel title must be present");
     }
@@ -419,7 +425,10 @@ mod tests {
         let mut connections = BTreeMap::new();
         connections.insert("🌐-global".to_string(), make_wg_config());
         connections.insert("🔒-vpn".to_string(), make_wg_config());
-        let state = AppState::new(AppConfig { connections });
+        let state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         render_overview(&state); // must not panic
     }
 
@@ -431,7 +440,10 @@ mod tests {
         for i in 0..100 {
             connections.insert(format!("conn{i:03}"), make_wg_config());
         }
-        let state = AppState::new(AppConfig { connections });
+        let state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         render_overview(&state); // must not panic
     }
 
@@ -441,7 +453,10 @@ mod tests {
         for i in 0..100 {
             connections.insert(format!("conn{i:03}"), make_wg_config());
         }
-        let mut state = AppState::new(AppConfig { connections });
+        let mut state = AppState::new(AppConfig {
+            connections,
+            ..AppConfig::default()
+        });
         state.selected_connection = 99;
         render_overview(&state); // must not panic
     }
