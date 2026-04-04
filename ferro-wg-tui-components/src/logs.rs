@@ -81,6 +81,16 @@ fn parse_log_level(level: &str) -> Option<LogLevel> {
     }
 }
 
+/// Return `true` when `query` appears anywhere in `line` (case-insensitive).
+///
+/// `query` **must already be ASCII-lowercased** by the caller (once per render
+/// frame) to avoid re-lowercasing on every line.  Returns `true` for an empty
+/// query so this predicate composes cleanly with the level filter — an empty
+/// query is equivalent to "no search active".
+fn line_matches_search(line: &str, query: &str) -> bool {
+    query.is_empty() || line.to_ascii_lowercase().contains(query)
+}
+
 /// Number of rows consumed by the panel block's top and bottom borders.
 const BLOCK_BORDER_HEIGHT: u16 = 2;
 
@@ -282,28 +292,33 @@ impl LogsComponent {
         }
     }
 
-    /// Return references to all lines in `buf` that pass the current level filter.
+    /// Return references to all lines in `buf` that pass both the current level
+    /// filter and the search predicate.
     ///
-    /// At `LogLevel::Debug` (the default) no per-line parsing is performed —
-    /// all entries are returned directly as a fast path.
-    fn filtered_lines<'a>(&self, buf: &'a VecDeque<String>) -> Vec<&'a String> {
-        if self.min_level == LogLevel::Debug {
+    /// `search` must be ASCII-lowercased by the caller (done once per render
+    /// frame / key event, not repeated per line).  When both `min_level` is
+    /// `Debug` and `search` is empty the fast path returns every entry without
+    /// per-line parsing.
+    fn filtered_lines<'a>(&self, buf: &'a VecDeque<String>, search: &str) -> Vec<&'a String> {
+        if self.min_level == LogLevel::Debug && search.is_empty() {
             return buf.iter().collect();
         }
-        buf.iter().filter(|l| self.line_passes_filter(l)).collect()
+        buf.iter()
+            .filter(|l| self.line_passes_filter(l) && line_matches_search(l, search))
+            .collect()
     }
 
-    /// Lock `log_lines` and return the number of lines that pass the current
-    /// level filter.
+    /// Lock `log_lines` and return the number of lines that pass both the
+    /// current level filter and the active search query.
     ///
     /// Returns `None` (and emits a warning) if the mutex is poisoned.
     fn filtered_total(&self, state: &AppState) -> Option<usize> {
-        if let Ok(lines) = state.log_lines.lock() {
-            Some(self.filtered_lines(&lines).len())
-        } else {
+        let Ok(lines) = state.log_lines.lock() else {
             warn!("log_lines mutex poisoned in handle_key");
-            None
-        }
+            return None;
+        };
+        let search = state.search_query.to_ascii_lowercase();
+        Some(self.filtered_lines(&lines, &search).len())
     }
 
     /// Compute the first visible line index for the current render pass.
@@ -379,8 +394,9 @@ impl Component for LogsComponent {
             return;
         };
 
-        // Build the filtered view. At LogLevel::Debug this is a fast no-op.
-        let filtered = self.filtered_lines(&log_lines);
+        // Build the filtered view. Pre-lowercase once so per-line matching is cheap.
+        let search = state.search_query.to_ascii_lowercase();
+        let filtered = self.filtered_lines(&log_lines, &search);
         let total_filtered = filtered.len();
 
         // Cache view_height so handle_key can compute valid scroll bounds.
@@ -718,7 +734,7 @@ mod tests {
             "12:34:56 WARN t: c",
             "12:34:56 ERROR t: d",
         ]);
-        assert_eq!(component.filtered_lines(&buf).len(), 4);
+        assert_eq!(component.filtered_lines(&buf, "").len(), 4);
     }
 
     #[test]
@@ -731,7 +747,7 @@ mod tests {
             "12:34:56 WARN t: c",
             "12:34:56 ERROR t: d",
         ]);
-        let result = component.filtered_lines(&buf);
+        let result = component.filtered_lines(&buf, "");
         assert_eq!(result.len(), 2);
         assert!(result[0].contains("WARN"));
         assert!(result[1].contains("ERROR"));
@@ -741,7 +757,67 @@ mod tests {
     fn filtered_lines_empty_buffer() {
         let component = LogsComponent::new();
         let buf: VecDeque<String> = VecDeque::new();
-        assert!(component.filtered_lines(&buf).is_empty());
+        assert!(component.filtered_lines(&buf, "").is_empty());
+    }
+
+    // --- line_matches_search ---
+
+    #[test]
+    fn line_matches_search_empty_query_always_passes() {
+        assert!(line_matches_search(
+            "12:34:56 ERROR t: connection refused",
+            ""
+        ));
+        assert!(line_matches_search("anything", ""));
+    }
+
+    #[test]
+    fn line_matches_search_case_insensitive() {
+        // Query must be pre-lowercased by the caller (as render() and
+        // filtered_total() do); the line is lowercased internally.
+        assert!(line_matches_search(
+            "12:34:56 ERROR t: Connection Lost",
+            "connection"
+        ));
+        assert!(line_matches_search(
+            "12:34:56 ERROR t: Connection Lost",
+            "lost"
+        ));
+        assert!(line_matches_search("12:34:56 INFO t: Tunnel UP", "tunnel"));
+    }
+
+    #[test]
+    fn line_matches_search_no_match_returns_false() {
+        assert!(!line_matches_search("12:34:56 INFO t: tunnel up", "error"));
+    }
+
+    #[test]
+    fn filtered_lines_search_hides_non_matching() {
+        let component = LogsComponent::new();
+        let buf = make_buf(&[
+            "12:34:56 INFO t: tunnel connected",
+            "12:34:56 WARN t: peer timeout",
+            "12:34:56 ERROR t: connection refused",
+        ]);
+        // Query is pre-lowercased; result lines retain their original casing.
+        let result = component.filtered_lines(&buf, "refused");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("refused"));
+    }
+
+    #[test]
+    fn filtered_lines_search_and_level_compose() {
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Warn;
+        let buf = make_buf(&[
+            "12:34:56 DEBUG t: noise debug",
+            "12:34:56 WARN t: peer timeout",
+            "12:34:56 ERROR t: connection refused",
+        ]);
+        // level filter hides DEBUG; search hides WARN → only ERROR passes
+        let result = component.filtered_lines(&buf, "refused");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("refused"));
     }
 
     // --- cycle_level ---

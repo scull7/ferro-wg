@@ -19,8 +19,7 @@ pub const STATUS_BAR_HEIGHT: u16 = 3;
 /// search input field in search mode.
 ///
 /// In search mode, key events are routed here and converted to search
-/// actions (`SearchInput`, `SearchBackspace`, `ExitSearch`,
-/// `ClearSearch`).
+/// actions (`SearchInput`, `SearchBackspace`, `ExitSearch`).
 pub struct StatusBarComponent;
 
 impl StatusBarComponent {
@@ -44,8 +43,7 @@ impl Component for StatusBarComponent {
         }
 
         match key.code {
-            KeyCode::Esc => Some(Action::ClearSearch),
-            KeyCode::Enter => Some(Action::ExitSearch),
+            KeyCode::Esc | KeyCode::Enter => Some(Action::ExitSearch),
             KeyCode::Backspace => Some(Action::SearchBackspace),
             KeyCode::Char(c) => Some(Action::SearchInput(c)),
             _ => None,
@@ -152,12 +150,12 @@ mod tests {
     }
 
     #[test]
-    fn emits_clear_on_esc() {
+    fn emits_exit_on_esc() {
         let mut comp = StatusBarComponent::new();
         let state = search_state();
         assert_eq!(
             comp.handle_key(KeyEvent::from(KeyCode::Esc), &state),
-            Some(Action::ClearSearch)
+            Some(Action::ExitSearch)
         );
     }
 
