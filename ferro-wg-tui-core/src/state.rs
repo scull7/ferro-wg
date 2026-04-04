@@ -179,137 +179,164 @@ impl AppState {
                 warn!("Log buffer mutex poisoned, skipping log append");
             }
         }
-    }
 
-    /// Returns the currently focused connection, if any.
-    #[must_use]
-    pub fn active_connection(&self) -> Option<&ConnectionView> {
-        self.connections.get(self.selected_connection)
-    }
+        /// Returns the currently focused connection, if any.
+        #[must_use]
+        pub fn active_connection(&self) -> Option<&ConnectionView> {
+            self.connections.get(self.selected_connection)
+        }
 
-    /// Returns the currently focused connection mutably, if any.
-    ///
-    /// Returns `None` when `connections` is empty.
-    pub fn active_connection_mut(&mut self) -> Option<&mut ConnectionView> {
-        self.connections.get_mut(self.selected_connection)
-    }
+        /// Returns the currently focused connection mutably, if any.
+        ///
+        /// Returns `None` when `connections` is empty.
+        pub fn active_connection_mut(&mut self) -> Option<&mut ConnectionView> {
+            self.connections.get_mut(self.selected_connection)
+        }
 
-    /// Dispatch an action, mutating shared state.
-    ///
-    /// This is Phase 1 of the two-phase dispatch cycle. After this
-    /// returns, the caller should forward the action to all components
-    /// via [`Component::update()`](crate::component::Component::update).
-    ///
-    /// `SelectConnection(i)` with an out-of-bounds index is silently
-    /// ignored and emits a `tracing::warn!` log entry; it does not panic.
-    pub fn dispatch(&mut self, action: &Action) {
-        match action {
-            Action::Quit => self.running = false,
-            Action::NextTab => self.active_tab = self.active_tab.next(),
-            Action::PrevTab => self.active_tab = self.active_tab.prev(),
-            Action::SelectTab(tab) => self.active_tab = *tab,
-            Action::EnterSearch => {
-                self.input_mode = InputMode::Search;
-                self.search_query.clear();
-            }
-            Action::ExitSearch => self.input_mode = InputMode::Normal,
-            Action::ClearSearch => {
-                self.input_mode = InputMode::Normal;
-                self.search_query.clear();
-            }
-            Action::SearchInput(c) => self.search_query.push(*c),
-            Action::SearchBackspace => {
-                self.search_query.pop();
-            }
-
-            // -- Connection selection --
-            Action::SelectNextConnection => {
-                if !self.connections.is_empty() {
-                    self.selected_connection =
-                        (self.selected_connection + 1) % self.connections.len();
+        /// Dispatch an action, mutating shared state.
+        ///
+        /// This is Phase 1 of the two-phase dispatch cycle. After this
+        /// returns, the caller should forward the action to all components
+        /// via [`Component::update()`](crate::component::Component::update).
+        ///
+        /// `SelectConnection(i)` with an out-of-bounds index is silently
+        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
+        /// Handle UI-related actions (tabs, search, quit).
+        fn handle_ui_action(&mut self, action: &Action) {
+            match action {
+                Action::Quit => self.running = false,
+                Action::NextTab => self.active_tab = self.active_tab.next(),
+                Action::PrevTab => self.active_tab = self.active_tab.prev(),
+                Action::SelectTab(tab) => self.active_tab = *tab,
+                Action::EnterSearch => {
+                    self.input_mode = InputMode::Search;
                     self.search_query.clear();
                 }
-            }
-            Action::SelectPrevConnection => {
-                if !self.connections.is_empty() {
-                    self.selected_connection = self
-                        .selected_connection
-                        .checked_sub(1)
-                        .unwrap_or(self.connections.len() - 1);
+                Action::ExitSearch => self.input_mode = InputMode::Normal,
+                Action::ClearSearch => {
+                    self.input_mode = InputMode::Normal;
                     self.search_query.clear();
                 }
-            }
-            Action::SelectConnection(i) => {
-                if *i >= self.connections.len() {
-                    warn!(
-                        i,
-                        len = self.connections.len(),
-                        "SelectConnection index out of bounds; ignoring"
-                    );
-                } else {
-                    self.selected_connection = *i;
-                    self.search_query.clear();
+                Action::SearchInput(c) => self.search_query.push(*c),
+                Action::SearchBackspace => {
+                    self.search_query.pop();
                 }
+                _ => {}
             }
+        }
 
-            // -- Daemon integration --
-            Action::UpdatePeers(statuses) => {
-                self.daemon_connected = true;
-                for s in statuses {
-                    if let Some(conn) = self
-                        .connections
-                        .iter_mut()
-                        .find(|c| c.name == s.connection_name)
-                    {
-                        let state = if s.connected {
-                            ConnectionState::Connected
-                        } else {
-                            ConnectionState::Disconnected
-                        };
-                        conn.status = Some(ConnectionStatus {
-                            state,
-                            backend: s.backend,
-                            stats: s.stats.clone(),
-                            endpoint: s.endpoint.clone(),
-                            interface: s.interface.clone(),
-                        });
-                    } else {
-                        warn!(connection_name = %s.connection_name, "UpdatePeers received status for unknown connection");
+        /// Handle connection selection actions.
+        fn handle_connection_action(&mut self, action: &Action) {
+            match action {
+                Action::SelectNextConnection => {
+                    if !self.connections.is_empty() {
+                        self.selected_connection =
+                            (self.selected_connection + 1) % self.connections.len();
+                        self.search_query.clear();
                     }
                 }
-                // Clamp in case connections changed (defensive; static in Phase 2).
-                self.selected_connection = self
-                    .selected_connection
-                    .min(self.connections.len().saturating_sub(1));
-            }
-            Action::DaemonConnectivityChanged(connected) => {
-                self.daemon_connected = *connected;
-            }
-            Action::DaemonOk(msg) => {
-                self.feedback = Some(Feedback::success(msg.clone()));
-            }
-            Action::DaemonError(msg) => {
-                self.feedback = Some(Feedback::error(msg.clone()));
-            }
-
-            // -- Row navigation --
-            Action::NextRow => {
-                if let Some(conn) = self.active_connection_mut() {
-                    let max = conn.config.peers.len().saturating_sub(1);
-                    conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
+                Action::SelectPrevConnection => {
+                    if !self.connections.is_empty() {
+                        self.selected_connection = self
+                            .selected_connection
+                            .checked_sub(1)
+                            .unwrap_or(self.connections.len() - 1);
+                        self.search_query.clear();
+                    }
                 }
-            }
-            Action::PrevRow => {
-                if let Some(conn) = self.active_connection_mut() {
-                    conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
+                Action::SelectConnection(i) => {
+                    if *i >= self.connections.len() {
+                        warn!(
+                            i,
+                            len = self.connections.len(),
+                            "SelectConnection index out of bounds; ignoring"
+                        );
+                    } else {
+                        self.selected_connection = *i;
+                        self.search_query.clear();
+                    }
                 }
+                _ => {}
             }
+        }
 
+        /// Handle daemon integration actions.
+        fn handle_daemon_action(&mut self, action: &Action) {
+            match action {
+                Action::UpdatePeers(statuses) => {
+                    self.daemon_connected = true;
+                    for s in statuses {
+                        if let Some(conn) = self
+                            .connections
+                            .iter_mut()
+                            .find(|c| c.name == s.connection_name)
+                        {
+                            let state = if s.connected {
+                                ConnectionState::Connected
+                            } else {
+                                ConnectionState::Disconnected
+                            };
+                            conn.status = Some(ConnectionStatus {
+                                state,
+                                backend: s.backend,
+                                stats: s.stats.clone(),
+                                endpoint: s.endpoint.clone(),
+                                interface: s.interface.clone(),
+                            });
+                        } else {
+                            warn!(connection_name = %s.connection_name, "UpdatePeers received status for unknown connection");
+                        }
+                    }
+                    // Clamp in case connections changed (defensive; static in Phase 2).
+                    self.selected_connection = self
+                        .selected_connection
+                        .min(self.connections.len().saturating_sub(1));
+                }
+                Action::DaemonConnectivityChanged(connected) => {
+                    self.daemon_connected = *connected;
+                }
+                Action::DaemonOk(msg) => {
+                    self.feedback = Some(Feedback::success(msg.clone()));
+                }
+                Action::DaemonError(msg) => {
+                    self.feedback = Some(Feedback::error(msg.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        /// Handle row navigation actions.
+        fn handle_navigation_action(&mut self, action: &Action) {
+            match action {
+                Action::NextRow => {
+                    if let Some(conn) = self.active_connection_mut() {
+                        let max = conn.config.peers.len().saturating_sub(1);
+                        conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
+                    }
+                }
+                Action::PrevRow => {
+                    if let Some(conn) = self.active_connection_mut() {
+                        conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        /// Dispatch an action to update the application state.
+        ///
+        /// This is the central hub for all state mutations. After dispatch
+        /// returns, the caller should forward the action to all components
+        /// via [`Component::update()`](crate::component::Component::update).
+        ///
+        /// `SelectConnection(i)` with an out-of-bounds index is silently
+        /// ignored and emits a `tracing::warn!` log entry; it does not panic.
+        pub fn dispatch(&mut self, action: &Action) {
+            self.handle_ui_action(action);
+            self.handle_connection_action(action);
+            self.handle_daemon_action(action);
+            self.handle_navigation_action(action);
             // Tick and peer commands are handled by components or the event loop.
-            Action::Tick
-            | Action::ConnectPeer(_)
-            | Action::DisconnectPeer(_)
-            | Action::CyclePeerBackend(_) => {}
         }
     }
 
