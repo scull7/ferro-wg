@@ -32,6 +32,13 @@ use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
 use event::{AppEvent, EventHandler};
 
+/// Minimum terminal height at which the connection bar is shown.
+///
+/// Layout rows: 3 (tab bar) + 1 (connection bar) + 1 (content) + 3 (status bar) = 8.
+/// Below this threshold the bar is suppressed so the content area never
+/// collapses to zero rows.
+const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 = 8;
+
 /// Messages sent from background daemon tasks to the event loop.
 enum DaemonMessage {
     /// Status poll returned peer statuses.
@@ -147,19 +154,21 @@ async fn event_loop(
 
         // Render.
         terminal.draw(|frame| {
-            let bar_height = u16::from(state.connections.len() > 1);
+            let show_bar = state.connections.len() > 1
+                && frame.area().height >= MIN_HEIGHT_FOR_CONNECTION_BAR;
+            let bar_height = u16::from(show_bar);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3),          // Tab bar
-                    Constraint::Length(bar_height), // Connection bar (0 for single connection)
+                    Constraint::Length(bar_height), // Connection bar (0 when hidden)
                     Constraint::Min(0),             // Main content
                     Constraint::Length(3),          // Status bar / search
                 ])
                 .split(frame.area());
 
             tab_bar.render(frame, chunks[0], false, &state);
-            if state.connections.len() > 1 {
+            if show_bar {
                 connection_bar.render(frame, chunks[1], false, &state);
             }
             components[state.active_tab.index()].render(frame, chunks[2], true, &state);
