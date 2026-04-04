@@ -234,7 +234,11 @@ mod tests {
     }
 
     fn render_overview(state: &AppState) -> String {
-        let backend = TestBackend::new(120, 20);
+        render_overview_sized(state, 120, 20)
+    }
+
+    fn render_overview_sized(state: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -359,5 +363,26 @@ mod tests {
         state.selected_connection = 2;
         comp.update(&Action::SelectConnection(2), &state);
         assert_eq!(comp.table_state.selected(), Some(2));
+    }
+
+    // ── Narrow-terminal edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn overview_narrow_terminal_no_panic() {
+        let state = three_connection_state();
+        render_overview_sized(&state, 10, 5);
+    }
+
+    #[test]
+    fn overview_minimal_terminal_no_panic() {
+        let state = three_connection_state();
+        render_overview_sized(&state, 1, 1);
+    }
+
+    #[test]
+    fn overview_zero_height_no_panic() {
+        // ratatui clamps to a minimum; must not panic.
+        let state = three_connection_state();
+        render_overview_sized(&state, 80, 0);
     }
 }

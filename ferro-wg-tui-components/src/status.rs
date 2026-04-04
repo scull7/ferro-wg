@@ -412,4 +412,25 @@ mod tests {
             "expected 'No connections configured' in: {content:?}"
         );
     }
+
+    // ── Narrow-terminal edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn status_narrow_terminal_no_panic() {
+        let state = test_state();
+        render_status(&state, 10, 5);
+    }
+
+    #[test]
+    fn status_minimal_terminal_no_panic() {
+        let state = test_state();
+        render_status(&state, 1, 1);
+    }
+
+    #[test]
+    fn status_zero_height_no_panic() {
+        // ratatui clamps to a minimum; must not panic.
+        let state = test_state();
+        render_status(&state, 80, 0);
+    }
 }
