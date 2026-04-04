@@ -50,6 +50,17 @@ impl LogsComponent {
         Style::default().fg(color)
     }
 
+    /// Split `after_timestamp` (the portion of a log line after `HH:MM:SS `) into
+    /// `(level, message)`, or return `None` if the level token is not a known tracing level.
+    fn extract_level_message(after_timestamp: &str) -> Option<(&str, &str)> {
+        let space_pos = after_timestamp.find(' ')?;
+        let level = &after_timestamp[..space_pos];
+        if !matches!(level, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR") {
+            return None;
+        }
+        Some((level, &after_timestamp[space_pos + 1..]))
+    }
+
     /// Parse a log line into styled spans for display.
     ///
     /// Expects lines in the format emitted by [`LogLayer`](ferro_wg_core::daemon::LogLayer):
@@ -64,36 +75,28 @@ impl LogsComponent {
     pub fn parse_log_line(line: &str, config: &LogDisplayConfig) -> Vec<Span<'static>> {
         let line = line.trim();
 
-        if let Some(timestamp) = Self::parse_timestamp(line) {
-            let after_timestamp = &line[9..];
-            if let Some(space_pos) = after_timestamp.find(' ') {
-                let level = &after_timestamp[0..space_pos];
-                if matches!(level, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR") {
-                    let message = after_timestamp[space_pos + 1..].to_owned();
-                    let level_owned = level.to_owned();
-                    let timestamp_owned = timestamp.to_owned();
+        let Some(timestamp) = Self::parse_timestamp(line) else {
+            return vec![Span::raw(line.to_owned())];
+        };
+        let Some((level, message)) = Self::extract_level_message(&line[9..]) else {
+            return vec![Span::raw(line.to_owned())];
+        };
 
-                    let mut spans: Vec<Span<'static>> = Vec::with_capacity(5);
-                    if config.show_timestamps {
-                        spans.push(Span::styled(
-                            format!("[{timestamp_owned}]"),
-                            Style::default().fg(Color::Cyan),
-                        ));
-                        spans.push(Span::raw(" "));
-                    }
-                    spans.push(Span::styled(
-                        format!("[{level_owned}]"),
-                        Self::level_style(level, config.color_badges),
-                    ));
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::raw(message));
-                    return spans;
-                }
-            }
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(5);
+        if config.show_timestamps {
+            spans.push(Span::styled(
+                format!("[{timestamp}]"),
+                Style::default().fg(Color::Cyan),
+            ));
+            spans.push(Span::raw(" "));
         }
-
-        // Fallback for legacy or malformed lines.
-        vec![Span::raw(line.to_owned())]
+        spans.push(Span::styled(
+            format!("[{level}]"),
+            Self::level_style(level, config.color_badges),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(message.to_owned()));
+        spans
     }
 
     /// Create a new logs component.
