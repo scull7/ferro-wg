@@ -11,6 +11,12 @@ use ferro_wg_tui_core::{
     Action, AppState, Component, ConnectionState, format_bytes, format_handshake_age,
 };
 
+// Status tab peer table column widths (percentages). Must sum to 100.
+const COL_PEER_W: u16 = 25; // "Peer"
+const COL_ENDPOINT_W: u16 = 30; // "Endpoint"
+const COL_ALLOWED_W: u16 = 30; // "Allowed IPs"
+const COL_KEEPALIVE_W: u16 = 15; // "Keepalive"
+
 /// Active tunnel overview.
 ///
 /// Displays a **connection-level** summary (state, backend, interface,
@@ -185,10 +191,10 @@ impl Component for StatusComponent {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(25),
-                Constraint::Percentage(30),
-                Constraint::Percentage(30),
-                Constraint::Percentage(15),
+                Constraint::Percentage(COL_PEER_W),
+                Constraint::Percentage(COL_ENDPOINT_W),
+                Constraint::Percentage(COL_ALLOWED_W),
+                Constraint::Percentage(COL_KEEPALIVE_W),
             ],
         )
         .header(header)
