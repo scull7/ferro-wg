@@ -574,10 +574,10 @@ fn spawn_log_stream(
                 Err(_) => {} // daemon not running yet
             }
             let _ = tx.send(DaemonMessage::LogStreamDisconnected);
-            // Exponential backoff with jitter (reset on successful connect).
-            // backoff starts at 500ms, doubles to max 30s.
-            // (impl details in code: use rand for jitter)
-            tokio::time::sleep(backoff_duration).await;
+            // Exponential backoff + jitter (reset backoff=500ms on success).
+            let backoff = /* current backoff var, double capped at 30s */;
+            let jitter = /* rand or (backoff / 2) */;
+            tokio::time::sleep(Duration::from_millis(backoff + jitter)).await;
         }
     });
 }
