@@ -20,16 +20,27 @@ Workflow requirements:
 - **MUST** write tests for all code written
 - **MUST** run all tests before handoff
 - **MUST** ensure code compiles without warnings
+- **MUST** run `cargo fmt --all` immediately before every `git commit` — never commit unformatted code
 - **SHOULD** keep commits < 250 lines; justify if exceeded
 - **SHOULD** keep PRs < 500 lines; justify if exceeded
 - **SHOULD** prefer flat code; refactor when nesting exceeds 3-4 levels
 
 ## Tooling Checklist (Before Committing)
 
-- [ ] `cargo fmt --all` — format first, then verify with `--check`
+**Format first — this is mandatory, not optional:**
+
+```
+cargo fmt --all
+```
+
+Then verify the full checklist:
+
+- [ ] `cargo fmt --all --check` — confirms no formatting drift
 - [ ] `cargo test --workspace --features boringtun,neptun,gotatun` — all tests pass
 - [ ] `cargo build --workspace` — no warnings
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings -D clippy::pedantic` — clean (matches CI exactly)
+  - `--all-targets` covers lib, bins, tests, benches, and examples — not just the default target
+  - `--all-features` enables every feature flag so no code path is skipped
 - [ ] All public items have doc comments
 - [ ] No commented-out code or debug statements
 - [ ] No hardcoded credentials
