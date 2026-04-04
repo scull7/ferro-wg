@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use tracing::warn;
@@ -89,6 +90,62 @@ fn parse_log_level(level: &str) -> Option<LogLevel> {
 /// query is equivalent to "no search active".
 fn line_matches_search(line: &str, query: &str) -> bool {
     query.is_empty() || line.to_ascii_lowercase().contains(query)
+}
+
+/// Split `text` into alternating un-highlighted / highlighted [`Span`]s.
+///
+/// `query` must be ASCII-lowercased by the caller; `text` is lowercased
+/// internally for matching so the returned spans preserve the original casing.
+/// Returns a single `base_style` span when `query` is empty.
+fn highlight_matches<'a>(
+    text: &'a str,
+    query: &str,
+    base_style: Style,
+    highlight_style: Style,
+) -> Vec<Span<'a>> {
+    if query.is_empty() {
+        return vec![Span::styled(text, base_style)];
+    }
+    let lower = text.to_ascii_lowercase();
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut cursor = 0_usize;
+    while let Some(pos) = lower[cursor..].find(query) {
+        let abs = cursor + pos;
+        if abs > cursor {
+            spans.push(Span::styled(&text[cursor..abs], base_style));
+        }
+        spans.push(Span::styled(&text[abs..abs + query.len()], highlight_style));
+        cursor = abs + query.len();
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(&text[cursor..], base_style));
+    }
+    spans
+}
+
+/// Replace the last span in `spans` with per-match highlighted sub-spans.
+///
+/// The last span is assumed to be the message body (a `Cow::Borrowed` slice
+/// from the original log line). All preceding spans (timestamp, level badge)
+/// are returned unchanged. When `query` is empty the input is returned as-is.
+fn apply_search_highlights<'a>(
+    mut spans: Vec<Span<'a>>,
+    query: &str,
+    highlight_style: Style,
+) -> Vec<Span<'a>> {
+    if query.is_empty() {
+        return spans;
+    }
+    let Some(last) = spans.pop() else {
+        return spans;
+    };
+    let base = last.style;
+    if let Cow::Borrowed(msg) = last.content {
+        spans.extend(highlight_matches(msg, query, base, highlight_style));
+    } else {
+        spans.push(last);
+    }
+    spans
 }
 
 /// Number of rows consumed by the panel block's top and bottom borders.
@@ -404,6 +461,10 @@ impl Component for LogsComponent {
         self.scroll_state.view_height = area.height.saturating_sub(BLOCK_BORDER_HEIGHT) as usize;
         let offset = self.display_offset(total_filtered);
 
+        let highlight_style = Style::default()
+            .bg(theme.warning)
+            .add_modifier(Modifier::BOLD);
+
         let lines: Vec<Line<'_>> = if filtered.is_empty() {
             vec![Line::from(Span::styled(
                 "(no log entries yet)",
@@ -417,12 +478,20 @@ impl Component for LogsComponent {
                 .map(|l| {
                     let spans = Self::parse_log_line(l, config, theme)
                         .unwrap_or_else(|_| vec![Span::raw(l.as_str())]);
-                    Line::from(spans)
+                    Line::from(apply_search_highlights(spans, &search, highlight_style))
                 })
                 .collect()
         };
 
-        let title = format!("Logs [{}]", self.min_level.title_label());
+        let title = if search.is_empty() {
+            format!("Logs [{}]", self.min_level.title_label())
+        } else {
+            format!(
+                "Logs [{}] [{} matches]",
+                self.min_level.title_label(),
+                total_filtered
+            )
+        };
         let paragraph = Paragraph::new(lines).block(theme.panel_block(&title));
         frame.render_widget(paragraph, area);
 
@@ -818,6 +887,60 @@ mod tests {
         let result = component.filtered_lines(&buf, "refused");
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("refused"));
+    }
+
+    // --- highlight_matches ---
+
+    #[test]
+    fn highlight_matches_empty_query_returns_single_base_span() {
+        let spans = highlight_matches("hello world", "", Style::default(), Style::default());
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hello world");
+    }
+
+    #[test]
+    fn highlight_matches_single_occurrence() {
+        let base = Style::default();
+        let hi = Style::default().bg(ratatui::style::Color::Yellow);
+        let spans = highlight_matches("connection refused", "refused", base, hi);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "connection ");
+        assert_eq!(spans[0].style, base);
+        assert_eq!(spans[1].content, "refused");
+        assert_eq!(spans[1].style, hi);
+    }
+
+    #[test]
+    fn highlight_matches_multiple_occurrences() {
+        let base = Style::default();
+        let hi = Style::default().bg(ratatui::style::Color::Yellow);
+        let spans = highlight_matches("err: no error found", "err", base, hi);
+        // "err" appears at pos 0 and inside "error" at pos 8..11
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content, "err");
+        assert_eq!(spans[1].content, ": no ");
+        assert_eq!(spans[2].content, "err");
+        assert_eq!(spans[3].content, "or found");
+    }
+
+    #[test]
+    fn highlight_matches_preserves_original_case() {
+        let base = Style::default();
+        let hi = Style::default().bg(ratatui::style::Color::Yellow);
+        // query is lowercase, text has mixed case; matched span preserves original
+        let spans = highlight_matches("Connection Lost", "connection", base, hi);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "Connection"); // original casing preserved
+        assert_eq!(spans[1].content, " Lost");
+    }
+
+    #[test]
+    fn highlight_matches_full_string_match() {
+        let base = Style::default();
+        let hi = Style::default().bg(ratatui::style::Color::Yellow);
+        let spans = highlight_matches("error", "error", base, hi);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style, hi);
     }
 
     // --- cycle_level ---
