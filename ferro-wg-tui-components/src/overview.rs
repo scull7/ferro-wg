@@ -115,8 +115,7 @@ impl Component for OverviewComponent {
                     Some(_) => ("○ Disconnected", Style::default().fg(theme.muted)),
                 };
 
-                let backend =
-                    status_opt.map_or_else(|| "—".to_owned(), |s| s.backend.to_string());
+                let backend = status_opt.map_or_else(|| "—".to_owned(), |s| s.backend.to_string());
 
                 let interface: &str = status_opt
                     .and_then(|s| s.interface.as_deref())

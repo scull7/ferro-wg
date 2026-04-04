@@ -239,7 +239,11 @@ impl AppState {
             Action::UpdatePeers(statuses) => {
                 self.daemon_connected = true;
                 for s in statuses {
-                    if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.connection_name) {
+                    if let Some(conn) = self
+                        .connections
+                        .iter_mut()
+                        .find(|c| c.name == s.connection_name)
+                    {
                         let state = if s.connected {
                             ConnectionState::Connected
                         } else {

@@ -139,7 +139,11 @@ impl Component for StatusComponent {
 
         // Split inner area: 2-line connection summary, then the peer table.
         let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
-        debug_assert_eq!(chunks.len(), 2, "Status inner layout must yield exactly 2 chunks");
+        debug_assert_eq!(
+            chunks.len(),
+            2,
+            "Status inner layout must yield exactly 2 chunks"
+        );
 
         // ── Connection-level summary ──────────────────────────────────────────
         let (is_connected, state_str, hs, rx, tx, backend_str, iface_str) =
@@ -163,7 +167,15 @@ impl Component for StatusComponent {
                     let tx = format_bytes(s.stats.tx_bytes);
                     let backend = s.backend.to_string();
                     let iface = s.interface.clone().unwrap_or_else(|| "—".to_owned());
-                    (connected, if connected { "connected" } else { "down" }, hs, rx, tx, backend, iface)
+                    (
+                        connected,
+                        if connected { "connected" } else { "down" },
+                        hs,
+                        rx,
+                        tx,
+                        backend,
+                        iface,
+                    )
                 },
             );
 
@@ -358,16 +370,28 @@ mod tests {
     fn status_renders_both_peer_names() {
         let state = test_state(); // peer-a and peer-b
         let content = render_status(&state, 120, 20);
-        assert!(content.contains("peer-a"), "expected 'peer-a' in: {content:?}");
-        assert!(content.contains("peer-b"), "expected 'peer-b' in: {content:?}");
+        assert!(
+            content.contains("peer-a"),
+            "expected 'peer-a' in: {content:?}"
+        );
+        assert!(
+            content.contains("peer-b"),
+            "expected 'peer-b' in: {content:?}"
+        );
     }
 
     #[test]
     fn status_renders_distinct_peer_endpoints() {
         let state = test_state();
         let content = render_status(&state, 120, 20);
-        assert!(content.contains("1.2.3.4"), "expected endpoint '1.2.3.4' in: {content:?}");
-        assert!(content.contains("5.6.7.8"), "expected endpoint '5.6.7.8' in: {content:?}");
+        assert!(
+            content.contains("1.2.3.4"),
+            "expected endpoint '1.2.3.4' in: {content:?}"
+        );
+        assert!(
+            content.contains("5.6.7.8"),
+            "expected endpoint '5.6.7.8' in: {content:?}"
+        );
     }
 
     #[test]
@@ -389,7 +413,10 @@ mod tests {
         // test_state has persistent_keepalive=25 for both peers
         let state = test_state();
         let content = render_status(&state, 120, 20);
-        assert!(content.contains("25s"), "expected '25s' keepalive in: {content:?}");
+        assert!(
+            content.contains("25s"),
+            "expected '25s' keepalive in: {content:?}"
+        );
     }
 
     #[test]
@@ -403,7 +430,10 @@ mod tests {
             persistent_keepalive: 0,
         }]));
         let content = render_status(&state, 120, 20);
-        assert!(content.contains("off"), "expected 'off' for zero keepalive in: {content:?}");
+        assert!(
+            content.contains("off"),
+            "expected 'off' for zero keepalive in: {content:?}"
+        );
     }
 
     #[test]
@@ -428,7 +458,10 @@ mod tests {
         // All connections have status: None — summary must read "down".
         let state = test_state();
         let content = render_status(&state, 120, 20);
-        assert!(content.contains("down"), "expected 'down' in summary: {content:?}");
+        assert!(
+            content.contains("down"),
+            "expected 'down' in summary: {content:?}"
+        );
     }
 
     #[test]

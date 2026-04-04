@@ -24,13 +24,13 @@ use ferro_wg_core::client;
 use ferro_wg_core::config::AppConfig;
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
+use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_WIDTH};
+use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
+use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, ConnectionBarComponent, LogsComponent, OverviewComponent,
     PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
 };
-use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_WIDTH};
-use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
-use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
 use event::{AppEvent, EventHandler};
@@ -236,28 +236,33 @@ async fn event_loop(
 ///
 /// Only active in debug builds (`debug_assert!`). Called once per frame
 /// immediately after the layout split so mismatches surface in testing.
-fn debug_assert_layout(chunks: &[ratatui::layout::Rect], area: ratatui::layout::Rect, show_bar: bool) {
-    debug_assert_eq!(chunks.len(), 4, "top-level layout must yield exactly 4 chunks");
+fn debug_assert_layout(
+    chunks: &[ratatui::layout::Rect],
+    area: ratatui::layout::Rect,
+    show_bar: bool,
+) {
+    debug_assert_eq!(
+        chunks.len(),
+        4,
+        "top-level layout must yield exactly 4 chunks"
+    );
     // Length constraints are satisfied in full when the terminal has
     // enough rows for the two fixed chrome bands.
     if area.height >= TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT {
         debug_assert_eq!(
-            chunks[0].height,
-            TAB_BAR_HEIGHT,
+            chunks[0].height, TAB_BAR_HEIGHT,
             "tab bar chunk height should be {TAB_BAR_HEIGHT}, got {}",
             chunks[0].height
         );
         debug_assert_eq!(
-            chunks[3].height,
-            STATUS_BAR_HEIGHT,
+            chunks[3].height, STATUS_BAR_HEIGHT,
             "status bar chunk height should be {STATUS_BAR_HEIGHT}, got {}",
             chunks[3].height
         );
     }
     if show_bar {
         debug_assert_eq!(
-            chunks[1].height,
-            CONNECTION_BAR_HEIGHT,
+            chunks[1].height, CONNECTION_BAR_HEIGHT,
             "connection bar chunk height should be {CONNECTION_BAR_HEIGHT}, got {}",
             chunks[1].height
         );
