@@ -106,18 +106,51 @@ pub config_path: PathBuf        // for import + daemon start
 pub pending_confirm: Option<ConfirmPending>
 ```
 
-### Confirmation overlay rendering
+### Confirmation dialog component
 
-When `pending_confirm.is_some()`, `render_ui` draws a centered floating box **after**
-all tab renders (so it sits on top). Use `ratatui::widgets::Clear` + `theme.overlay_block()`
-+ a `Paragraph` with the message and `[y] confirm  [n] cancel` prompt. Sized at 60 %
-width × 5 rows, offset-centered in the content area. No separate `Component` needed.
+Extract to a dedicated `ConfirmDialogComponent` in
+`ferro-wg-tui-components/src/confirm_dialog.rs` implementing the `Component` trait.
+This keeps rendering logic out of `render_ui` and maintains clean layering.
 
-### Key routing when confirmation is pending
+```rust
+pub struct ConfirmDialogComponent;
 
-In `handle_key_event`, check `state.pending_confirm.is_some()` **before** all other
-routing. Only `y` → `ConfirmYes` and `n`/`Esc` → `ConfirmNo` are accepted; all other
-keys are swallowed.
+impl Component for ConfirmDialogComponent {
+    fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
+        state.pending_confirm.as_ref()?;   // no-op when no dialog is pending
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::ConfirmYes),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::ConfirmNo),
+            _ => Some(Action::ConfirmNo),  // swallow all other keys
+        }
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
+        let Some(pending) = &state.pending_confirm else { return };
+        // Center a 60%-wide × 5-row box over the content area.
+        let overlay_area = centered_rect(60, 5, area);
+        frame.render_widget(ratatui::widgets::Clear, overlay_area);
+        let block = state.theme.overlay_block("Confirm");
+        let inner = block.inner(overlay_area);
+        frame.render_widget(block, overlay_area);
+        let text = format!("{}\n\n[y] confirm   [n] cancel", pending.message);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(text).centered(),
+            inner,
+        );
+    }
+
+    fn update(&mut self, _action: &Action, _state: &AppState) {}
+}
+```
+
+`centered_rect(pct_x, height, area)` is a private helper in `confirm_dialog.rs`
+(same pattern used in other ratatui projects — compute offsets from area width/height).
+
+**Wiring in `ComponentBundle`:** add `confirm_dialog: ConfirmDialogComponent` field.
+In `render_ui`, render it **last** (after tab content) using the full content `Rect`
+so it floats on top. In `handle_key_event`, check `pending_confirm.is_some()` first
+and route to `confirm_dialog.handle_key()` exclusively; swallow all other routing.
 
 ### Key routing for Import mode
 
@@ -180,14 +213,19 @@ Rendered as `[!]` in `theme.warning` color in:
 
 **Files:**
 - `ferro-wg/src/main.rs` — pass `config_path: PathBuf` to `ferro_wg_tui::run()`
-- `ferro-wg-tui/src/lib.rs` — update `run()` and `event_loop()` signatures; add confirm
-  key routing; render confirm overlay in `render_ui`
+- `ferro-wg-tui/src/lib.rs` — update `run()` and `event_loop()` signatures; add
+  `confirm_dialog` to `ComponentBundle`; route keys to it when `pending_confirm.is_some()`
+  before all other handlers; render it last in `render_ui`
 - `ferro-wg-tui-core/src/state.rs` — add `config_path`, `pending_confirm`,
   `ConfirmPending`; dispatch `RequestConfirm`, `ConfirmYes`, `ConfirmNo`
 - `ferro-wg-tui-core/src/action.rs` — add `ConfirmAction`, `RequestConfirm`,
   `ConfirmYes`, `ConfirmNo`
+- `ferro-wg-tui-components/src/confirm_dialog.rs` — new `ConfirmDialogComponent`
+  with `centered_rect` helper; export from `ferro-wg-tui-components/src/lib.rs`
 
-**Tests:** `AppState::dispatch` roundtrip: `RequestConfirm` → state has pending → `ConfirmYes` → pending cleared and inner action dispatched.
+**Tests:** `AppState::dispatch` roundtrip: `RequestConfirm` → state has pending →
+`ConfirmYes` → pending cleared and inner action dispatched; `ConfirmDialogComponent`
+returns `None` from `handle_key` when `pending_confirm` is `None`.
 
 ---
 
@@ -283,3 +321,4 @@ ferro-wg tui
 | `ferro-wg-tui-components/src/status.rs` | 5 |
 | `ferro-wg-tui-components/src/status_bar.rs` | 2, 3, 4, 5 |
 | `ferro-wg-tui-components/src/connection_bar.rs` | 5 |
+| `ferro-wg-tui-components/src/confirm_dialog.rs` | 1 (new) |
