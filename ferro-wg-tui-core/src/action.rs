@@ -17,6 +17,8 @@ pub enum ConfirmAction {
     DisconnectAll,
     /// Stop the daemon process.
     StopDaemon,
+    /// Delete the peer at this index from the draft.
+    DeletePeer(usize),
 }
 
 /// An action that can be dispatched through the TUI state machine.
@@ -148,4 +150,60 @@ pub enum Action {
     ConfirmYes,
     /// User cancelled the pending action.
     ConfirmNo,
+
+    // -- Config editing --
+    /// Enter edit mode for the focused field in the Config tab.
+    /// Copies the current field value into `AppState::config_edit.edit_buffer`.
+    EnterConfigEdit,
+
+    /// Forward a key event to the active edit buffer.
+    /// `AppState::dispatch` unpacks char/backspace; `Enter` → `CommitConfigEdit`;
+    /// `Esc` → `CancelConfigEdit`.
+    ConfigEditKey(KeyEvent),
+
+    /// Commit the current buffer to the draft, run the field validator, and
+    /// return to focused-but-not-editing state. Blocked if `field_error` is Some.
+    CommitConfigEdit,
+
+    /// Discard the current buffer and return to focused-but-not-editing state.
+    CancelConfigEdit,
+
+    /// Move field focus down within the current section (wraps).
+    ConfigFocusNext,
+
+    /// Move field focus up within the current section (wraps).
+    ConfigFocusPrev,
+
+    /// Move section focus to the Interface block.
+    ConfigFocusInterface,
+
+    /// Move section focus to peer at the given index.
+    ConfigFocusPeer(usize),
+
+    /// Append a new blank peer to the draft and enter EditField on its PublicKey.
+    AddConfigPeer,
+
+    /// Remove the peer at the given index from the draft (after confirmation).
+    DeleteConfigPeer(usize),
+
+    /// Request the diff preview: serialise the draft to TOML, diff against the
+    /// original, and store the result in `AppState::config_diff_pending`.
+    /// Blocked if any field has a pending `field_error` or `WgConfig::validate` fails.
+    PreviewConfig,
+
+    /// Scroll the diff preview overlay down by one line.
+    ConfigDiffScrollDown,
+
+    /// Scroll the diff preview overlay up by one line.
+    ConfigDiffScrollUp,
+
+    /// Save the pending draft to disk (backup first), then reload config state.
+    /// Sent from within the diff preview; clears `config_diff_pending` on success.
+    SaveConfig {
+        /// When `true`, reconnect affected tunnels after saving.
+        reconnect: bool,
+    },
+
+    /// Discard all pending edits and clear `AppState::config_edit`.
+    DiscardConfigEdits,
 }

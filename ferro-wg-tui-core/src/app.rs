@@ -78,6 +78,8 @@ pub enum InputMode {
     Import(String),
     /// Typing an export file path. Inner `String` is the current buffer.
     Export(String),
+    /// Editing a single config field. Buffer lives in `AppState::config_edit`.
+    EditField,
 }
 
 #[cfg(test)]

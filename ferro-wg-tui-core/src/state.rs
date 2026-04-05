@@ -9,9 +9,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ferro_wg_core::config::{AppConfig, LogDisplayConfig, WgConfig};
+use ferro_wg_core::config::{AppConfig, LogDisplayConfig, PeerConfig, WgConfig};
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{BenchmarkProgress, LogEntry};
+use ferro_wg_core::key::PublicKey;
 use ferro_wg_core::stats::TunnelStats;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -21,8 +22,11 @@ use crossterm::event::KeyCode;
 use crate::action::{Action, ConfirmAction};
 use crate::app::{InputMode, Tab};
 use crate::benchmark::{
-    BENCHMARK_HISTORY_CAP, BENCHMARK_PROGRESS_HISTORY_CAP, BenchmarkResultMap, BenchmarkRun,
-    cap_history,
+    cap_history, BenchmarkResultMap, BenchmarkRun, BENCHMARK_HISTORY_CAP,
+    BENCHMARK_PROGRESS_HISTORY_CAP,
+};
+use crate::config_edit::{
+    fields_for_section, ConfigDiffPending, ConfigEditState, ConfigSection, DiffLine,
 };
 use crate::theme::Theme;
 
@@ -236,6 +240,15 @@ pub struct AppState {
     pub benchmark_progress_history: VecDeque<BenchmarkProgress>,
     /// Which view mode is active on the Compare tab.
     pub compare_view: CompareView,
+    /// Pending config edit session, `Some` while the Config tab is in edit mode.
+    ///
+    /// Cleared on `DiscardConfigEdits`, `SaveConfig`, or `ConfirmNo` after
+    /// a `DeletePeer` dialog.
+    pub config_edit: Option<ConfigEditState>,
+    /// Pending diff preview, `Some` when the diff overlay is shown.
+    ///
+    /// Cleared on `SaveConfig` (success or error) or `Esc` in the overlay.
+    pub config_diff_pending: Option<ConfigDiffPending>,
 }
 
 impl AppState {
@@ -276,6 +289,8 @@ impl AppState {
             benchmark_running: false,
             benchmark_progress_history: VecDeque::new(),
             compare_view: CompareView::default(),
+            config_edit: None,
+            config_diff_pending: None,
         }
     }
 
@@ -317,9 +332,36 @@ impl AppState {
     pub fn dispatch(&mut self, action: &Action) {
         match action {
             Action::Quit => self.running = false,
-            Action::NextTab => self.active_tab = self.active_tab.next(),
-            Action::PrevTab => self.active_tab = self.active_tab.prev(),
-            Action::SelectTab(tab) => self.active_tab = *tab,
+            Action::NextTab => {
+                if self.input_mode == InputMode::EditField {
+                    if let Some(edit) = self.config_edit.as_mut() {
+                        edit.edit_buffer = None;
+                        edit.field_error = None;
+                    }
+                    self.input_mode = InputMode::Normal;
+                }
+                self.active_tab = self.active_tab.next();
+            }
+            Action::PrevTab => {
+                if self.input_mode == InputMode::EditField {
+                    if let Some(edit) = self.config_edit.as_mut() {
+                        edit.edit_buffer = None;
+                        edit.field_error = None;
+                    }
+                    self.input_mode = InputMode::Normal;
+                }
+                self.active_tab = self.active_tab.prev();
+            }
+            Action::SelectTab(tab) => {
+                if self.input_mode == InputMode::EditField {
+                    if let Some(edit) = self.config_edit.as_mut() {
+                        edit.edit_buffer = None;
+                        edit.field_error = None;
+                    }
+                    self.input_mode = InputMode::Normal;
+                }
+                self.active_tab = *tab;
+            }
             Action::EnterSearch => {
                 self.input_mode = InputMode::Search;
                 self.search_query.clear();
@@ -448,8 +490,134 @@ impl AppState {
                     action: action.clone(),
                 });
             }
-            Action::ConfirmYes | Action::ConfirmNo => {
+            Action::ConfirmYes => {
+                if let Some(pending) = self.pending_confirm.take() {
+                    if let ConfirmAction::DeletePeer(i) = pending.action {
+                        self.dispatch(&Action::DeleteConfigPeer(i));
+                    }
+                }
+            }
+            Action::ConfirmNo => {
                 self.pending_confirm = None;
+            }
+
+            // -- Config editing --
+            Action::ConfigEditKey(key) => {
+                if let Some(edit) = self.config_edit.as_mut() {
+                    if let Some(ref mut buf) = edit.edit_buffer {
+                        match key.code {
+                            KeyCode::Char(c) => buf.push(c),
+                            KeyCode::Backspace => {
+                                buf.pop();
+                            }
+                            KeyCode::Enter => {
+                                // Commit
+                                let _ = edit.edit_buffer.take();
+                                edit.field_error = None;
+                                self.input_mode = InputMode::Normal;
+                            }
+                            KeyCode::Esc => {
+                                // Cancel
+                                edit.edit_buffer = None;
+                                edit.field_error = None;
+                                self.input_mode = InputMode::Normal;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            Action::ConfigFocusNext => {
+                if let Some(edit) = self.config_edit.as_mut() {
+                    let fields = fields_for_section(edit.focused_section, false); // Assume not new peer
+                    edit.focused_field_idx = (edit.focused_field_idx + 1) % fields.len();
+                }
+            }
+            Action::ConfigFocusPrev => {
+                if let Some(edit) = self.config_edit.as_mut() {
+                    let fields = fields_for_section(edit.focused_section, false);
+                    edit.focused_field_idx = edit.focused_field_idx.saturating_sub(1);
+                }
+            }
+            Action::ConfigFocusInterface => {
+                if let Some(edit) = self.config_edit.as_mut() {
+                    edit.focused_section = ConfigSection::Interface;
+                    edit.focused_field_idx = 0;
+                }
+            }
+            Action::ConfigFocusPeer(i) => {
+                if let Some(edit) = self.config_edit.as_mut() {
+                    edit.focused_section = ConfigSection::Peer(*i);
+                    edit.focused_field_idx = 0;
+                }
+            }
+            Action::AddConfigPeer => {
+                if let Some(edit) = self.config_edit.as_mut() {
+                    let dummy_key =
+                        PublicKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                            .unwrap();
+                    let new_peer = PeerConfig {
+                        name: "".to_string(),
+                        public_key: dummy_key,
+                        endpoint: None,
+                        allowed_ips: vec![],
+                        persistent_keepalive: 0,
+                        preshared_key: None,
+                    };
+                    edit.draft.peers.push(new_peer);
+                    let idx = edit.draft.peers.len() - 1;
+                    edit.focused_section = ConfigSection::Peer(idx);
+                    edit.focused_field_idx = 0;
+                    self.input_mode = InputMode::EditField;
+                }
+            }
+            Action::DeleteConfigPeer(i) => {
+                if let Some(edit) = self.config_edit.as_mut() {
+                    if *i < edit.draft.peers.len() {
+                        edit.draft.peers.remove(*i);
+                        // Clamp focus
+                        if edit.draft.peers.is_empty() {
+                            edit.focused_field_idx = 0;
+                        } else {
+                            edit.focused_field_idx =
+                                edit.focused_field_idx.min(edit.draft.peers.len() - 1);
+                        }
+                    }
+                }
+            }
+            Action::PreviewConfig => {
+                if let Some(edit) = self.config_edit.as_ref() {
+                    if edit.field_error.is_none() {
+                        // Mock diff for now
+                        let diff_lines = vec![DiffLine::Context("mock".to_string())];
+                        self.config_diff_pending = Some(ConfigDiffPending {
+                            connection_name: edit.connection_name.clone(),
+                            draft: edit.draft.clone(),
+                            diff_lines,
+                            scroll_offset: 0,
+                        });
+                    }
+                }
+            }
+            Action::ConfigDiffScrollDown => {
+                if let Some(pending) = self.config_diff_pending.as_mut() {
+                    pending.scroll_offset = pending.scroll_offset.saturating_add(1);
+                }
+            }
+            Action::ConfigDiffScrollUp => {
+                if let Some(pending) = self.config_diff_pending.as_mut() {
+                    pending.scroll_offset = pending.scroll_offset.saturating_sub(1);
+                }
+            }
+            Action::SaveConfig { .. } => {
+                self.config_edit = None;
+                self.config_diff_pending = None;
+            }
+            Action::DiscardConfigEdits => {
+                self.config_edit = None;
+                self.config_diff_pending = None;
+                self.input_mode = InputMode::Normal;
             }
             // These are handled by the event loop (maybe_spawn_command) or
             // components. They carry no state-machine side-effects here.
@@ -462,6 +630,7 @@ impl AppState {
             | Action::StartDaemon
             | Action::StopDaemon
             | Action::SwitchBenchmarkBackend(_) => {}
+            _ => {}
         }
     }
 
@@ -1276,7 +1445,7 @@ mod tests {
     fn reload_from_config_clamps_selection() {
         let mut state = two_connection_state();
         state.selected_connection = 1; // points at second connection
-        // Reload with only one connection — selection must clamp to 0.
+                                       // Reload with only one connection — selection must clamp to 0.
         let new_config = make_app_config(&[("only", vec![])]);
         state.reload_from_config(new_config);
         assert_eq!(state.selected_connection, 0);

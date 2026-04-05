@@ -1,11 +1,11 @@
 //! Status bar: bottom-of-screen help text or search input.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 use ferro_wg_tui_core::state::CompareView;
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
@@ -59,7 +59,7 @@ impl Component for StatusBarComponent {
                 KeyCode::Enter => Some(Action::SubmitExport),
                 _ => Some(Action::ExportKey(key)),
             },
-            InputMode::Normal => None,
+            InputMode::Normal | InputMode::EditField => None,
         }
     }
 
@@ -100,7 +100,7 @@ impl Component for StatusBarComponent {
                     Span::raw(buf.clone()),
                     Span::styled("_", Style::default().fg(theme.muted)),
                 ]),
-                InputMode::Normal => {
+                InputMode::Normal | InputMode::EditField => {
                     let hotkey = theme.hotkey_style();
                     let daemon_dot = daemon_indicator(state, theme);
                     let mut spans = vec![

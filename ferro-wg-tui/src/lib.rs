@@ -522,6 +522,7 @@ fn confirmed_action(action: &ConfirmAction) -> Action {
     match action {
         ConfirmAction::DisconnectAll => Action::DisconnectAll,
         ConfirmAction::StopDaemon => Action::StopDaemon,
+        ConfirmAction::DeletePeer(i) => Action::DeleteConfigPeer(*i),
     }
 }
 
