@@ -33,8 +33,14 @@
       {
         "id": "commit3",
         "title": "Background benchmark task",
-        "status": "pending",
-        "features": []
+        "status": "completed",
+        "features": [
+          "background_benchmark_task",
+          "streaming_progress_updates",
+          "benchmark_complete_handling",
+          "switch_backend_task",
+          "tui_error_handling"
+        ]
       },
       {
         "id": "commit4",
