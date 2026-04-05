@@ -235,7 +235,25 @@
           "tab_click_tests",
           "guard_tests"
         ]
+      },
+      {
+        "id": "commit5",
+        "title": "Responsive layout (80×24 minimum)",
+        "status": "completed",
+        "features": [
+          "min_terminal_constants",
+          "render_too_small",
+          "size_guard_render_ui",
+          "early_return_guards",
+          "constraint_min_zero",
+          "compute_layout_tests",
+          "render_ui_tests",
+          "component_render_tests",
+          "panic_free_80x24"
+        ]
       }
+    ]
+  }
     ]
   }
 }

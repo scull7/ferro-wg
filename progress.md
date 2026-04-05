@@ -37,7 +37,7 @@
 - All tests pass, clippy clean, no warnings
 
 ### Commit 4: Mouse support (COMPLETED)
-- Added AppEvent::Mouse(crossterm::event::MouseEvent) in ferro-wg-tui/src/event.rs
+- Added AppEvent::Mouse(crosstrom::event::MouseEvent) in ferro-wg-tui/src/event.rs
 - Forwarded Event::Mouse in event-loop maybe_event arm
 - Enabled EnableMouseCapture after EnterAlternateScreen, DisableMouseCapture on cleanup
 - Added resolve_mouse_action fn in ferro-wg-tui-core/src/ux.rs: ScrollDown/Up -> NextRow/PrevRow, left-click tab bar -> SelectTab via tab_hit_test
@@ -48,9 +48,28 @@
 - Comprehensive tests for mouse actions, tab hit tests, guards
 - All tests pass, clippy clean, no warnings
 
-## Pending Phases
+### Commit 5: Responsive layout (80×24 minimum) (COMPLETED)
+- Added MIN_TERMINAL_WIDTH: u16 = 80 and MIN_TERMINAL_HEIGHT: u16 = 24 constants
+- Added render_too_small fn: centered 'Terminal too small (min 80×24)' with theme.error
+- Added size guard at top of render_ui: if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT, render_too_small and return
+- Added early return guards in all tab components render: if area.height == 0 || area.width < 20, return
+- Verified StatusComponent Layout::split uses Constraint::Min(0) for peer table collapse
+- Comprehensive insta snapshot tests for all components at 80x24 and 120x40, render_ui at minimum sizes
+- compute_layout unit tests for 80x24 layout validation
+- All tests pass, clippy clean, no warnings
 
-### Commit 5: Responsive layout (80×24 minimum)
+## Verification Status
+- Tooling checks: PASSED (fmt, test, clippy, build)
+- Adversary reviews: PASSED (reviewer, tester, architect)
+
+## Phase 7 Complete
+Phase 7 UX Polish is fully verified and committed. Summary of all fixes and additions:
+
+- Catppuccin Mocha/Latte themes fully applied with RGB values, 'T' toggle keybinding
+- Toast queue replaces single-slot feedback, up to 5 visible toasts expiring after 3s
+- Help overlay on '?', full keybindings in two-column table, modal with Clear background
+- Mouse support: tab clicks navigate, scroll wheel moves rows, with modal guards
+- Responsive layout enforces 80×24 minimum, graceful degradation with too-small message
 
 ## Verification Status
 - Tooling checks: PASSED (fmt, test, clippy, build)
