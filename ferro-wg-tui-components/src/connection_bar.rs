@@ -257,8 +257,11 @@ impl Component for ConnectionBarComponent {
         {
             let (indicator, ind_style): (&'static str, Style) = match &conn.status {
                 None => ("?", Style::default().fg(theme.muted)),
-                Some(s) if s.state == ConnectionState::Connected => {
+                Some(s) if s.state == ConnectionState::Connected && s.health_warning.is_none() => {
                     ("●", Style::default().fg(theme.success))
+                }
+                Some(s) if s.state == ConnectionState::Connected => {
+                    ("!", Style::default().fg(theme.warning))
                 }
                 Some(_) => ("○", Style::default().fg(theme.muted)),
             };
@@ -555,6 +558,7 @@ mod tests {
             stats: TunnelStats::default(),
             endpoint: None,
             interface: None,
+            health_warning: None,
         });
         let content = render_bar(&state, 120);
         assert!(
@@ -572,11 +576,34 @@ mod tests {
             stats: TunnelStats::default(),
             endpoint: None,
             interface: None,
+            health_warning: None,
         });
         let content = render_bar(&state, 120);
         assert!(
             content.contains('○'),
             "expected '○' indicator in: {content:?}"
+        );
+    }
+
+    #[test]
+    fn connection_bar_health_warning_shows_exclamation_indicator() {
+        let mut state = three_connection_state();
+        state.connections[0].status = Some(ConnectionStatus {
+            state: ConnectionState::Connected,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats::default(),
+            endpoint: None,
+            interface: None,
+            health_warning: Some("stale handshake".into()),
+        });
+        let content = render_bar(&state, 120);
+        assert!(
+            content.contains('!'),
+            "expected '!' health indicator in: {content:?}"
+        );
+        assert!(
+            !content.contains('●'),
+            "expected no '●' for unhealthy connection in: {content:?}"
         );
     }
 

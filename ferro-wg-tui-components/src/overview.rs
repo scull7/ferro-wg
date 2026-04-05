@@ -120,8 +120,13 @@ impl Component for OverviewComponent {
 
                 let (status_str, status_style): (&'static str, Style) = match status_opt {
                     None => ("—", Style::default().fg(theme.muted)),
-                    Some(s) if s.state == ConnectionState::Connected => {
+                    Some(s)
+                        if s.state == ConnectionState::Connected && s.health_warning.is_none() =>
+                    {
                         ("● Connected", Style::default().fg(theme.success))
+                    }
+                    Some(s) if s.state == ConnectionState::Connected => {
+                        ("● Connected [!]", Style::default().fg(theme.warning))
                     }
                     Some(_) => ("○ Disconnected", Style::default().fg(theme.muted)),
                 };
@@ -243,6 +248,7 @@ mod tests {
             stats: TunnelStats::default(),
             endpoint: Some("1.2.3.4:51820".into()),
             interface: Some("utun4".into()),
+            health_warning: None,
         }
     }
 
@@ -336,6 +342,7 @@ mod tests {
             stats: TunnelStats::default(),
             endpoint: None,
             interface: None,
+            health_warning: None,
         });
         let content = render_overview(&state);
         assert!(
@@ -470,6 +477,37 @@ mod tests {
         });
         state.selected_connection = 99;
         render_overview(&state); // must not panic
+    }
+
+    // ── Commit 5: health indicators ──────────────────────────────────────────
+
+    #[test]
+    fn overview_health_warning_shows_exclamation() {
+        let mut state = three_connection_state();
+        state.connections[0].status = Some(ConnectionStatus {
+            state: ConnectionState::Connected,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats::default(),
+            endpoint: None,
+            interface: None,
+            health_warning: Some("stale handshake".into()),
+        });
+        let content = render_overview(&state);
+        assert!(
+            content.contains("[!]"),
+            "expected '[!]' health indicator in: {content:?}"
+        );
+    }
+
+    #[test]
+    fn overview_healthy_connected_shows_no_exclamation() {
+        let mut state = three_connection_state();
+        state.connections[0].status = Some(connected_status()); // health_warning: None
+        let content = render_overview(&state);
+        assert!(
+            !content.contains("[!]"),
+            "expected no '[!]' for healthy connection in: {content:?}"
+        );
     }
 
     // ── Commit 2: bulk connection keybindings ─────────────────────────────────

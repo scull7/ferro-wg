@@ -38,6 +38,13 @@ pub enum ConnectionState {
     Disconnected,
 }
 
+/// Stale-handshake threshold: a connected tunnel whose last successful
+/// handshake is older than this is considered unhealthy.
+const STALE_HANDSHAKE: Duration = Duration::from_secs(180);
+
+/// Packet-loss threshold above which a connected tunnel is considered unhealthy.
+const HIGH_PACKET_LOSS: f32 = 0.1;
+
 /// Live status for one connection, sourced from a `PeerStatus` daemon response.
 #[derive(Debug, Clone)]
 pub struct ConnectionStatus {
@@ -51,6 +58,38 @@ pub struct ConnectionStatus {
     pub endpoint: Option<String>,
     /// The local TUN interface name (e.g. `utun4`).
     pub interface: Option<String>,
+    /// Short human-readable health warning, `None` when the tunnel is healthy.
+    ///
+    /// Only set for [`ConnectionState::Connected`] tunnels; always `None`
+    /// when the tunnel is down.
+    pub health_warning: Option<String>,
+}
+
+/// Derive a health warning from tunnel statistics for a **connected** tunnel.
+///
+/// Returns `None` when the tunnel appears healthy. Stale handshake takes
+/// priority over high packet loss when both conditions are present.
+///
+/// # Arguments
+///
+/// * `stats` — statistics snapshot for the active tunnel.
+#[must_use]
+pub fn compute_health_warning(stats: &TunnelStats) -> Option<String> {
+    // Stale handshake: reported age exceeds the threshold.
+    if stats
+        .last_handshake
+        .is_some_and(|age| age > STALE_HANDSHAKE)
+    {
+        return Some("stale handshake".to_owned());
+    }
+    // High packet loss.
+    if stats.packet_loss > HIGH_PACKET_LOSS {
+        return Some(format!(
+            "high packet loss ({:.0}%)",
+            stats.packet_loss * 100.0
+        ));
+    }
+    None
 }
 
 /// Static config and live status for one named connection.
@@ -346,12 +385,18 @@ impl AppState {
                 } else {
                     ConnectionState::Disconnected
                 };
+                let health_warning = if s.connected {
+                    compute_health_warning(&s.stats)
+                } else {
+                    None
+                };
                 conn.status = Some(ConnectionStatus {
                     state,
                     backend: s.backend,
                     stats: s.stats.clone(),
                     endpoint: s.endpoint.clone(),
                     interface: s.interface.clone(),
+                    health_warning,
                 });
             } else {
                 warn!(name = %s.name, "UpdatePeers received status for unknown connection");
@@ -870,6 +915,112 @@ mod tests {
         assert_eq!(buf.len(), 1000);
         assert_eq!(buf.back().unwrap().message, "overflow");
         assert_eq!(buf.front().unwrap().message, "line1");
+    }
+
+    // ── Health indicator tests ────────────────────────────────────────────────
+
+    #[test]
+    fn compute_health_warning_healthy_tunnel() {
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(30)),
+            packet_loss: 0.0,
+            ..TunnelStats::default()
+        };
+        assert!(compute_health_warning(&stats).is_none());
+    }
+
+    #[test]
+    fn compute_health_warning_stale_handshake() {
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(200)),
+            packet_loss: 0.0,
+            ..TunnelStats::default()
+        };
+        let warning = compute_health_warning(&stats);
+        assert!(warning.is_some());
+        assert_eq!(warning.unwrap(), "stale handshake");
+    }
+
+    #[test]
+    fn compute_health_warning_high_packet_loss() {
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(30)),
+            packet_loss: 0.5,
+            ..TunnelStats::default()
+        };
+        let warning = compute_health_warning(&stats);
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("packet loss"));
+    }
+
+    #[test]
+    fn compute_health_warning_stale_takes_priority_over_packet_loss() {
+        // Both conditions; stale handshake must win.
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(300)),
+            packet_loss: 0.9,
+            ..TunnelStats::default()
+        };
+        let warning = compute_health_warning(&stats).unwrap();
+        assert_eq!(warning, "stale handshake");
+    }
+
+    #[test]
+    fn compute_health_warning_no_handshake_yet() {
+        // No handshake recorded → cannot be stale.
+        let stats = TunnelStats {
+            last_handshake: None,
+            packet_loss: 0.0,
+            ..TunnelStats::default()
+        };
+        assert!(compute_health_warning(&stats).is_none());
+    }
+
+    #[test]
+    fn update_peers_sets_health_warning_for_stale_connected_peer() {
+        let mut state = two_connection_state();
+        let mut statuses = vec![PeerStatus {
+            name: "mia".into(),
+            connected: true,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats {
+                last_handshake: Some(Duration::from_secs(300)), // stale
+                packet_loss: 0.0,
+                ..TunnelStats::default()
+            },
+            endpoint: None,
+            interface: None,
+        }];
+        state.dispatch(&Action::UpdatePeers(statuses.clone()));
+        let conn = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        let warning = conn.status.as_ref().unwrap().health_warning.as_deref();
+        assert_eq!(warning, Some("stale handshake"));
+
+        // A healthy reconnect must clear the warning.
+        statuses[0].stats.last_handshake = Some(Duration::from_secs(10));
+        state.dispatch(&Action::UpdatePeers(statuses));
+        let conn = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        assert!(conn.status.as_ref().unwrap().health_warning.is_none());
+    }
+
+    #[test]
+    fn update_peers_no_health_warning_when_disconnected() {
+        let mut state = two_connection_state();
+        // Even with stale stats, a disconnected peer must have no warning.
+        state.dispatch(&Action::UpdatePeers(vec![PeerStatus {
+            name: "mia".into(),
+            connected: false,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats {
+                last_handshake: Some(Duration::from_secs(9999)),
+                packet_loss: 1.0,
+                ..TunnelStats::default()
+            },
+            endpoint: None,
+            interface: None,
+        }]));
+        let conn = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        assert!(conn.status.as_ref().unwrap().health_warning.is_none());
     }
 
     // ── Confirmation dialog tests ─────────────────────────────────────────────
