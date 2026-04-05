@@ -7,6 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use ferro_wg_tui_core::state::CompareView;
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
 
 /// Number of rows this component occupies in the layout.
@@ -133,6 +134,26 @@ impl Component for StatusBarComponent {
                             Span::styled("b", hotkey),
                             Span::raw(" backend  "),
                         ]),
+                        Tab::Compare => match state.compare_view {
+                            CompareView::Live => spans.extend([
+                                Span::styled("b", hotkey),
+                                Span::raw(" benchmark  "),
+                                Span::styled("Enter", hotkey),
+                                Span::raw(" run selected  "),
+                                Span::styled("w", hotkey),
+                                Span::raw(" use backend  "),
+                                Span::styled("h", hotkey),
+                                Span::raw(" history  "),
+                                Span::styled("e", hotkey),
+                                Span::raw(" export  "),
+                            ]),
+                            CompareView::Historical => spans.extend([
+                                Span::styled("h", hotkey),
+                                Span::raw(" live view  "),
+                                Span::styled("e", hotkey),
+                                Span::raw(" export  "),
+                            ]),
+                        },
                         _ => {}
                     }
                     spans.extend([Span::styled("j/k", hotkey), Span::raw(" nav")]);

@@ -19,8 +19,16 @@
       {
         "id": "commit2",
         "title": "CompareComponent live benchmark UI",
-        "status": "pending",
-        "features": []
+        "status": "completed",
+        "features": [
+          "compare_live_ui",
+          "benchmark_table_populated",
+          "throughput_barchart",
+          "latency_sparkline",
+          "progress_gauge",
+          "historical_list_view",
+          "compare_key_bindings"
+        ]
       },
       {
         "id": "commit3",

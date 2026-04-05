@@ -3,6 +3,7 @@
 ## Completed Phases
 
 ### Commit 1: IPC extension + benchmark types (COMPLETED)
+### Commit 2: CompareComponent live benchmark UI (COMPLETED)
 - Added `p50_latency`, `p95_latency`, `p99_latency` to `BenchmarkResult` in `ferro-wg-core/src/stats.rs`
 - Added `BenchmarkProgress` struct in `ferro-wg-core/src/ipc.rs`
 - Added `DaemonCommand::Benchmark` and `DaemonResponse::BenchmarkProgress/BenchmarkResult` in IPC
