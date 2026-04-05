@@ -90,8 +90,7 @@ StopDaemon
 
 // wg-quick import
 EnterImport
-ImportInput(char)
-ImportBackspace
+ImportKey(KeyEvent)   // replaces ImportInput(char) + ImportBackspace; state.rs unpacks
 SubmitImport
 ExitImport
 
@@ -155,8 +154,24 @@ and route to `confirm_dialog.handle_key()` exclusively; swallow all other routin
 ### Key routing for Import mode
 
 In `handle_key_event`, check `InputMode::Import(_)` (similar to existing `Search`
-branch). Route printable chars → `ImportInput`, `Backspace` → `ImportBackspace`,
-`Enter` → `SubmitImport`, `Esc` → `ExitImport`.
+branch). Route `Enter` → `SubmitImport`, `Esc` → `ExitImport`, all other keys →
+`ImportKey(key_event)`. `AppState::dispatch` unpacks `ImportKey` internally:
+
+```rust
+Action::ImportKey(key) => {
+    if let InputMode::Import(ref mut buf) = self.input_mode {
+        match key.code {
+            KeyCode::Char(c) => buf.push(c),
+            KeyCode::Backspace => { buf.pop(); }
+            _ => {}
+        }
+    }
+}
+```
+
+This collapses two Action variants (`ImportInput` + `ImportBackspace`) into one
+(`ImportKey`), keeping the enum lean while placing the char-handling logic where it
+belongs — in `dispatch`, not in the event router.
 
 ### After import submit
 
@@ -259,14 +274,16 @@ returns `None` from `handle_key` when `pending_confirm` is `None`.
 
 **Files:**
 - `ferro-wg-tui-core/src/app.rs` — add `InputMode::Import(String)`
-- `ferro-wg-tui-core/src/action.rs` — add `EnterImport`, `ImportInput(char)`,
-  `ImportBackspace`, `SubmitImport`, `ExitImport`, `ReloadConfig(AppConfig)`
+- `ferro-wg-tui-core/src/action.rs` — add `EnterImport`, `ImportKey(KeyEvent)`,
+  `SubmitImport`, `ExitImport`, `ReloadConfig(AppConfig)`
 - `ferro-wg-tui-core/src/state.rs` — dispatch import mode actions; dispatch `ReloadConfig` (rebuild `connections`)
 - `ferro-wg-tui/src/lib.rs` — import mode key routing; spawn import background task; `DaemonMessage::ReloadConfig` variant
 - `ferro-wg-tui-components/src/status_bar.rs` — render `Import path: <buf>█` in Import mode; `i import` hint in Normal mode
 - Global key `i` → `EnterImport` (added to `handle_global_key` when not in Search/Import/confirm mode)
 
-**Tests:** `EnterImport` sets mode; `ImportInput` accumulates buffer; `SubmitImport` returns to Normal; `ReloadConfig` rebuilds connections.
+**Tests:** `EnterImport` sets mode; `ImportKey(Char('x'))` appends to buffer;
+`ImportKey(Backspace)` pops last char; `SubmitImport` returns to Normal;
+`ReloadConfig` rebuilds connections.
 
 ---
 
