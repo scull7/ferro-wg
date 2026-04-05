@@ -231,18 +231,34 @@ impl ConfigComponent {
 
         for (field_idx, &field) in fields.iter().enumerate() {
             let is_focused = section == self.focused_section && field_idx == self.focused_field_idx;
-            let is_editing = is_editing_this_section
-                && is_focused
-                && state.config_edit.as_ref().unwrap().edit_buffer.is_some();
 
             let (label, value, is_read_only) =
                 ConfigComponent::get_field_display(field, section, config);
 
             let mut line_spans = Vec::new();
 
+            // Determine edit state for this field by looking at config_edit directly.
+            // Using if-let avoids any unwrap in the render path.
+            let edit_buffer_for_field: Option<&str> = if is_editing_this_section && is_focused {
+                state
+                    .config_edit
+                    .as_ref()
+                    .and_then(|e| e.edit_buffer.as_deref())
+            } else {
+                None
+            };
+            let field_error_for_field: Option<&str> = if edit_buffer_for_field.is_some() {
+                state
+                    .config_edit
+                    .as_ref()
+                    .and_then(|e| e.field_error.as_deref())
+            } else {
+                None
+            };
+
             // Focus indicator
             if is_focused {
-                if is_editing {
+                if edit_buffer_for_field.is_some() {
                     line_spans.push(Span::styled(
                         "[editing] ",
                         Style::default().fg(theme.accent),
@@ -264,15 +280,8 @@ impl ConfigComponent {
             ));
 
             // Value or buffer
-            if is_editing {
-                let buffer = state
-                    .config_edit
-                    .as_ref()
-                    .unwrap()
-                    .edit_buffer
-                    .as_ref()
-                    .unwrap();
-                line_spans.push(Span::raw(buffer.clone()));
+            if let Some(buffer) = edit_buffer_for_field {
+                line_spans.push(Span::raw(buffer.to_owned()));
                 line_spans.push(Span::styled("█", Style::default().fg(theme.muted)));
             } else {
                 let value_style = if is_read_only {
@@ -292,7 +301,7 @@ impl ConfigComponent {
             lines.push(Line::from(line_spans));
 
             // Show field error if this is the focused field being edited
-            if is_editing && let Some(error) = &state.config_edit.as_ref().unwrap().field_error {
+            if let Some(error) = field_error_for_field {
                 lines.push(Line::from(Span::styled(
                     format!("  Error: {error}"),
                     Style::default().fg(theme.error),

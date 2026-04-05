@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Borders, Clear, Paragraph};
 
 use ferro_wg_tui_core::config_edit::DiffLine;
 use ferro_wg_tui_core::{Action, AppState, Component};
@@ -118,8 +118,7 @@ fn render_diff_lines(
         Style::default().fg(theme.muted),
     )));
 
-    let paragraph = Paragraph::new(lines).block(Block::default());
-    frame.render_widget(paragraph, area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 #[cfg(test)]

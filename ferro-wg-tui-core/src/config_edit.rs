@@ -333,6 +333,56 @@ pub fn validate_persistent_keepalive(s: &str) -> Result<(), ConfigEditError> {
     Ok(())
 }
 
+/// Validate a buffer value for the given field within the current draft.
+///
+/// Dispatches to the appropriate type-specific validator. Called from
+/// `dispatch(ConfigEditKey(Enter))` before committing the buffer.
+///
+/// `section` is needed for `PeerAllowedIps` to exclude the current peer's
+/// existing allowed-IPs from the duplicate check.
+///
+/// # Errors
+///
+/// Returns the first validation error for the buffer value.
+pub fn validate_field(
+    field: EditableField,
+    value: &str,
+    draft: &WgConfig,
+    section: ConfigSection,
+) -> Result<(), ConfigEditError> {
+    match field {
+        EditableField::ListenPort => validate_port(value),
+        EditableField::Addresses => validate_addresses(value),
+        EditableField::Dns => validate_dns_ips(value),
+        EditableField::DnsSearch => validate_dns_search(value),
+        EditableField::Mtu => validate_mtu(value),
+        EditableField::Fwmark => validate_fwmark(value),
+        EditableField::PreUp
+        | EditableField::PostUp
+        | EditableField::PreDown
+        | EditableField::PostDown
+        | EditableField::PeerName => Ok(()),
+        EditableField::PeerPublicKey => validate_public_key(value),
+        EditableField::PeerEndpoint => validate_endpoint(value),
+        EditableField::PeerAllowedIps => {
+            let current_peer_idx = if let ConfigSection::Peer(i) = section {
+                Some(i)
+            } else {
+                None
+            };
+            let other_ips: Vec<String> = draft
+                .peers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| Some(*i) != current_peer_idx)
+                .flat_map(|(_, p)| p.allowed_ips.iter().cloned())
+                .collect();
+            validate_allowed_ips(value, &other_ips)
+        }
+        EditableField::PeerPersistentKeepalive => validate_persistent_keepalive(value),
+    }
+}
+
 /// Return the current value of a config field as an editable string.
 ///
 /// Called from `dispatch(EnterConfigEdit)` to pre-populate the edit buffer

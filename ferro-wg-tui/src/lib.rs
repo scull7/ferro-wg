@@ -284,6 +284,17 @@ fn handle_key_event(
         None
     };
 
+    // For SaveConfig: capture the draft and connection name *before* dispatch
+    // clears config_diff_pending from state.
+    let save_config_data = if let Action::SaveConfig { reconnect } = action {
+        state
+            .config_diff_pending
+            .as_ref()
+            .map(|p| (p.connection_name.clone(), p.draft.clone(), *reconnect))
+    } else {
+        None
+    };
+
     dispatch_all(state, action, bundle);
     maybe_spawn_command(
         action,
@@ -312,6 +323,17 @@ fn handle_key_event(
 
     if let Some(path) = export_path {
         spawn_export_task(path, &state.benchmark_history.clone(), daemon_tx, tasks);
+    }
+
+    if let Some((connection_name, draft, reconnect)) = save_config_data {
+        spawn_save_config_task(
+            connection_name,
+            draft,
+            reconnect,
+            config_path,
+            daemon_tx,
+            tasks,
+        );
     }
 }
 
@@ -853,6 +875,72 @@ fn spawn_save_history_task(
             ))));
         }
     });
+}
+
+/// Save a `WgConfig` draft for the named connection to disk.
+///
+/// Flow:
+/// 1. Load the current [`AppConfig`] from `config_path`.
+/// 2. Write a backup to `config_path` + `.bak`.
+/// 3. Replace the named connection's config with `draft`.
+/// 4. Write the updated config back to `config_path`.
+/// 5. Send [`DaemonMessage::ReloadConfig`] to reload app state.
+/// 6. If `reconnect`, send daemon `Down` + `Up` commands for the connection.
+fn spawn_save_config_task(
+    connection_name: String,
+    draft: ferro_wg_core::config::WgConfig,
+    reconnect: bool,
+    config_path: &Path,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let config_path = config_path.to_path_buf();
+    let tx = tx.clone();
+    tasks.spawn(async move {
+        let msg = try_save_config(&connection_name, &draft, &config_path);
+        let _ = tx.send(msg);
+        if reconnect {
+            // Best-effort reconnect: tear down then bring back up.
+            let down = DaemonCommand::Down {
+                connection_name: Some(connection_name.clone()),
+            };
+            let up = DaemonCommand::Up {
+                connection_name: Some(connection_name.clone()),
+                backend: ferro_wg_core::error::BackendKind::Boringtun,
+            };
+            let _ = client::send_command(&down).await;
+            let _ = client::send_command(&up).await;
+        }
+    });
+}
+
+/// Perform the backup-and-write save operation.
+///
+/// Returns a [`DaemonMessage`] to be forwarded to the event loop.
+fn try_save_config(
+    connection_name: &str,
+    draft: &ferro_wg_core::config::WgConfig,
+    config_path: &Path,
+) -> DaemonMessage {
+    let result: Result<AppConfig, String> = (|| {
+        let mut app_config = config_toml::load_app_config(config_path)
+            .map_err(|e| format!("Could not load config: {e}"))?;
+        // Backup before writing.
+        let backup_path = config_path.with_extension("toml.bak");
+        let backup_content = config_toml::save_app_config_string(&app_config)
+            .map_err(|e| format!("Could not serialise backup: {e}"))?;
+        std::fs::write(&backup_path, backup_content)
+            .map_err(|e| format!("Could not write backup: {e}"))?;
+        // Apply draft.
+        app_config.insert(connection_name.to_string(), draft.clone());
+        config_toml::save_app_config(&app_config, config_path)
+            .map_err(|e| format!("Could not write config: {e}"))?;
+        Ok(app_config)
+    })();
+    match result {
+        Ok(config) => DaemonMessage::ReloadConfig(config, "Config saved".into()),
+        Err(e) => DaemonMessage::CommandError(TuiError::Generic(e)),
+    }
 }
 
 /// If the action is a peer command or daemon lifecycle command, spawn a background task.

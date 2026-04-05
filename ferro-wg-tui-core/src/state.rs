@@ -26,8 +26,8 @@ use crate::benchmark::{
     cap_history,
 };
 use crate::config_edit::{
-    ConfigDiffPending, ConfigEditState, ConfigSection, DiffLine, EditableField,
-    field_current_value, fields_for_section,
+    ConfigDiffPending, ConfigEditState, ConfigSection, EditableField, config_diff,
+    field_current_value, fields_for_section, validate_field,
 };
 use crate::theme::Theme;
 
@@ -523,25 +523,47 @@ impl AppState {
                 }
             }
             Action::ConfigEditKey(key) => {
-                if let Some(edit) = self.config_edit.as_mut()
-                    && let Some(ref mut buf) = edit.edit_buffer
-                {
-                    match key.code {
-                        KeyCode::Char(c) => buf.push(c),
-                        KeyCode::Backspace => {
-                            buf.pop();
+                if let Some(edit) = self.config_edit.as_mut() {
+                    // Handle char/backspace while buffer is active.
+                    if let Some(ref mut buf) = edit.edit_buffer {
+                        match key.code {
+                            KeyCode::Char(c) => buf.push(c),
+                            KeyCode::Backspace => {
+                                buf.pop();
+                            }
+                            _ => {}
                         }
+                    }
+                    // Handle Enter/Esc after releasing the buf borrow so we
+                    // can access edit.draft for validation.
+                    match key.code {
                         KeyCode::Enter => {
-                            // Commit
-                            let _ = edit.edit_buffer.take();
-                            edit.field_error = None;
-                            self.input_mode = InputMode::Normal;
+                            if let Some(ref buf) = edit.edit_buffer {
+                                let value = buf.clone();
+                                let fields = fields_for_section(edit.focused_section, false);
+                                let field = fields
+                                    .get(edit.focused_field_idx)
+                                    .copied()
+                                    .unwrap_or(EditableField::ListenPort);
+                                let section = edit.focused_section;
+                                match validate_field(field, &value, &edit.draft, section) {
+                                    Ok(()) => {
+                                        edit.edit_buffer = None;
+                                        edit.field_error = None;
+                                        self.input_mode = InputMode::Normal;
+                                    }
+                                    Err(e) => {
+                                        edit.field_error = Some(e.to_string());
+                                    }
+                                }
+                            }
                         }
                         KeyCode::Esc => {
-                            // Cancel
-                            let _ = edit.edit_buffer.take();
-                            edit.field_error = None;
-                            self.input_mode = InputMode::Normal;
+                            if edit.edit_buffer.is_some() {
+                                edit.edit_buffer = None;
+                                edit.field_error = None;
+                                self.input_mode = InputMode::Normal;
+                            }
                         }
                         _ => {}
                     }
@@ -556,7 +578,12 @@ impl AppState {
             }
             Action::ConfigFocusPrev => {
                 if let Some(edit) = self.config_edit.as_mut() {
-                    edit.focused_field_idx = edit.focused_field_idx.saturating_sub(1);
+                    let fields = fields_for_section(edit.focused_section, false);
+                    edit.focused_field_idx = if edit.focused_field_idx == 0 {
+                        fields.len().saturating_sub(1)
+                    } else {
+                        edit.focused_field_idx - 1
+                    };
                 }
             }
             Action::ConfigFocusInterface => {
@@ -596,12 +623,16 @@ impl AppState {
                     && *i < edit.draft.peers.len()
                 {
                     edit.draft.peers.remove(*i);
-                    // Clamp focus
+                    // Reset focus: if no peers remain, move to interface;
+                    // otherwise clamp field index within the surviving section's field count.
                     if edit.draft.peers.is_empty() {
+                        edit.focused_section = ConfigSection::Interface;
                         edit.focused_field_idx = 0;
                     } else {
-                        edit.focused_field_idx =
-                            edit.focused_field_idx.min(edit.draft.peers.len() - 1);
+                        let max_field = fields_for_section(edit.focused_section, false)
+                            .len()
+                            .saturating_sub(1);
+                        edit.focused_field_idx = edit.focused_field_idx.min(max_field);
                     }
                 }
             }
@@ -609,8 +640,15 @@ impl AppState {
                 if let Some(edit) = self.config_edit.as_ref()
                     && edit.field_error.is_none()
                 {
-                    // Mock diff for now
-                    let diff_lines = vec![DiffLine::Context("mock".to_string())];
+                    let original_toml = self
+                        .connections
+                        .iter()
+                        .find(|c| c.name == edit.connection_name)
+                        .and_then(|c| ferro_wg_core::config::toml::save_to_string(&c.config).ok())
+                        .unwrap_or_default();
+                    let draft_toml = ferro_wg_core::config::toml::save_to_string(&edit.draft)
+                        .unwrap_or_default();
+                    let diff_lines = config_diff(&original_toml, &draft_toml);
                     self.config_diff_pending = Some(ConfigDiffPending {
                         connection_name: edit.connection_name.clone(),
                         draft: edit.draft.clone(),
@@ -660,6 +698,7 @@ impl AppState {
         }
     }
 
+    /// Handle a key event when in [`InputMode::Export`].
     ///
     /// Appends typed characters to the path buffer and removes the last
     /// character on `Backspace`. All other keys are silently ignored.

@@ -9,7 +9,8 @@ pub(crate) fn centered_rect(
     height: u16,
     area: ratatui::layout::Rect,
 ) -> ratatui::layout::Rect {
-    let width = area.width * pct_x / 100;
+    // Multiply in u32 to avoid u16 overflow on wide terminals, then clamp back.
+    let width = u16::try_from(u32::from(area.width) * u32::from(pct_x) / 100).unwrap_or(area.width);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     ratatui::layout::Rect {
