@@ -14,11 +14,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseEvent,
+};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::text::Text;
+use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -61,6 +65,12 @@ const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 =
 /// Delegates to [`MIN_USEFUL_WIDTH`] so this threshold stays in sync with any
 /// changes to the bar's prefix or indicator strings.
 const MIN_WIDTH_FOR_CONNECTION_BAR: u16 = MIN_USEFUL_WIDTH;
+
+/// Minimum terminal width for responsive layout.
+const MIN_TERMINAL_WIDTH: u16 = 80;
+
+/// Minimum terminal height for responsive layout.
+const MIN_TERMINAL_HEIGHT: u16 = 24;
 
 /// UI-facing errors from TUI operations.
 ///
@@ -206,9 +216,16 @@ fn handle_daemon_messages(
     }
 }
 
+/// Render "Terminal too small" message when the terminal is below minimum size.
+fn render_too_small(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let text = Text::styled("Terminal too small (min 80×24)", state.theme.error);
+    let para = Paragraph::new(text).alignment(Alignment::Center);
+    frame.render_widget(para, area);
+}
+
 /// Render the UI to the terminal.
-fn render_ui(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+fn render_ui<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
     state: &AppState,
     bundle: &mut ComponentBundle,
     chunks: &[ratatui::layout::Rect],
@@ -216,6 +233,10 @@ fn render_ui(
     area: ratatui::layout::Rect,
 ) -> Result<(), Box<dyn std::error::Error>> {
     terminal.draw(|frame| {
+        if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+            render_too_small(frame, area, state);
+            return;
+        }
         bundle.tab_bar.render(frame, chunks[0], false, state);
         if show_bar {
             bundle.connection_bar.render(frame, chunks[1], false, state);
@@ -1103,6 +1124,8 @@ mod tests {
     use ferro_wg_core::stats::BenchmarkResult;
     use ferro_wg_tui_core::AppState;
     use ferro_wg_tui_core::benchmark::{BenchmarkResultMap, BenchmarkRun};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -1255,5 +1278,94 @@ mod tests {
 
         let msg = rx.recv().await.unwrap();
         assert!(matches!(msg, DaemonMessage::CommandError(_)));
+    }
+
+    #[test]
+    fn compute_layout_80x24() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (chunks, _show_bar) = compute_layout(area, 0);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].height, TAB_BAR_HEIGHT);
+        assert_eq!(chunks[3].height, STATUS_BAR_HEIGHT);
+        assert!(chunks[2].height >= 1);
+    }
+
+    fn render_ui_to_buffer(width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = AppState::new(AppConfig::default());
+        let mut bundle = ComponentBundle::new();
+        let area = Rect::new(0, 0, width, height);
+        let (chunks, show_bar) = compute_layout(area, state.connections.len());
+        render_ui(&mut terminal, &state, &mut bundle, &chunks, show_bar, area).unwrap();
+    }
+
+    #[test]
+    fn render_ui_at_79x24() {
+        render_ui_to_buffer(79, 24);
+    }
+
+    #[test]
+    fn render_ui_at_80x23() {
+        render_ui_to_buffer(80, 23);
+    }
+
+    #[test]
+    fn render_ui_at_80x24() {
+        render_ui_to_buffer(80, 24);
+    }
+
+    fn render_component_to_buffer(tab_index: usize, width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = AppState::new(AppConfig::default());
+        let mut bundle = ComponentBundle::new();
+        let area = Rect::new(0, 0, width, height);
+        terminal
+            .draw(|frame| {
+                bundle.tabs[tab_index].render(frame, area, true, &state);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn overview_component_at_80x24_empty() {
+        render_component_to_buffer(0, 80, 24);
+    }
+
+    #[test]
+    fn overview_component_at_80x24_one_connection() {
+        // Note: Using default config (empty), so no connection, but test no panic
+        render_component_to_buffer(0, 80, 24);
+    }
+
+    #[test]
+    fn overview_component_at_120x40_one_connection() {
+        render_component_to_buffer(0, 120, 40);
+    }
+
+    #[test]
+    fn status_component_at_80x24() {
+        render_component_to_buffer(1, 80, 24);
+    }
+
+    #[test]
+    fn peers_component_at_80x24() {
+        render_component_to_buffer(2, 80, 24);
+    }
+
+    #[test]
+    fn compare_component_at_80x24() {
+        render_component_to_buffer(3, 80, 24);
+    }
+
+    #[test]
+    fn config_component_at_80x24() {
+        render_component_to_buffer(4, 80, 24);
+    }
+
+    #[test]
+    fn logs_component_at_80x24() {
+        render_component_to_buffer(5, 80, 24);
     }
 }

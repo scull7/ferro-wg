@@ -378,6 +378,9 @@ impl Component for LogsComponent {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
+        if area.height == 0 || area.width < 20 {
+            return;
+        }
         let theme = &state.theme;
         let config = &state.log_display;
 
