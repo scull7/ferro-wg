@@ -149,6 +149,7 @@ pub enum ConfigEditError {
 /// - Accepts any value 1–65535.
 /// - Rejects values > 65535.
 /// - Rejects non-numeric, non-empty strings.
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_port(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -160,6 +161,7 @@ pub fn validate_port(s: &str) -> Result<(), ConfigEditError> {
 }
 
 /// Validate a comma-separated list of CIDR addresses (e.g. `10.0.0.2/24`).
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_addresses(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -177,6 +179,7 @@ pub fn validate_addresses(s: &str) -> Result<(), ConfigEditError> {
 }
 
 /// Validate a comma-separated list of IP addresses (DNS servers).
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_dns_ips(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -194,6 +197,7 @@ pub fn validate_dns_ips(s: &str) -> Result<(), ConfigEditError> {
 }
 
 /// Validate a comma-separated list of DNS search domains.
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_dns_search(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -211,6 +215,7 @@ pub fn validate_dns_search(s: &str) -> Result<(), ConfigEditError> {
 }
 
 /// Validate an MTU value (576–9000, or 0 for auto).
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_mtu(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -228,6 +233,7 @@ pub fn validate_mtu(s: &str) -> Result<(), ConfigEditError> {
 }
 
 /// Validate a firewall mark (any `u32`, including 0).
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_fwmark(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -237,16 +243,21 @@ pub fn validate_fwmark(s: &str) -> Result<(), ConfigEditError> {
     Ok(())
 }
 
-/// Validate a WireGuard base64 public key (44 characters, valid base64).
+/// Validate a `WireGuard` base64 public key (44 characters, valid base64).
 pub fn validate_public_key(s: &str) -> Result<(), ConfigEditError> {
     if s.len() != 44 {
         return Err(ConfigEditError::PublicKeyLength);
     }
-    base64::decode(s).map_err(|_| ConfigEditError::PublicKeyInvalidBase64)?; // TODO: migrate to base64::Engine
+    #[allow(deprecated)]
+    let decoded = base64::decode(s).map_err(|_| ConfigEditError::PublicKeyInvalidBase64)?; // TODO: migrate to base64::Engine
+    if decoded.len() != 32 {
+        return Err(ConfigEditError::PublicKeyInvalidBase64); // or a new error variant?
+    }
     Ok(())
 }
 
 /// Validate a peer endpoint (`host:port` or empty for receive-only peers).
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_endpoint(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -268,12 +279,13 @@ pub fn validate_endpoint(s: &str) -> Result<(), ConfigEditError> {
 /// Validate a comma-separated list of allowed-IP CIDR ranges.
 ///
 /// Also checks for exact string duplicates against all peers in the draft —
-/// WireGuard forbids duplicate allowed-IP entries. Note: only exact string
+/// `WireGuard` forbids duplicate allowed-IP entries. Note: only exact string
 /// duplicates are rejected; CIDR overlaps that are not exact duplicates are
-/// permitted (WireGuard kernel enforcement handles overlap detection at
+/// permitted (`WireGuard` kernel enforcement handles overlap detection at
 /// runtime). The `other_peers_allowed_ips` slice is a flat list of all
 /// existing allowed-IP strings across all other peers; callers flatten
 /// `peer.allowed_ips.iter()` into a collected `Vec<String>` before calling.
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_allowed_ips(
     s: &str,
     other_peers_allowed_ips: &[String],
@@ -301,6 +313,7 @@ pub fn validate_allowed_ips(
 }
 
 /// Validate a persistent keepalive interval (0–65535 seconds).
+#[allow(clippy::missing_errors_doc)]
 pub fn validate_persistent_keepalive(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
@@ -320,6 +333,7 @@ pub fn validate_persistent_keepalive(s: &str) -> Result<(), ConfigEditError> {
 ///
 /// Although this is a pure string transform, it lives in `ferro-wg-tui-core`
 /// alongside `DiffLine` because `DiffLine` is TUI-specific.
+#[must_use]
 pub fn config_diff(old_toml: &str, new_toml: &str) -> Vec<DiffLine> {
     let old_lines: Vec<&str> = old_toml.lines().collect();
     let new_lines: Vec<&str> = new_toml.lines().collect();
@@ -333,33 +347,20 @@ pub fn config_diff(old_toml: &str, new_toml: &str) -> Vec<DiffLine> {
             i += 1;
             j += 1;
         } else {
-            // Check if old line is in new
-            let mut found = false;
-            for k in j..new_lines.len() {
-                if old_lines[i] == new_lines[k] {
-                    // Insert added lines
-                    for l in j..k {
-                        diff.push(DiffLine::Added(new_lines[l].to_string()));
-                    }
-                    j = k;
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                // Old line removed
-                diff.push(DiffLine::Removed(old_lines[i].to_string()));
-                i += 1;
-            }
+            // Simple diff: assume removed then added
+            diff.push(DiffLine::Removed(old_lines[i].to_string()));
+            diff.push(DiffLine::Added(new_lines[j].to_string()));
+            i += 1;
+            j += 1;
         }
     }
-    // Remaining old lines
-    for &line in &old_lines[i..] {
-        diff.push(DiffLine::Removed(line.to_string()));
+    while i < old_lines.len() {
+        diff.push(DiffLine::Removed(old_lines[i].to_string()));
+        i += 1;
     }
-    // Remaining new lines
-    for &line in &new_lines[j..] {
-        diff.push(DiffLine::Added(line.to_string()));
+    while j < new_lines.len() {
+        diff.push(DiffLine::Added(new_lines[j].to_string()));
+        j += 1;
     }
     diff
 }
@@ -372,8 +373,9 @@ pub fn config_diff(old_toml: &str, new_toml: &str) -> Vec<DiffLine> {
 /// `static` arrays:
 ///
 /// - `Interface` → 10 fields (all interface fields)
-/// - `Peer(…, is_new_peer=false)` → 5 fields (excludes `PeerPublicKey`)
-/// - `Peer(…, is_new_peer=true)` → 6 fields (`PeerPublicKey` first)
+/// - `Peer(…, is_new_peer=false)` → 4 fields (excludes `PeerPublicKey`)
+/// - `Peer(…, is_new_peer=true)` → 5 fields (`PeerPublicKey` first)
+#[must_use]
 pub fn fields_for_section(section: ConfigSection, is_new_peer: bool) -> &'static [EditableField] {
     const INTERFACE_FIELDS: &[EditableField] = &[
         EditableField::ListenPort,
@@ -532,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_validate_public_key() {
-        let valid_key = "YWJjZGVmZ2hpamsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; // valid base64 44 chars
+        let valid_key = "/yt5f1nclaUwO75kn6KosqO2ZD6kJ4Ld4SrYuG1csZg="; // valid base64 32-byte key
         assert!(validate_public_key(valid_key).is_ok());
         assert!(matches!(
             validate_public_key("short"),
@@ -543,7 +545,7 @@ mod tests {
             Err(ConfigEditError::PublicKeyLength)
         )); // 45 chars
         assert!(matches!(
-            validate_public_key("invalid base64!@#"),
+            validate_public_key("invalid base64!@#invalid base64!@#invalid!!!"),
             Err(ConfigEditError::PublicKeyInvalidBase64)
         ));
     }

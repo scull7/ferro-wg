@@ -1,11 +1,11 @@
 //! Status bar: bottom-of-screen help text or search input.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use ferro_wg_tui_core::state::CompareView;
 use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
@@ -154,6 +154,46 @@ impl Component for StatusBarComponent {
                                 Span::raw(" export  "),
                             ]),
                         },
+                        Tab::Config => {
+                            if let Some(edit) = &state.config_edit {
+                                // Show hints based on whether we're editing a field or navigating
+                                if edit.edit_buffer.is_some() {
+                                    spans.extend([
+                                        Span::styled("Enter", hotkey),
+                                        Span::raw(" confirm  "),
+                                        Span::styled("Esc", hotkey),
+                                        Span::raw(" cancel  "),
+                                        Span::raw("(type to edit)"),
+                                    ]);
+                                } else {
+                                    spans.extend([
+                                        Span::styled("e", hotkey),
+                                        Span::raw(" edit  "),
+                                        Span::styled("j/k", hotkey),
+                                        Span::raw(" nav  "),
+                                        Span::styled("p", hotkey),
+                                        Span::raw(" preview  "),
+                                        Span::styled("+", hotkey),
+                                        Span::raw(" add peer  "),
+                                        Span::styled("x", hotkey),
+                                        Span::raw(" delete peer"),
+                                    ]);
+                                }
+                            } else {
+                                spans.extend([
+                                    Span::styled("e", hotkey),
+                                    Span::raw(" edit  "),
+                                    Span::styled("j/k", hotkey),
+                                    Span::raw(" nav  "),
+                                    Span::styled("p", hotkey),
+                                    Span::raw(" preview  "),
+                                    Span::styled("+", hotkey),
+                                    Span::raw(" add peer  "),
+                                    Span::styled("x", hotkey),
+                                    Span::raw(" delete peer"),
+                                ]);
+                            }
+                        }
                         _ => {}
                     }
                     spans.extend([Span::styled("j/k", hotkey), Span::raw(" nav")]);

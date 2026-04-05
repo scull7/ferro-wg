@@ -180,7 +180,7 @@ pub enum Action {
     /// Move section focus to peer at the given index.
     ConfigFocusPeer(usize),
 
-    /// Append a new blank peer to the draft and enter EditField on its PublicKey.
+    /// Append a new blank peer to the draft and enter `EditField` on its `PublicKey`.
     AddConfigPeer,
 
     /// Remove the peer at the given index from the draft (after confirmation).

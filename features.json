@@ -1,6 +1,6 @@
 {
   "phase5": {
-    "status": "in_progress",
+    "status": "completed",
     "commits": [
       {
         "id": "commit1",
@@ -58,12 +58,58 @@
         "title": "Export functionality",
         "status": "completed",
         "features": [
-          "spawn_export_task",
+          "benchmark_export_task",
           "csv_export",
           "json_export",
           "export_io_error_handling",
           "export_tests"
         ]
+      }
+    ]
+  },
+  "phase6": {
+    "status": "in_progress",
+    "commits": [
+      {
+        "id": "commit1",
+        "title": "Core edit types + validators",
+        "status": "completed",
+        "features": [
+          "config_edit_types",
+          "pure_validation_functions",
+          "config_diff_function",
+          "fields_for_section",
+          "config_edit_actions",
+          "input_mode_edit_field",
+          "appstate_config_edit_fields",
+          "config_edit_state_dispatch",
+          "confirmed_action_delete_peer",
+          "comprehensive_unit_tests"
+        ]
+      },
+      {
+        "id": "commit2",
+        "title": "Config tab interactive navigation and edit mode",
+        "status": "pending",
+        "features": []
+      },
+      {
+        "id": "commit3",
+        "title": "DiffPreviewComponent overlay",
+        "status": "pending",
+        "features": []
+      },
+      {
+        "id": "commit4",
+        "title": "Background save task and backup",
+        "status": "pending",
+        "features": []
+      },
+      {
+        "id": "commit5",
+        "title": "Peer editing and add/delete flows",
+        "status": "pending",
+        "features": []
       }
     ]
   }

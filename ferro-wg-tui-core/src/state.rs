@@ -491,10 +491,9 @@ impl AppState {
                 });
             }
             Action::ConfirmYes => {
-                if let Some(pending) = self.pending_confirm.take() {
-                    if let ConfirmAction::DeletePeer(i) = pending.action {
-                        self.dispatch(&Action::DeleteConfigPeer(i));
-                    }
+                if let Some(pending) = self.pending_confirm.take()
+                    && let ConfirmAction::DeletePeer(i) = pending.action {
+                    self.dispatch(&Action::DeleteConfigPeer(i));
                 }
             }
             Action::ConfirmNo => {
@@ -503,27 +502,26 @@ impl AppState {
 
             // -- Config editing --
             Action::ConfigEditKey(key) => {
-                if let Some(edit) = self.config_edit.as_mut() {
-                    if let Some(ref mut buf) = edit.edit_buffer {
-                        match key.code {
-                            KeyCode::Char(c) => buf.push(c),
-                            KeyCode::Backspace => {
-                                buf.pop();
-                            }
-                            KeyCode::Enter => {
-                                // Commit
-                                let _ = edit.edit_buffer.take();
-                                edit.field_error = None;
-                                self.input_mode = InputMode::Normal;
-                            }
-                            KeyCode::Esc => {
-                                // Cancel
-                                edit.edit_buffer = None;
-                                edit.field_error = None;
-                                self.input_mode = InputMode::Normal;
-                            }
-                            _ => {}
+                if let Some(edit) = self.config_edit.as_mut()
+                    && let Some(ref mut buf) = edit.edit_buffer {
+                    match key.code {
+                        KeyCode::Char(c) => buf.push(c),
+                        KeyCode::Backspace => {
+                            buf.pop();
                         }
+                        KeyCode::Enter => {
+                            // Commit
+                            let _ = edit.edit_buffer.take();
+                            edit.field_error = None;
+                            self.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Esc => {
+                            // Cancel
+                            let _ = edit.edit_buffer.take();
+                            edit.field_error = None;
+                            self.input_mode = InputMode::Normal;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -536,7 +534,6 @@ impl AppState {
             }
             Action::ConfigFocusPrev => {
                 if let Some(edit) = self.config_edit.as_mut() {
-                    let fields = fields_for_section(edit.focused_section, false);
                     edit.focused_field_idx = edit.focused_field_idx.saturating_sub(1);
                 }
             }
@@ -558,7 +555,7 @@ impl AppState {
                         PublicKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
                             .unwrap();
                     let new_peer = PeerConfig {
-                        name: "".to_string(),
+                        name: String::new(),
                         public_key: dummy_key,
                         endpoint: None,
                         allowed_ips: vec![],
@@ -573,31 +570,29 @@ impl AppState {
                 }
             }
             Action::DeleteConfigPeer(i) => {
-                if let Some(edit) = self.config_edit.as_mut() {
-                    if *i < edit.draft.peers.len() {
-                        edit.draft.peers.remove(*i);
-                        // Clamp focus
-                        if edit.draft.peers.is_empty() {
-                            edit.focused_field_idx = 0;
-                        } else {
-                            edit.focused_field_idx =
-                                edit.focused_field_idx.min(edit.draft.peers.len() - 1);
-                        }
+                if let Some(edit) = self.config_edit.as_mut()
+                    && *i < edit.draft.peers.len() {
+                    edit.draft.peers.remove(*i);
+                    // Clamp focus
+                    if edit.draft.peers.is_empty() {
+                        edit.focused_field_idx = 0;
+                    } else {
+                        edit.focused_field_idx =
+                            edit.focused_field_idx.min(edit.draft.peers.len() - 1);
                     }
                 }
             }
             Action::PreviewConfig => {
-                if let Some(edit) = self.config_edit.as_ref() {
-                    if edit.field_error.is_none() {
-                        // Mock diff for now
-                        let diff_lines = vec![DiffLine::Context("mock".to_string())];
-                        self.config_diff_pending = Some(ConfigDiffPending {
-                            connection_name: edit.connection_name.clone(),
-                            draft: edit.draft.clone(),
-                            diff_lines,
-                            scroll_offset: 0,
-                        });
-                    }
+                if let Some(edit) = self.config_edit.as_ref()
+                    && edit.field_error.is_none() {
+                    // Mock diff for now
+                    let diff_lines = vec![DiffLine::Context("mock".to_string())];
+                    self.config_diff_pending = Some(ConfigDiffPending {
+                        connection_name: edit.connection_name.clone(),
+                        draft: edit.draft.clone(),
+                        diff_lines,
+                        scroll_offset: 0,
+                    });
                 }
             }
             Action::ConfigDiffScrollDown => {
@@ -621,15 +616,6 @@ impl AppState {
             }
             // These are handled by the event loop (maybe_spawn_command) or
             // components. They carry no state-machine side-effects here.
-            Action::Tick
-            | Action::ConnectPeer(_)
-            | Action::DisconnectPeer(_)
-            | Action::CyclePeerBackend(_)
-            | Action::ConnectAll
-            | Action::DisconnectAll
-            | Action::StartDaemon
-            | Action::StopDaemon
-            | Action::SwitchBenchmarkBackend(_) => {}
             _ => {}
         }
     }

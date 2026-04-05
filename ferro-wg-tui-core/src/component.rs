@@ -7,8 +7,8 @@
 //! via `update()`.
 
 use crossterm::event::KeyEvent;
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 
 use crate::action::Action;
 use crate::state::AppState;

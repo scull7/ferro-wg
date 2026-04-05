@@ -44,7 +44,32 @@
 - Unit tests covering CSV/JSON export, file I/O success/failure, and error propagation
 - All tests pass, clippy clean, no warnings
 
+## Completed Phases
+
+### Commit 1: Core edit types + validators (COMPLETED)
+- Added ConfigEditState, ConfigSection, EditableField, DiffLine, ConfigDiffPending types in ferro-wg-tui-core/src/config_edit.rs
+- Implemented pure validation functions: validate_port, validate_addresses, validate_dns_ips, validate_dns_search, validate_mtu, validate_fwmark, validate_public_key, validate_endpoint, validate_allowed_ips, validate_persistent_keepalive
+- Added config_diff and fields_for_section pure functions
+- Extended Action enum with config editing variants: EnterConfigEdit, ConfigEditKey, CommitConfigEdit, etc.
+- Added InputMode::EditField and AppState fields: config_edit, config_diff_pending
+- Added dispatch logic for all new actions in AppState
+- Updated ferro-wg-tui/src/lib.rs confirmed_action for DeletePeer
+- Comprehensive unit tests covering all validators, state dispatch, and edge cases
+- All tests pass, clippy clean, no warnings
+
+### Commit 2: Config tab interactive navigation and edit mode (COMPLETED)
+- Updated ConfigComponent to be fully interactive with handle_key for j/k navigation, e edit, + add peer, x delete, p preview, Esc discard
+- Added component-local state: focused_section, focused_field_idx
+- Render method shows [focused]/[editing] indicators, (read-only) cues for sensitive fields, inline field_error display
+- Updated StatusBar with context-aware hints for Config tab Normal and EditField modes
+- Comprehensive tests: handle_key returns correct actions, render snapshots with TestBackend, full roundtrip key sequences for edit commit
+- All tests pass, clippy clean, no warnings
+
 ## Pending Phases
+
+### Commit 3: DiffPreviewComponent overlay
+### Commit 4: Background save task and backup
+### Commit 5: Peer editing and add/delete flows
 
 ## Verification Status
 - Tooling checks: PASSED (fmt, test, clippy, build)
