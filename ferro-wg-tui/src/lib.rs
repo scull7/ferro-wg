@@ -658,6 +658,8 @@ fn maybe_spawn_command(
             }
             Err(e) => error_to_message(&e),
             Ok(DaemonResponse::Status(_)) => return,
+            Ok(DaemonResponse::BenchmarkProgress(_)) => todo!("Handle benchmark progress"),
+            Ok(DaemonResponse::BenchmarkResult(_)) => todo!("Handle benchmark result"),
         };
         let _ = tx.send(msg);
     });

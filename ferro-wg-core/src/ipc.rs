@@ -6,7 +6,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::error::BackendKind;
-use crate::stats::TunnelStats;
+use crate::stats::{BenchmarkResult, TunnelStats};
 
 /// Default Unix socket path for the daemon.
 pub const SOCKET_PATH: &str = "/tmp/ferro-wg.sock";
@@ -145,6 +145,17 @@ pub enum DaemonCommand {
     Shutdown,
     /// Request to stream daemon logs in real-time.
     StreamLogs,
+    /// Run a performance benchmark against the named connection.
+    ///
+    /// The daemon streams [`DaemonResponse::BenchmarkProgress`] updates
+    /// approximately once per second, then sends a final
+    /// [`DaemonResponse::BenchmarkResult`] when the run completes.
+    Benchmark {
+        /// Which connection to benchmark.
+        connection_name: String,
+        /// Benchmark duration in seconds (default: 10).
+        duration_secs: u32,
+    },
 }
 
 /// Responses sent from the daemon to the CLI/TUI.
@@ -160,6 +171,10 @@ pub enum DaemonResponse {
     ///
     /// [`StreamLogs`]: DaemonCommand::StreamLogs
     LogEntry(LogEntry),
+    /// Periodic progress update during an active benchmark run.
+    BenchmarkProgress(BenchmarkProgress),
+    /// Final aggregated result after a benchmark run completes.
+    BenchmarkResult(BenchmarkResult),
 }
 
 /// Runtime status of a single connection, reported by the daemon.
@@ -177,6 +192,29 @@ pub struct PeerStatus {
     pub endpoint: Option<String>,
     /// The local TUN interface name (e.g. `utun4`).
     pub interface: Option<String>,
+}
+
+/// Periodic benchmark progress update streamed from the daemon.
+///
+/// `BenchmarkProgress` is a wire-format type: it travels over the IPC socket
+/// from daemon to TUI as a `DaemonResponse::BenchmarkProgress` variant.
+/// It lives in `ipc.rs` alongside the other wire types, **not** in `stats.rs`
+/// (which holds post-processed aggregation results).
+///
+/// Sent roughly once per second during an active `DaemonCommand::Benchmark`
+/// run. The TUI drives the `Sparkline` and progress bar from these updates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BenchmarkProgress {
+    /// Backend under test.
+    pub backend: String,
+    /// Seconds elapsed since the benchmark started.
+    pub elapsed_secs: u32,
+    /// Configured total duration.
+    pub total_secs: u32,
+    /// Instantaneous throughput at this sample point.
+    pub current_throughput_bps: f64,
+    /// Cumulative packets processed so far.
+    pub packets_processed: u64,
 }
 
 /// Encode a message as a newline-terminated JSON string.
@@ -257,6 +295,38 @@ mod tests {
         let encoded = encode_message(&resp).expect("encode");
         let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
         assert!(matches!(decoded, DaemonResponse::Error(ref s) if s == "no such peer"));
+    }
+
+    #[test]
+    fn benchmark_progress_roundtrip() {
+        let progress = BenchmarkProgress {
+            backend: "boringtun".into(),
+            elapsed_secs: 5,
+            total_secs: 10,
+            current_throughput_bps: 1_234_567.0,
+            packets_processed: 12345,
+        };
+        let resp = DaemonResponse::BenchmarkProgress(progress.clone());
+        let encoded = encode_message(&resp).expect("encode");
+        let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
+        assert!(matches!(decoded, DaemonResponse::BenchmarkProgress(ref p) if *p == progress));
+    }
+
+    #[test]
+    fn benchmark_result_roundtrip() {
+        let result = BenchmarkResult {
+            backend: "boringtun".into(),
+            packets_processed: 1000,
+            bytes_encapsulated: 1_000_000,
+            elapsed: std::time::Duration::from_secs(1),
+            throughput_bps: 1_000_000.0,
+            avg_latency: std::time::Duration::from_micros(10),
+            ..BenchmarkResult::default()
+        };
+        let resp = DaemonResponse::BenchmarkResult(result.clone());
+        let encoded = encode_message(&resp).expect("encode");
+        let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
+        assert!(matches!(decoded, DaemonResponse::BenchmarkResult(ref r) if *r == result));
     }
 
     #[test]
@@ -343,6 +413,10 @@ mod tests {
             },
             DaemonCommand::Shutdown,
             DaemonCommand::StreamLogs,
+            DaemonCommand::Benchmark {
+                connection_name: "test".into(),
+                duration_secs: 10,
+            },
         ];
         for cmd in &commands {
             let encoded = encode_message(cmd).expect("encode");

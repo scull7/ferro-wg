@@ -53,6 +53,11 @@ impl Component for StatusBarComponent {
                 KeyCode::Enter => Some(Action::SubmitImport),
                 _ => Some(Action::ImportKey(key)),
             },
+            InputMode::Export(_) => match key.code {
+                KeyCode::Esc => Some(Action::ExitExport),
+                KeyCode::Enter => Some(Action::SubmitExport),
+                _ => Some(Action::ExportKey(key)),
+            },
             InputMode::Normal => None,
         }
     }
@@ -86,6 +91,11 @@ impl Component for StatusBarComponent {
                 ]),
                 InputMode::Import(buf) => Line::from(vec![
                     Span::styled(" Import path: ", Style::default().fg(theme.warning)),
+                    Span::raw(buf.clone()),
+                    Span::styled("_", Style::default().fg(theme.muted)),
+                ]),
+                InputMode::Export(buf) => Line::from(vec![
+                    Span::styled(" Export path: ", Style::default().fg(theme.warning)),
                     Span::raw(buf.clone()),
                     Span::styled("_", Style::default().fg(theme.muted)),
                 ]),

@@ -11,18 +11,33 @@ use std::time::{Duration, Instant};
 
 use ferro_wg_core::config::{AppConfig, LogDisplayConfig, WgConfig};
 use ferro_wg_core::error::BackendKind;
-use ferro_wg_core::ipc::LogEntry;
+use ferro_wg_core::ipc::{BenchmarkProgress, LogEntry};
 use ferro_wg_core::stats::TunnelStats;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 use crossterm::event::KeyCode;
 
 use crate::action::{Action, ConfirmAction};
 use crate::app::{InputMode, Tab};
+use crate::benchmark::{
+    BENCHMARK_HISTORY_CAP, BENCHMARK_PROGRESS_HISTORY_CAP, BenchmarkResultMap, BenchmarkRun,
+    cap_history,
+};
 use crate::theme::Theme;
 
 /// How long feedback messages are displayed before expiring.
 const FEEDBACK_DURATION: Duration = Duration::from_secs(3);
+
+/// Which view mode is active on the Compare tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompareView {
+    /// Show live benchmark results and the running progress widgets.
+    #[default]
+    Live,
+    /// Show the scrollable list of historical `BenchmarkRun` entries.
+    Historical,
+}
 
 /// Whether a connection tunnel is currently active.
 ///
@@ -188,6 +203,39 @@ pub struct AppState {
     pub log_display: LogDisplayConfig,
     /// Pending confirmation dialog, or `None` when no dialog is active.
     pub pending_confirm: Option<ConfirmPending>,
+    /// Latest benchmark result per backend name for the **current active connection**.
+    ///
+    /// Keyed by `BenchmarkResult::backend` (a `String`).
+    /// Cleared (set to empty `HashMap`) in `dispatch(StartBenchmark)` and in
+    /// `dispatch(StartBenchmarkForBackend(_))` so stale results from a previous
+    /// run never appear next to results from a new run. Each individual
+    /// `BenchmarkComplete` result is inserted by backend key, so a partial
+    /// all-backends run accumulates results incrementally.
+    pub benchmark_results: BenchmarkResultMap,
+    /// Benchmark history, capped at 50 runs; loaded from `benchmarks.json`
+    /// at startup and appended to on `BenchmarkComplete`.
+    pub benchmark_history: Vec<BenchmarkRun>,
+    /// `true` while a benchmark task is running; prevents concurrent runs.
+    ///
+    /// Set to `true` in `dispatch(StartBenchmark)` **only when not already
+    /// running**. Set back to `false` in `dispatch(BenchmarkComplete)`.
+    /// The action/effect layer's `maybe_spawn_command` calls
+    /// `spawn_benchmark_task` when it sees `StartBenchmark` AND
+    /// `state.benchmark_running` is still `false` at that point (checked
+    /// against pre-dispatch state captured before `dispatch_all`).
+    pub benchmark_running: bool,
+    /// Ring buffer of live progress samples from the current benchmark run.
+    ///
+    /// `VecDeque` is used so the oldest sample can be dropped from the front
+    /// in O(1) when the buffer is capped (maximum 60 samples — one minute of
+    /// one-per-second updates). Cleared to empty on `BenchmarkComplete` and on
+    /// `StartBenchmark`.
+    ///
+    /// The `Sparkline` and `Gauge` widgets are driven from this field via
+    /// `benchmark::throughput_sparkline_data(&state.benchmark_progress_history)`.
+    pub benchmark_progress_history: VecDeque<BenchmarkProgress>,
+    /// Which view mode is active on the Compare tab.
+    pub compare_view: CompareView,
 }
 
 impl AppState {
@@ -223,6 +271,11 @@ impl AppState {
             feedback: None,
             log_display: app_config.log_display,
             pending_confirm: None,
+            benchmark_results: BenchmarkResultMap::new(),
+            benchmark_history: Vec::new(),
+            benchmark_running: false,
+            benchmark_progress_history: VecDeque::new(),
+            compare_view: CompareView::default(),
         }
     }
 
@@ -257,6 +310,10 @@ impl AppState {
     ///
     /// `SelectConnection(i)` with an out-of-bounds index is silently
     /// ignored and emits a `tracing::warn!` log entry; it does not panic.
+    /// # Panics
+    ///
+    /// Panics if `SystemTime` is before `UNIX_EPOCH` (impossible in practice).
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     pub fn dispatch(&mut self, action: &Action) {
         match action {
             Action::Quit => self.running = false,
@@ -330,7 +387,58 @@ impl AppState {
                 self.input_mode = InputMode::Import(String::new());
             }
             Action::ImportKey(key) => self.apply_import_key(key),
-            Action::SubmitImport | Action::ExitImport => {
+
+            // -- Benchmark actions --
+            Action::StartBenchmark | Action::StartBenchmarkForBackend(_) => {
+                if self.benchmark_running {
+                    self.feedback = Some(Feedback::error("benchmark already running".to_owned()));
+                } else {
+                    self.benchmark_running = true;
+                    self.benchmark_results.clear();
+                    self.benchmark_progress_history.clear();
+                }
+            }
+            Action::BenchmarkProgressUpdate(p) => {
+                if self.benchmark_progress_history.len() >= BENCHMARK_PROGRESS_HISTORY_CAP {
+                    self.benchmark_progress_history.pop_front();
+                }
+                self.benchmark_progress_history.push_back(p.clone());
+            }
+            Action::BenchmarkComplete(result) => {
+                self.benchmark_running = false;
+                self.benchmark_results
+                    .insert(result.backend.clone(), result.clone());
+                let run = BenchmarkRun {
+                    timestamp_ms: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64, // Safe as millis since epoch fits in i64
+                    connection_name: self
+                        .active_connection()
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default(),
+                    results: self.benchmark_results.clone(),
+                };
+                self.benchmark_history.push(run);
+                self.benchmark_history = cap_history(
+                    std::mem::take(&mut self.benchmark_history),
+                    BENCHMARK_HISTORY_CAP,
+                );
+            }
+            Action::ToggleCompareView => {
+                self.compare_view = match self.compare_view {
+                    CompareView::Live => CompareView::Historical,
+                    CompareView::Historical => CompareView::Live,
+                };
+            }
+            Action::EnterExport => {
+                self.input_mode = InputMode::Export(String::new());
+            }
+            Action::ExportKey(key) => self.apply_export_key(key),
+            Action::SubmitImport
+            | Action::ExitImport
+            | Action::SubmitExport
+            | Action::ExitExport => {
                 self.input_mode = InputMode::Normal;
             }
             // -- Confirmation dialog --
@@ -352,7 +460,8 @@ impl AppState {
             | Action::ConnectAll
             | Action::DisconnectAll
             | Action::StartDaemon
-            | Action::StopDaemon => {}
+            | Action::StopDaemon
+            | Action::SwitchBenchmarkBackend(_) => {}
         }
     }
 
@@ -362,6 +471,21 @@ impl AppState {
     /// character on `Backspace`. All other keys are silently ignored.
     fn apply_import_key(&mut self, key: &crossterm::event::KeyEvent) {
         if let InputMode::Import(ref mut buf) = self.input_mode {
+            match key.code {
+                KeyCode::Char(c) => buf.push(c),
+                KeyCode::Backspace => {
+                    buf.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    ///
+    /// Appends typed characters to the path buffer and removes the last
+    /// character on `Backspace`. All other keys are silently ignored.
+    fn apply_export_key(&mut self, key: &crossterm::event::KeyEvent) {
+        if let InputMode::Export(ref mut buf) = self.input_mode {
             match key.code {
                 KeyCode::Char(c) => buf.push(c),
                 KeyCode::Backspace => {
@@ -414,6 +538,18 @@ impl AppState {
     #[must_use]
     pub fn import_buffer(&self) -> Option<&str> {
         if let InputMode::Import(ref buf) = self.input_mode {
+            Some(buf.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// The current export path buffer, when in [`InputMode::Export`].
+    ///
+    /// Returns `None` when not in export mode.
+    #[must_use]
+    pub fn export_buffer(&self) -> Option<&str> {
+        if let InputMode::Export(ref buf) = self.input_mode {
             Some(buf.as_str())
         } else {
             None

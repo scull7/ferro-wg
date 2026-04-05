@@ -39,6 +39,10 @@ serde_json = "1"
 # Async runtime + networking
 tokio = { version = "1", features = ["net", "rt", "sync", "macros", "time", "io-util"] }
 
+# Stream utilities
+futures = "0.3"
+tokio-stream = "0.1"
+
 # TUN device
 tun = { version = "0.8", features = ["async"] }
 

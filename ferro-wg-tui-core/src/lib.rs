@@ -11,6 +11,7 @@
 
 pub mod action;
 pub mod app;
+pub mod benchmark;
 pub mod component;
 pub mod state;
 pub mod theme;

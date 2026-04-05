@@ -1,0 +1,45 @@
+{
+  "phase5": {
+    "status": "in_progress",
+    "commits": [
+      {
+        "id": "commit1",
+        "title": "IPC extension + benchmark types",
+        "status": "completed",
+        "features": [
+          "benchmark_result_extended",
+          "benchmark_progress_ipc",
+          "send_streaming_command",
+          "benchmark_pure_functions",
+          "benchmark_actions",
+          "input_mode_export",
+          "appstate_benchmark_fields"
+        ]
+      },
+      {
+        "id": "commit2",
+        "title": "CompareComponent live benchmark UI",
+        "status": "pending",
+        "features": []
+      },
+      {
+        "id": "commit3",
+        "title": "Background benchmark task",
+        "status": "pending",
+        "features": []
+      },
+      {
+        "id": "commit4",
+        "title": "Historical storage",
+        "status": "pending",
+        "features": []
+      },
+      {
+        "id": "commit5",
+        "title": "Export functionality",
+        "status": "pending",
+        "features": []
+      }
+    ]
+  }
+}
