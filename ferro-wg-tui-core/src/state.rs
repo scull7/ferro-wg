@@ -31,8 +31,11 @@ use crate::config_edit::{
 };
 use crate::theme::{Theme, ThemeKind};
 
-/// How long feedback messages are displayed before expiring.
-const FEEDBACK_DURATION: Duration = Duration::from_secs(3);
+/// How long toast messages are displayed before expiring.
+const TOAST_DURATION: Duration = Duration::from_secs(3);
+
+/// Maximum number of visible toasts.
+pub const MAX_VISIBLE_TOASTS: usize = 5;
 
 /// Which view mode is active on the Compare tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -139,39 +142,39 @@ pub struct ConfirmPending {
     pub action: ConfirmAction,
 }
 
-/// A transient feedback message shown in the status bar.
+/// A transient toast message shown in the bottom-right corner.
 #[derive(Debug, Clone)]
-pub struct Feedback {
+pub struct Toast {
     /// The message text.
     pub message: String,
     /// Whether this is an error (`true`) or success (`false`).
     pub is_error: bool,
-    /// When this feedback expires and should be hidden.
+    /// When this toast expires and should be hidden.
     pub expires_at: Instant,
 }
 
-impl Feedback {
-    /// Create a success feedback message.
+impl Toast {
+    /// Create a success toast message.
     #[must_use]
     pub fn success(message: String) -> Self {
         Self {
             message,
             is_error: false,
-            expires_at: Instant::now() + FEEDBACK_DURATION,
+            expires_at: Instant::now() + TOAST_DURATION,
         }
     }
 
-    /// Create an error feedback message.
+    /// Create an error toast message.
     #[must_use]
     pub fn error(message: String) -> Self {
         Self {
             message,
             is_error: true,
-            expires_at: Instant::now() + FEEDBACK_DURATION,
+            expires_at: Instant::now() + TOAST_DURATION,
         }
     }
 
-    /// Whether this feedback has expired.
+    /// Whether this toast has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
         Instant::now() >= self.expires_at
@@ -207,8 +210,8 @@ pub struct AppState {
     pub show_help: bool,
     /// Whether the daemon is currently reachable.
     pub daemon_connected: bool,
-    /// Transient feedback message (success or error) with expiry.
-    pub feedback: Option<Feedback>,
+    /// Transient toast messages (success or error) with expiry.
+    pub toasts: VecDeque<Toast>,
     /// Log display preferences forwarded from [`AppConfig`].
     pub log_display: LogDisplayConfig,
     /// Pending confirmation dialog, or `None` when no dialog is active.
@@ -290,7 +293,7 @@ impl AppState {
             theme: theme_kind.into_theme(),
             show_help: false,
             daemon_connected: false,
-            feedback: None,
+            toasts: VecDeque::new(),
             log_display: app_config.log_display,
             pending_confirm: None,
             benchmark_results: BenchmarkResultMap::new(),
@@ -341,7 +344,7 @@ impl AppState {
         match action {
             Action::Quit => self.running = false,
             Action::NextTab | Action::PrevTab | Action::SelectTab(_) => {
-                self.handle_tab_actions(action)
+                self.handle_tab_actions(action);
             }
             Action::EnterSearch
             | Action::ExitSearch
@@ -370,7 +373,7 @@ impl AppState {
             | Action::SubmitExport
             | Action::ExitExport => self.handle_export_actions(action),
             Action::RequestConfirm { .. } | Action::ConfirmYes | Action::ConfirmNo => {
-                self.handle_confirm_actions(action)
+                self.handle_confirm_actions(action);
             }
 
             Action::EnterConfigEdit { .. }
@@ -519,9 +522,15 @@ impl AppState {
             self.input_mode = InputMode::Normal;
         }
         match action {
-            Action::NextTab => self.active_tab = self.active_tab.next(),
-            Action::PrevTab => self.active_tab = self.active_tab.prev(),
-            Action::SelectTab(tab) => self.active_tab = *tab,
+            Action::NextTab => {
+                self.active_tab = self.active_tab.next();
+            }
+            Action::PrevTab => {
+                self.active_tab = self.active_tab.prev();
+            }
+            Action::SelectTab(tab) => {
+                self.active_tab = *tab;
+            }
             _ => {}
         }
     }
@@ -599,10 +608,10 @@ impl AppState {
     fn handle_feedback_actions(&mut self, action: &Action) {
         match action {
             Action::DaemonOk(msg) => {
-                self.feedback = Some(Feedback::success(msg.clone()));
+                self.push_toast(Toast::success(msg.clone()));
             }
             Action::DaemonError(msg) => {
-                self.feedback = Some(Feedback::error(msg.clone()));
+                self.push_toast(Toast::error(msg.clone()));
             }
             _ => {}
         }
@@ -642,7 +651,7 @@ impl AppState {
         match action {
             Action::StartBenchmark | Action::StartBenchmarkForBackend(_) => {
                 if self.benchmark_running {
-                    self.feedback = Some(Feedback::error("benchmark already running".to_owned()));
+                    self.push_toast(Toast::error("benchmark already running".to_owned()));
                 } else {
                     self.benchmark_running = true;
                     self.benchmark_results.clear();
@@ -932,10 +941,22 @@ impl AppState {
         }
     }
 
-    /// Clear expired feedback messages. Called on each tick.
-    pub fn clear_expired_feedback(&mut self) {
-        if self.feedback.as_ref().is_some_and(Feedback::is_expired) {
-            self.feedback = None;
+    /// Push a new toast, evicting the oldest if at capacity.
+    pub fn push_toast(&mut self, toast: Toast) {
+        self.toasts.push_back(toast);
+        if self.toasts.len() > MAX_VISIBLE_TOASTS {
+            self.toasts.pop_front();
+        }
+    }
+
+    /// Clear expired toasts from the front. Called on each tick.
+    pub fn clear_expired_toasts(&mut self) {
+        while let Some(t) = self.toasts.front() {
+            if t.is_expired() {
+                self.toasts.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -1111,36 +1132,105 @@ mod tests {
         let mut state = two_connection_state();
 
         state.dispatch(&Action::DaemonOk("tunnel up".into()));
-        assert!(state.feedback.is_some());
-        let fb = state.feedback.as_ref().unwrap();
-        assert!(!fb.is_error);
-        assert_eq!(fb.message, "tunnel up");
-        assert!(!fb.is_expired());
+        assert_eq!(state.toasts.len(), 1);
+        let toast = state.toasts.back().unwrap();
+        assert!(!toast.is_error);
+        assert_eq!(toast.message, "tunnel up");
+        assert!(!toast.is_expired());
 
         state.dispatch(&Action::DaemonError("not found".into()));
-        let fb = state.feedback.as_ref().unwrap();
-        assert!(fb.is_error);
-        assert_eq!(fb.message, "not found");
+        assert_eq!(state.toasts.len(), 2);
+        let toast = state.toasts.back().unwrap();
+        assert!(toast.is_error);
+        assert_eq!(toast.message, "not found");
     }
 
     #[test]
-    fn clear_expired_feedback_removes_old() {
+    fn clear_expired_toasts_removes_old() {
         let mut state = two_connection_state();
-        state.feedback = Some(Feedback {
+        state.toasts.push_back(Toast {
             message: "old".into(),
             is_error: false,
             expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         });
-        state.clear_expired_feedback();
-        assert!(state.feedback.is_none());
+        state.clear_expired_toasts();
+        assert!(state.toasts.is_empty());
     }
 
     #[test]
-    fn clear_expired_feedback_keeps_fresh() {
+    fn clear_expired_toasts_keeps_fresh() {
         let mut state = two_connection_state();
         state.dispatch(&Action::DaemonOk("fresh".into()));
-        state.clear_expired_feedback();
-        assert!(state.feedback.is_some());
+        state.clear_expired_toasts();
+        assert!(!state.toasts.is_empty());
+    }
+
+    #[test]
+    fn toast_success_constructor() {
+        let toast = Toast::success("msg".into());
+        assert_eq!(toast.message, "msg");
+        assert!(!toast.is_error);
+        assert!(!toast.is_expired());
+    }
+
+    #[test]
+    fn toast_error_constructor() {
+        let toast = Toast::error("err".into());
+        assert_eq!(toast.message, "err");
+        assert!(toast.is_error);
+        assert!(!toast.is_expired());
+    }
+
+    #[test]
+    fn push_toast_evicts_oldest_when_full() {
+        let mut state = two_connection_state();
+        for i in 0..6 {
+            state.push_toast(Toast::success(format!("msg{i}")));
+        }
+        assert_eq!(state.toasts.len(), 5);
+        assert_eq!(state.toasts.front().unwrap().message, "msg1");
+        assert_eq!(state.toasts.back().unwrap().message, "msg5");
+    }
+
+    #[test]
+    fn clear_expired_toasts_removes_only_front_expired() {
+        let mut state = two_connection_state();
+        let expired = Toast {
+            message: "expired".into(),
+            is_error: false,
+            expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+        };
+        let fresh = Toast::success("fresh".into());
+        state.toasts.push_back(expired.clone());
+        state.toasts.push_back(fresh.clone());
+        state.toasts.push_back(expired.clone());
+        state.clear_expired_toasts();
+        assert_eq!(state.toasts.len(), 2);
+        assert_eq!(state.toasts.front().unwrap().message, "fresh");
+    }
+
+    #[test]
+    fn dispatch_daemon_ok_pushes_success_toast() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::DaemonOk("msg".into()));
+        assert_eq!(state.toasts.back().unwrap().message, "msg");
+        assert!(!state.toasts.back().unwrap().is_error);
+    }
+
+    #[test]
+    fn dispatch_daemon_error_pushes_error_toast() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::DaemonError("err".into()));
+        assert_eq!(state.toasts.back().unwrap().message, "err");
+        assert!(state.toasts.back().unwrap().is_error);
+    }
+
+    #[test]
+    fn dispatch_twice_adds_two_toasts() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::DaemonOk("first".into()));
+        state.dispatch(&Action::DaemonOk("second".into()));
+        assert_eq!(state.toasts.len(), 2);
     }
 
     // ── New Phase 2 Step 1 tests ──────────────────────────────────────────────

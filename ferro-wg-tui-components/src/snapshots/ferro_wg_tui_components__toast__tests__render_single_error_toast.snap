@@ -1,0 +1,29 @@
+---
+source: ferro-wg-tui-components/src/toast.rs
+assertion_line: 134
+expression: terminal_to_string(&terminal)
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                        x connection failed

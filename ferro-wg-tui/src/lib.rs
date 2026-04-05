@@ -33,7 +33,7 @@ use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, ConfirmDialogComponent, ConnectionBarComponent,
     DiffPreviewComponent, LogsComponent, OverviewComponent, PeersComponent, StatusBarComponent,
-    StatusComponent, TabBarComponent,
+    StatusComponent, TabBarComponent, ToastComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
 use futures::StreamExt;
@@ -136,6 +136,8 @@ struct ComponentBundle {
     confirm_dialog: ConfirmDialogComponent,
     /// Modal overlay: diff preview (rendered on top of everything).
     diff_preview: DiffPreviewComponent,
+    /// Toast notifications in bottom-right corner.
+    toast: ToastComponent,
 }
 
 impl ComponentBundle {
@@ -154,6 +156,7 @@ impl ComponentBundle {
             connection_bar: ConnectionBarComponent::new(),
             confirm_dialog: ConfirmDialogComponent::new(),
             diff_preview: DiffPreviewComponent::new(),
+            toast: ToastComponent::new(),
         }
     }
 }
@@ -207,6 +210,7 @@ fn render_ui(
     bundle: &mut ComponentBundle,
     chunks: &[ratatui::layout::Rect],
     show_bar: bool,
+    area: ratatui::layout::Rect,
 ) -> Result<(), Box<dyn std::error::Error>> {
     terminal.draw(|frame| {
         bundle.tab_bar.render(frame, chunks[0], false, state);
@@ -217,6 +221,7 @@ fn render_ui(
         bundle.status_bar.render(frame, chunks[3], false, state);
         bundle.confirm_dialog.render(frame, chunks[2], false, state);
         bundle.diff_preview.render(frame, chunks[2], false, state); // topmost
+        bundle.toast.render(frame, area, false, state);
     })?;
     Ok(())
 }
@@ -466,12 +471,12 @@ async fn event_loop(
             &mut tasks,
             &benchmarks_path,
         );
-        state.clear_expired_feedback();
+        state.clear_expired_toasts();
 
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         let (chunks, show_bar) = compute_layout(area, state.connections.len());
-        render_ui(terminal, &state, &mut bundle, &chunks, show_bar)?;
+        render_ui(terminal, &state, &mut bundle, &chunks, show_bar, area)?;
 
         match events.next().await {
             Some(AppEvent::Key(key)) => {

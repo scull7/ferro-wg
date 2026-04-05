@@ -77,18 +77,6 @@ impl Component for StatusBarComponent {
 
 /// Build the status line content for the current app state.
 fn build_status_line<'a>(state: &'a AppState, theme: &ferro_wg_tui_core::Theme) -> Line<'a> {
-    if let Some(fb) = &state.feedback {
-        let (indicator, style) = if fb.is_error {
-            ("x ", Style::default().fg(theme.error))
-        } else {
-            ("* ", Style::default().fg(theme.success))
-        };
-        return Line::from(vec![
-            daemon_indicator(state, theme),
-            Span::styled(indicator, style),
-            Span::styled(&fb.message, style),
-        ]);
-    }
     match &state.input_mode {
         InputMode::Search => Line::from(vec![
             Span::styled(" /", Style::default().fg(theme.warning)),

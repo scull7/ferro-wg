@@ -1,0 +1,6 @@
+---
+source: ferro-wg-tui-components/src/toast.rs
+assertion_line: 105
+expression: terminal_to_string(&terminal)
+---
+

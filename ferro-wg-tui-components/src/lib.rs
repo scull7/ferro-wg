@@ -27,6 +27,7 @@ pub mod peers;
 pub mod status;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod toast;
 pub mod util;
 
 pub use compare::CompareComponent;
@@ -40,3 +41,4 @@ pub use peers::PeersComponent;
 pub use status::StatusComponent;
 pub use status_bar::StatusBarComponent;
 pub use tab_bar::TabBarComponent;
+pub use toast::ToastComponent;
