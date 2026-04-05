@@ -6,6 +6,7 @@
 //! implementations from [`ferro_wg_tui_components`].
 
 mod event;
+mod history;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,8 @@ use tokio::task::JoinSet;
 use ferro_wg_core::client;
 use ferro_wg_core::config::{AppConfig, toml as config_toml, wg_quick};
 use ferro_wg_core::error::BackendKind;
-use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
+use ferro_wg_core::ipc::{BenchmarkProgress, DaemonCommand, DaemonResponse, PeerStatus};
+use ferro_wg_core::stats::BenchmarkResult;
 use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_WIDTH};
 use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
 use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
@@ -34,6 +36,7 @@ use ferro_wg_tui_components::{
     TabBarComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
+use futures::StreamExt;
 use tracing::warn;
 
 use event::{AppEvent, EventHandler};
@@ -59,6 +62,44 @@ const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 =
 /// changes to the bar's prefix or indicator strings.
 const MIN_WIDTH_FOR_CONNECTION_BAR: u16 = MIN_USEFUL_WIDTH;
 
+/// UI-facing errors from TUI operations.
+///
+/// Dedicated error enum for the TUI layer, converting lower-level
+/// errors into user-displayable messages.
+#[derive(Debug, thiserror::Error)]
+pub enum TuiError {
+    /// Daemon client communication error.
+    #[error(transparent)]
+    DaemonClient(#[from] client::DaemonClientError),
+    /// Unknown benchmark backend specified.
+    #[error("unknown benchmark backend: {0}")]
+    UnknownBackend(String),
+    /// Stream closed unexpectedly during benchmark.
+    #[error("stream closed unexpectedly")]
+    StreamClosed,
+    /// Daemon returned an error response.
+    #[error("daemon error: {0}")]
+    DaemonResponse(String),
+    /// Could not locate ferro-wg executable.
+    #[error("could not find ferro-wg executable: {0}")]
+    ExecutableNotFound(std::io::Error),
+    /// Could not start daemon process.
+    #[error("could not start daemon: run 'sudo ferro-wg daemon --daemonize' ({0})")]
+    DaemonStartFailed(std::io::Error),
+    /// Config import failed.
+    #[error("config import failed: {0}")]
+    ConfigImportFailed(String),
+    /// Generic TUI error.
+    #[error("{0}")]
+    Generic(String),
+}
+
+impl From<&str> for TuiError {
+    fn from(s: &str) -> Self {
+        Self::Generic(s.to_string())
+    }
+}
+
 /// Messages sent from background daemon tasks to the event loop.
 enum DaemonMessage {
     /// Status poll returned peer statuses.
@@ -66,11 +107,15 @@ enum DaemonMessage {
     /// A command completed successfully.
     CommandOk(String),
     /// A command failed with an error message.
-    CommandError(String),
+    CommandError(TuiError),
     /// Daemon is unreachable.
     Unreachable,
     /// A wg-quick import succeeded; reload state from the new config.
     ReloadConfig(AppConfig, String),
+    /// Live progress update from a running benchmark.
+    BenchmarkProgress(BenchmarkProgress),
+    /// A benchmark run completed successfully.
+    BenchmarkComplete(BenchmarkResult),
 }
 
 /// All TUI components, grouped to reduce function parameter counts.
@@ -115,23 +160,39 @@ fn handle_daemon_messages(
     daemon_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
     state: &mut AppState,
     bundle: &mut ComponentBundle,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+    benchmarks_path: &Path,
 ) {
     while let Ok(msg) = daemon_rx.try_recv() {
         let actions: Vec<Action> = match msg {
-            DaemonMessage::ReloadConfig(config, ok_msg) => {
-                state.reload_from_config(config);
-                vec![Action::DaemonOk(ok_msg)]
+            DaemonMessage::ReloadConfig(ref config, ref ok_msg) => {
+                state.reload_from_config(config.clone());
+                vec![Action::DaemonOk(ok_msg.clone())]
             }
-            DaemonMessage::StatusUpdate(peers) => vec![Action::UpdatePeers(peers)],
-            DaemonMessage::CommandOk(msg) => vec![Action::DaemonOk(msg)],
-            DaemonMessage::CommandError(msg) => vec![Action::DaemonError(msg)],
+            DaemonMessage::StatusUpdate(ref peers) => vec![Action::UpdatePeers(peers.clone())],
+            DaemonMessage::CommandOk(ref msg) => vec![Action::DaemonOk(msg.clone())],
+            DaemonMessage::CommandError(ref err) => vec![Action::DaemonError(err.to_string())],
             DaemonMessage::Unreachable => vec![
                 Action::DaemonConnectivityChanged(false),
                 Action::DaemonError("daemon is not running".into()),
             ],
+            DaemonMessage::BenchmarkProgress(ref p) => {
+                vec![Action::BenchmarkProgressUpdate(p.clone())]
+            }
+            DaemonMessage::BenchmarkComplete(ref r) => vec![Action::BenchmarkComplete(r.clone())],
         };
         for action in &actions {
             dispatch_all(state, action, bundle);
+        }
+        // After dispatching BenchmarkComplete, persist the updated history.
+        if matches!(msg, DaemonMessage::BenchmarkComplete(_)) {
+            spawn_save_history_task(
+                benchmarks_path,
+                state.benchmark_history.clone(),
+                daemon_tx,
+                tasks,
+            );
         }
     }
 }
@@ -165,11 +226,15 @@ fn handle_key_event(
     daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
     config_path: &Path,
+    benchmarks_path: &Path,
 ) {
     let action = if state.pending_confirm.is_some() {
         // Confirmation dialog captures all keys; no other handler runs.
         bundle.confirm_dialog.handle_key(key, state)
-    } else if matches!(state.input_mode, InputMode::Search | InputMode::Import(_)) {
+    } else if matches!(
+        state.input_mode,
+        InputMode::Search | InputMode::Import(_) | InputMode::Export(_)
+    ) {
         // Text-input modes are handled exclusively by the status bar.
         bundle.status_bar.handle_key(key, state)
     } else {
@@ -202,16 +267,45 @@ fn handle_key_event(
         None
     };
 
+    // For SubmitExport: capture the path buffer *before* dispatch resets the
+    // input mode back to Normal (clearing the buffer from state).
+    let export_path = if matches!(action, Action::SubmitExport) {
+        state
+            .export_buffer()
+            .map(std::path::Path::new)
+            .map(std::path::Path::to_path_buf)
+    } else {
+        None
+    };
+
     dispatch_all(state, action, bundle);
-    maybe_spawn_command(action, daemon_tx, tasks, config_path);
+    maybe_spawn_command(
+        action,
+        state,
+        daemon_tx,
+        tasks,
+        config_path,
+        benchmarks_path,
+    );
 
     if let Some(ref follow) = follow_up {
         dispatch_all(state, follow, bundle);
-        maybe_spawn_command(follow, daemon_tx, tasks, config_path);
+        maybe_spawn_command(
+            follow,
+            state,
+            daemon_tx,
+            tasks,
+            config_path,
+            benchmarks_path,
+        );
     }
 
     if let Some(path) = import_path {
         spawn_import_task(path, config_path, daemon_tx, tasks);
+    }
+
+    if let Some(path) = export_path {
+        spawn_export_task(path, &state.benchmark_history.clone(), daemon_tx, tasks);
     }
 }
 
@@ -265,13 +359,13 @@ fn spawn_log_stream(tasks: &mut JoinSet<()>, state_ref: &AppState) {
 /// Convert a daemon client error into a [`DaemonMessage`].
 ///
 /// Centralizes the boundary between typed errors and UI-facing
-/// string messages. `NotRunning` maps to `Unreachable`; all other
+/// messages. `NotRunning` maps to `Unreachable`; all other
 /// errors are displayed as `CommandError`.
-fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
+fn error_to_message(err: client::DaemonClientError) -> DaemonMessage {
     if err.is_not_running() {
         DaemonMessage::Unreachable
     } else {
-        DaemonMessage::CommandError(err.to_string())
+        DaemonMessage::CommandError(err.into())
     }
 }
 
@@ -293,6 +387,7 @@ fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
 pub async fn run(
     app_config: AppConfig,
     config_path: PathBuf,
+    benchmarks_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
@@ -303,7 +398,7 @@ pub async fn run(
     terminal.clear()?;
 
     // Run the event loop, then restore terminal regardless of outcome.
-    let result = event_loop(&mut terminal, app_config, config_path).await;
+    let result = event_loop(&mut terminal, app_config, config_path, benchmarks_path).await;
 
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
@@ -317,6 +412,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app_config: AppConfig,
     config_path: PathBuf,
+    benchmarks_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new(app_config);
     let mut bundle = ComponentBundle::new();
@@ -325,10 +421,23 @@ async fn event_loop(
     let poll_in_flight = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
 
+    // Load benchmark history at startup.
+    match history::load_benchmark_history(&benchmarks_path).await {
+        Ok(history) => state.benchmark_history = history,
+        Err(e) => warn!("failed to load benchmark history: {e}"),
+    }
+
     spawn_log_stream(&mut tasks, &state);
 
     while state.running {
-        handle_daemon_messages(&mut daemon_rx, &mut state, &mut bundle);
+        handle_daemon_messages(
+            &mut daemon_rx,
+            &mut state,
+            &mut bundle,
+            &daemon_tx,
+            &mut tasks,
+            &benchmarks_path,
+        );
         state.clear_expired_feedback();
 
         let size = terminal.size()?;
@@ -345,6 +454,7 @@ async fn event_loop(
                     &daemon_tx,
                     &mut tasks,
                     &config_path,
+                    &benchmarks_path,
                 );
             }
             Some(AppEvent::Tick) => spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks),
@@ -452,7 +562,7 @@ fn spawn_status_poll(
     tasks.spawn(async move {
         let msg = match client::send_command(&DaemonCommand::Status).await {
             Ok(DaemonResponse::Status(peers)) => DaemonMessage::StatusUpdate(peers),
-            Err(e) => error_to_message(&e),
+            Err(e) => error_to_message(e),
             Ok(_) => {
                 in_flight.store(false, Ordering::SeqCst);
                 return;
@@ -490,9 +600,7 @@ fn spawn_daemon_start(
         let exe = match std::env::current_exe() {
             Ok(e) => e,
             Err(e) => {
-                let _ = tx.send(DaemonMessage::CommandError(format!(
-                    "Could not start daemon: run 'sudo ferro-wg daemon --daemonize' ({e})"
-                )));
+                let _ = tx.send(DaemonMessage::CommandError(TuiError::ExecutableNotFound(e)));
                 return;
             }
         };
@@ -509,9 +617,7 @@ fn spawn_daemon_start(
             .spawn();
 
         if let Err(e) = spawn_result {
-            let _ = tx.send(DaemonMessage::CommandError(format!(
-                "Could not start daemon: run 'sudo ferro-wg daemon --daemonize' ({e})"
-            )));
+            let _ = tx.send(DaemonMessage::CommandError(TuiError::DaemonStartFailed(e)));
             return;
         }
 
@@ -594,17 +700,180 @@ fn import_and_persist(import_path: &Path, config_path: &Path) -> DaemonMessage {
     // on the async executor. Use spawn_blocking if config files ever grow large.
     match try_import(import_path, config_path) {
         Ok((config, name)) => DaemonMessage::ReloadConfig(config, format!("Imported: {name}")),
-        Err(e) => DaemonMessage::CommandError(e),
+        Err(e) => DaemonMessage::CommandError(TuiError::ConfigImportFailed(e)),
     }
+}
+
+/// Spawn an async task that sends a `DaemonCommand::Benchmark` IPC request,
+/// relays periodic `BenchmarkProgress` updates, and sends `BenchmarkComplete`
+/// when the run finishes.
+fn spawn_benchmark_task(
+    connection_name: String,
+    duration_secs: u32,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let cmd = DaemonCommand::Benchmark {
+        connection_name,
+        duration_secs,
+    };
+    let daemon_tx = daemon_tx.clone();
+    tasks.spawn(async move {
+        let stream = match client::send_streaming_command(cmd).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = daemon_tx.send(error_to_message(e));
+                return;
+            }
+        };
+        tokio::pin!(stream);
+        while let Some(response) = stream.next().await {
+            match response {
+                DaemonResponse::BenchmarkProgress(p) => {
+                    let _ = daemon_tx.send(DaemonMessage::BenchmarkProgress(p));
+                }
+                DaemonResponse::BenchmarkResult(r) => {
+                    let _ = daemon_tx.send(DaemonMessage::BenchmarkComplete(r));
+                    return;
+                }
+                DaemonResponse::Error(e) => {
+                    let _ =
+                        daemon_tx.send(DaemonMessage::CommandError(TuiError::DaemonResponse(e)));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let _ = daemon_tx.send(DaemonMessage::CommandError(TuiError::StreamClosed));
+    });
+}
+
+/// Spawn an async task that serialises `runs` and writes the result to `path`.
+///
+/// Extension determines format: `.csv` → CSV; anything else → JSON.
+fn spawn_export_task(
+    path: PathBuf,
+    runs: &[ferro_wg_tui_core::benchmark::BenchmarkRun],
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    use ferro_wg_tui_core::benchmark::{BenchmarkError, benchmark_to_csv, benchmark_to_json};
+
+    let runs = runs.to_vec();
+    let daemon_tx = daemon_tx.clone();
+    tasks.spawn(async move {
+        let result: Result<(), BenchmarkError> = async {
+            let content = match path.extension().and_then(|e| e.to_str()) {
+                Some("csv") => benchmark_to_csv(&runs),
+                _ => benchmark_to_json(&runs)?,
+            };
+            tokio::fs::write(&path, content).await?;
+            Ok(())
+        }
+        .await;
+        let msg = match result {
+            Ok(()) => DaemonMessage::CommandOk(format!("exported to {}", path.display())),
+            Err(e) => DaemonMessage::CommandError(TuiError::Generic(e.to_string())),
+        };
+        let _ = daemon_tx.send(msg);
+    });
+}
+
+/// Spawn a background task to switch the benchmark backend for the active connection.
+fn spawn_switch_backend_task(
+    backend: String,
+    state: &AppState,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let bk = match backend.as_str() {
+        "boringtun" => BackendKind::Boringtun,
+        "neptun" => BackendKind::Neptun,
+        "gotatun" => BackendKind::Gotatun,
+        _ => {
+            let tx = tx.clone();
+            tasks.spawn(async move {
+                let _ = tx.send(DaemonMessage::CommandError(TuiError::UnknownBackend(
+                    backend,
+                )));
+            });
+            return;
+        }
+    };
+    let Some(connection) = state.active_connection() else {
+        let tx = tx.clone();
+        tasks.spawn(async move {
+            let _ = tx.send(DaemonMessage::CommandError(TuiError::DaemonResponse(
+                "no active connection to switch backend for".into(),
+            )));
+        });
+        return;
+    };
+    let cmd = DaemonCommand::SwitchBackend {
+        connection_name: connection.name.clone(),
+        backend: bk,
+    };
+    let description = format!("Switched backend: {backend}");
+    let tx = tx.clone();
+    tasks.spawn(async move {
+        let msg = match client::send_command(&cmd).await {
+            Ok(DaemonResponse::Ok) => DaemonMessage::CommandOk(description),
+            Ok(DaemonResponse::Error(e)) => {
+                DaemonMessage::CommandError(TuiError::DaemonResponse(e))
+            }
+            Err(e) => error_to_message(e),
+            _ => return,
+        };
+        let _ = tx.send(msg);
+    });
+}
+
+/// Spawn an async task that saves the benchmark history to disk.
+fn spawn_save_history_task(
+    benchmarks_path: &Path,
+    runs: Vec<ferro_wg_tui_core::benchmark::BenchmarkRun>,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let path = benchmarks_path.to_path_buf();
+    let daemon_tx = daemon_tx.clone();
+    tasks.spawn(async move {
+        let result: Result<(), ferro_wg_tui_core::benchmark::BenchmarkError> =
+            history::save_benchmark_history(&path, runs).await;
+        if let Err(e) = result {
+            let _ = daemon_tx.send(DaemonMessage::CommandError(TuiError::Generic(format!(
+                "failed to save benchmark history: {e}"
+            ))));
+        }
+    });
 }
 
 /// If the action is a peer command or daemon lifecycle command, spawn a background task.
 fn maybe_spawn_command(
     action: &Action,
+    state: &AppState,
     tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
     config_path: &Path,
+    _benchmarks_path: &Path,
 ) {
+    if matches!(
+        action,
+        Action::StartBenchmark | Action::StartBenchmarkForBackend(_)
+    ) {
+        if let Some(connection) = state.active_connection() {
+            spawn_benchmark_task(connection.name.clone(), 10, tx, tasks);
+        }
+        return;
+    }
+    if let Action::SwitchBenchmarkBackend(backend) = action {
+        spawn_switch_backend_task(backend.clone(), state, tx, tasks);
+        return;
+    }
+    if matches!(action, Action::StartDaemon) {
+        spawn_daemon_start(config_path, tx, tasks);
+        return;
+    }
     let (cmd, description) = match action {
         Action::ConnectPeer(name) => (
             DaemonCommand::Up {
@@ -640,10 +909,6 @@ fn maybe_spawn_command(
             "All connections down".to_owned(),
         ),
         Action::StopDaemon => (DaemonCommand::Shutdown, "Daemon stopped".to_owned()),
-        Action::StartDaemon => {
-            spawn_daemon_start(config_path, tx, tasks);
-            return;
-        }
         _ => return,
     };
 
@@ -651,14 +916,182 @@ fn maybe_spawn_command(
     tasks.spawn(async move {
         let msg = match client::send_command(&cmd).await {
             Ok(DaemonResponse::Ok) => DaemonMessage::CommandOk(description),
-            Ok(DaemonResponse::Error(e)) => DaemonMessage::CommandError(e),
+            Ok(DaemonResponse::Error(e)) => {
+                DaemonMessage::CommandError(TuiError::DaemonResponse(e))
+            }
             Ok(DaemonResponse::LogEntry(_)) => {
                 warn!("Received unexpected LogEntry response for command");
                 return;
             }
-            Err(e) => error_to_message(&e),
-            Ok(DaemonResponse::Status(_)) => return,
+            Err(e) => error_to_message(e),
+            Ok(
+                DaemonResponse::Status(_)
+                | DaemonResponse::BenchmarkProgress(_)
+                | DaemonResponse::BenchmarkResult(_),
+            ) => return,
         };
         let _ = tx.send(msg);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferro_wg_core::config::AppConfig;
+    use ferro_wg_core::stats::BenchmarkResult;
+    use ferro_wg_tui_core::AppState;
+    use ferro_wg_tui_core::benchmark::{BenchmarkResultMap, BenchmarkRun};
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::task::JoinSet;
+
+    // Note: spawn_benchmark_task requires mocking client::send_streaming_command,
+    // which is complex for unit tests. Integration tests cover the full flow.
+
+    #[tokio::test]
+    async fn test_maybe_spawn_command_switch_backend_unknown() {
+        let config_path = PathBuf::from("/tmp/config.toml");
+        let benchmarks_path = PathBuf::from("/tmp/benchmarks.json");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        let state = AppState::new(AppConfig::default());
+
+        maybe_spawn_command(
+            &Action::SwitchBenchmarkBackend("unknown".into()),
+            &state,
+            &tx,
+            &mut tasks,
+            &config_path,
+            &benchmarks_path,
+        );
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(
+            msg,
+            DaemonMessage::CommandError(TuiError::UnknownBackend(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_maybe_spawn_command_switch_backend_no_active_connection() {
+        let config_path = PathBuf::from("/tmp/config.toml");
+        let benchmarks_path = PathBuf::from("/tmp/benchmarks.json");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        let state = AppState::new(AppConfig::default());
+
+        // No active connection
+        maybe_spawn_command(
+            &Action::SwitchBenchmarkBackend("boringtun".into()),
+            &state,
+            &tx,
+            &mut tasks,
+            &config_path,
+            &benchmarks_path,
+        );
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(
+            msg,
+            DaemonMessage::CommandError(TuiError::DaemonResponse(_))
+        ));
+        if let DaemonMessage::CommandError(TuiError::DaemonResponse(s)) = msg {
+            assert!(s.contains("no active connection"));
+        }
+    }
+
+    fn make_test_run() -> BenchmarkRun {
+        let mut results = BenchmarkResultMap::new();
+        results.insert(
+            "boringtun".to_string(),
+            BenchmarkResult {
+                backend: "boringtun".to_string(),
+                packets_processed: 1000,
+                bytes_encapsulated: 100_000,
+                elapsed: Duration::from_secs(1),
+                throughput_bps: 800_000.0,
+                avg_latency: Duration::from_micros(100),
+                p50_latency: Duration::ZERO,
+                p95_latency: Duration::ZERO,
+                p99_latency: Duration::ZERO,
+            },
+        );
+        BenchmarkRun {
+            timestamp_ms: 1_234_567_890,
+            connection_name: "test_conn".to_string(),
+            results,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_export_task_csv_success() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_export.csv");
+        let runs = vec![make_test_run()];
+        let (tx, mut rx) = mpsc::unbounded_channel::<DaemonMessage>();
+        let mut tasks = JoinSet::new();
+
+        spawn_export_task(path.clone(), &runs, &tx, &mut tasks);
+
+        // Wait for the task to complete
+        tasks.join_next().await.unwrap().unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg, DaemonMessage::CommandOk(_)));
+
+        // Check file content
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("timestamp_ms,connection_name,backend"));
+        assert!(content.contains("1234567890"));
+        assert!(content.contains("test_conn"));
+        assert!(content.contains("boringtun"));
+        assert!(content.contains("800000"));
+
+        // Cleanup
+        tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_spawn_export_task_json_success() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_export.json");
+        let runs = vec![make_test_run()];
+        let (tx, mut rx) = mpsc::unbounded_channel::<DaemonMessage>();
+        let mut tasks = JoinSet::new();
+
+        spawn_export_task(path.clone(), &runs, &tx, &mut tasks);
+
+        // Wait for the task to complete
+        tasks.join_next().await.unwrap().unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg, DaemonMessage::CommandOk(_)));
+
+        // Check file content
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("\"timestamp_ms\":"));
+        assert!(content.contains("1234567890"));
+        assert!(content.contains("\"connection_name\": \"test_conn\""));
+        assert!(content.contains("\"boringtun\""));
+
+        // Cleanup
+        tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_spawn_export_task_io_failure() {
+        let path = PathBuf::from("/invalid/path/test.json");
+        let runs = vec![make_test_run()];
+        let (tx, mut rx) = mpsc::unbounded_channel::<DaemonMessage>();
+        let mut tasks = JoinSet::new();
+
+        spawn_export_task(path, &runs, &tx, &mut tasks);
+
+        // Wait for the task to complete
+        tasks.join_next().await.unwrap().unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg, DaemonMessage::CommandError(_)));
+    }
 }

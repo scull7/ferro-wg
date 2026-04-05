@@ -85,8 +85,16 @@ fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "tui")]
     {
         let app_config = load_app_config(config_path)?;
+        let benchmarks_path = config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("benchmarks.json");
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(ferro_wg_tui::run(app_config, config_path.to_path_buf()))?;
+        rt.block_on(ferro_wg_tui::run(
+            app_config,
+            config_path.to_path_buf(),
+            benchmarks_path,
+        ))?;
         Ok(())
     }
     #[cfg(not(feature = "tui"))]
@@ -111,8 +119,10 @@ fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         DaemonResponse::Error(e) => Err(e.into()),
-        DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
-        DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
+        DaemonResponse::Status(_)
+        | DaemonResponse::LogEntry(_)
+        | DaemonResponse::BenchmarkProgress(_)
+        | DaemonResponse::BenchmarkResult(_) => Err("unexpected response from daemon".into()),
     }
 }
 
@@ -130,8 +140,10 @@ fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         DaemonResponse::Error(e) => Err(e.into()),
-        DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
-        DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
+        DaemonResponse::Status(_)
+        | DaemonResponse::LogEntry(_)
+        | DaemonResponse::BenchmarkProgress(_)
+        | DaemonResponse::BenchmarkResult(_) => Err("unexpected response from daemon".into()),
     }
 }
 
@@ -187,7 +199,7 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                     if peer.stats.rx_bytes == 0 && peer.stats.tx_bytes > 0 {
                         println!(
                             "  \x1b[33mwarning: sending but not receiving — \
-                             server may not have this public key\x1b[0m"
+                              server may not have this public key\x1b[0m"
                         );
                     }
                     if let Some(hs) = peer.stats.last_handshake {
@@ -199,7 +211,9 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         DaemonResponse::Error(e) => Err(e.into()),
-        DaemonResponse::Ok => Err("unexpected response from daemon".into()),
+        DaemonResponse::Ok
+        | DaemonResponse::BenchmarkProgress(_)
+        | DaemonResponse::BenchmarkResult(_) => Err("unexpected response from daemon".into()),
         DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
     }
 }
@@ -304,8 +318,10 @@ fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         DaemonResponse::Error(e) => Err(e.into()),
-        DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
-        DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
+        DaemonResponse::Status(_)
+        | DaemonResponse::LogEntry(_)
+        | DaemonResponse::BenchmarkProgress(_)
+        | DaemonResponse::BenchmarkResult(_) => Err("unexpected response from daemon".into()),
     }
 }
 

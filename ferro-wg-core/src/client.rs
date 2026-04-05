@@ -7,6 +7,7 @@ use std::path::Path;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::ipc::{self, DaemonCommand, DaemonResponse, LogEntry, SOCKET_PATH};
 
@@ -162,6 +163,75 @@ pub async fn stream_logs_from(
     });
 
     Ok(rx)
+}
+
+/// Send a command to the daemon and return a stream of responses.
+///
+/// The stream yields `DaemonResponse` items until the connection closes or
+/// a terminal response (`BenchmarkResult`, `Error`) is received. The caller
+/// is responsible for terminating iteration on terminal variants.
+///
+/// # Errors
+///
+/// Returns an error if the socket cannot be reached or the initial command
+/// fails to serialize.
+pub async fn send_streaming_command(
+    cmd: DaemonCommand,
+) -> Result<impl tokio_stream::Stream<Item = DaemonResponse>, DaemonClientError> {
+    send_streaming_command_to(cmd, Path::new(SOCKET_PATH)).await
+}
+
+/// Send a command to the daemon at a specific socket path and return a stream of responses.
+///
+/// The stream yields `DaemonResponse` items until the connection closes.
+/// The caller is responsible for terminating iteration on terminal variants.
+///
+/// # Errors
+///
+/// Returns an error if the socket cannot be reached or the command fails to serialize.
+pub async fn send_streaming_command_to(
+    cmd: DaemonCommand,
+    socket_path: &Path,
+) -> Result<ReceiverStream<DaemonResponse>, DaemonClientError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                DaemonClientError::NotRunning
+            }
+            _ => DaemonClientError::Io(e),
+        })?;
+
+    let (reader, mut writer) = stream.into_split();
+
+    // Send command.
+    let json = ipc::encode_message(&cmd)?;
+    writer.write_all(json.as_bytes()).await?;
+    writer.flush().await?;
+    // Shut down write half so daemon knows we're done sending.
+    drop(writer);
+
+    let mut reader = BufReader::new(reader);
+    let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+    tokio::spawn(async move {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if let Ok(response) = ipc::decode_message::<DaemonResponse>(&line)
+                        && tx.send(response).await.is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(ReceiverStream::new(rx))
 }
 
 #[cfg(test)]

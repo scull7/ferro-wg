@@ -76,6 +76,8 @@ pub enum InputMode {
     Search,
     /// Typing an import file path. Inner `String` is the current buffer.
     Import(String),
+    /// Typing an export file path. Inner `String` is the current buffer.
+    Export(String),
 }
 
 #[cfg(test)]

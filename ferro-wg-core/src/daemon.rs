@@ -440,6 +440,10 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             )
         }
         DaemonCommand::Shutdown => DaemonResponse::Ok,
+        DaemonCommand::Benchmark { .. } => {
+            // TODO: Implement benchmark in later commit
+            DaemonResponse::Error("Benchmark not implemented yet".to_string())
+        }
         DaemonCommand::StreamLogs => {
             warn!("StreamLogs command received in handle_command, should be handled separately");
             DaemonResponse::Error("StreamLogs not supported here".to_string())

@@ -5,7 +5,8 @@
 //! then components receive the action again via `update()`.
 
 use crossterm::event::KeyEvent;
-use ferro_wg_core::ipc::PeerStatus;
+use ferro_wg_core::ipc::{BenchmarkProgress, PeerStatus};
+use ferro_wg_core::stats::BenchmarkResult;
 
 use crate::app::Tab;
 
@@ -94,6 +95,46 @@ pub enum Action {
     SubmitImport,
     /// Cancel import and return to normal mode.
     ExitImport,
+
+    // -- Benchmark actions --
+    /// Start a benchmark for the active connection (all backends sequentially).
+    ///
+    /// Blocked when `AppState::benchmark_running` is `true`; emits
+    /// `DaemonError("benchmark already running")` instead.
+    StartBenchmark,
+
+    /// Start a benchmark scoped to the named backend.
+    ///
+    /// Emitted when the user presses `Enter` on a specific backend row.
+    StartBenchmarkForBackend(String),
+
+    /// Forward a live progress update from the daemon to `AppState`.
+    BenchmarkProgressUpdate(BenchmarkProgress),
+
+    /// A benchmark run completed; store results and persist history.
+    BenchmarkComplete(BenchmarkResult),
+
+    /// Switch the active connection to the named backend.
+    ///
+    /// Emitted when the user presses `w` on a backend row.
+    /// Delegates to `DaemonCommand::SwitchBackend`.
+    SwitchBenchmarkBackend(String),
+
+    /// Toggle `AppState::compare_view` between `Live` and `Historical`.
+    ToggleCompareView,
+
+    // -- Export actions --
+    /// Enter export path input mode (opens the path prompt in the status bar).
+    EnterExport,
+
+    /// Forward a key event to the export path buffer.
+    ExportKey(KeyEvent),
+
+    /// Submit the current export path for processing.
+    SubmitExport,
+
+    /// Cancel export and return to `InputMode::Normal`.
+    ExitExport,
 
     // -- Confirmation dialog actions --
     /// Show a confirmation dialog before executing a destructive action.

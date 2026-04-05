@@ -37,6 +37,15 @@ pub struct BenchmarkResult {
     pub throughput_bps: f64,
     /// Average encapsulation latency per packet.
     pub avg_latency: Duration,
+    /// Median (50th percentile) encapsulation latency.
+    #[serde(default)]
+    pub p50_latency: Duration,
+    /// 95th-percentile encapsulation latency.
+    #[serde(default)]
+    pub p95_latency: Duration,
+    /// 99th-percentile encapsulation latency.
+    #[serde(default)]
+    pub p99_latency: Duration,
 }
 
 impl BenchmarkResult {
@@ -77,6 +86,7 @@ mod tests {
             elapsed: Duration::from_secs(1),
             throughput_bps: 0.0,
             avg_latency: Duration::from_micros(10),
+            ..BenchmarkResult::default()
         };
         result.compute_throughput();
         assert!((result.throughput_bps - 1_000_000.0).abs() < f64::EPSILON);
