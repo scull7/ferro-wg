@@ -137,19 +137,19 @@ mod imp {
         for line in ns_stdout.lines() {
             let line = line.trim();
             // Service name lines look like "(1) Wi-Fi"
-            if line.starts_with('(') {
-                if let Some(rest) = line.split_once(')') {
-                    last_service = Some(rest.1.trim().to_owned());
-                }
+            if line.starts_with('(')
+                && let Some(rest) = line.split_once(')')
+            {
+                last_service = Some(rest.1.trim().to_owned());
             }
             // Device lines look like "(Hardware Port: Wi-Fi, Device: en0)"
-            if line.contains("Device:") {
-                if let Some(dev) = line.split("Device:").nth(1) {
-                    let dev = dev.trim().trim_end_matches(')').trim();
-                    if dev == iface {
-                        service_name.clone_from(&last_service);
-                        break;
-                    }
+            if line.contains("Device:")
+                && let Some(dev) = line.split("Device:").nth(1)
+            {
+                let dev = dev.trim().trim_end_matches(')').trim();
+                if dev == iface {
+                    service_name.clone_from(&last_service);
+                    break;
                 }
             }
         }

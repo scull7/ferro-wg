@@ -86,7 +86,7 @@ fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     {
         let app_config = load_app_config(config_path)?;
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(ferro_wg_tui::run(app_config))?;
+        rt.block_on(ferro_wg_tui::run(app_config, config_path.to_path_buf()))?;
         Ok(())
     }
     #[cfg(not(feature = "tui"))]

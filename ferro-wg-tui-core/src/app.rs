@@ -67,13 +67,15 @@ impl Tab {
     }
 }
 
-/// Input mode — normal navigation or search filtering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Input mode — normal navigation, search filtering, or import path entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
     /// Arrow keys navigate, hotkeys active.
     Normal,
     /// Typing into the search bar.
     Search,
+    /// Typing an import file path. Inner `String` is the current buffer.
+    Import(String),
 }
 
 #[cfg(test)]

@@ -7,7 +7,8 @@ use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use ferro_wg_tui_core::{
-    Action, AppState, Component, ConnectionState, Tab, format_bytes, format_handshake_age,
+    Action, AppState, Component, ConfirmAction, ConnectionState, Tab, format_bytes,
+    format_handshake_age,
 };
 
 // Overview table column widths. Must sum to 100 for the percentage columns
@@ -55,15 +56,12 @@ impl Default for OverviewComponent {
 
 impl Component for OverviewComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
-        if state.connections.is_empty() {
-            return None;
-        }
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') if !state.connections.is_empty() => {
                 let next = (state.selected_connection + 1) % state.connections.len();
                 Some(Action::SelectConnection(next))
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') if !state.connections.is_empty() => {
                 let prev = state
                     .selected_connection
                     .checked_sub(1)
@@ -71,6 +69,19 @@ impl Component for OverviewComponent {
                 Some(Action::SelectConnection(prev))
             }
             KeyCode::Enter => Some(Action::SelectTab(Tab::Status)),
+            // Bulk connection control (daemon must be connected to be useful,
+            // but we don't gate here — feedback from the daemon handles errors).
+            KeyCode::Char('u') => Some(Action::ConnectAll),
+            KeyCode::Char('d') => Some(Action::RequestConfirm {
+                message: "Tear down all connections?".to_owned(),
+                action: ConfirmAction::DisconnectAll,
+            }),
+            // Daemon lifecycle: s starts (only when disconnected), S stops (only when connected).
+            KeyCode::Char('s') if !state.daemon_connected => Some(Action::StartDaemon),
+            KeyCode::Char('S') if state.daemon_connected => Some(Action::RequestConfirm {
+                message: "Stop the running daemon?".to_owned(),
+                action: ConfirmAction::StopDaemon,
+            }),
             _ => None,
         }
     }
@@ -109,8 +120,13 @@ impl Component for OverviewComponent {
 
                 let (status_str, status_style): (&'static str, Style) = match status_opt {
                     None => ("—", Style::default().fg(theme.muted)),
-                    Some(s) if s.state == ConnectionState::Connected => {
+                    Some(s)
+                        if s.state == ConnectionState::Connected && s.health_warning.is_none() =>
+                    {
                         ("● Connected", Style::default().fg(theme.success))
+                    }
+                    Some(s) if s.state == ConnectionState::Connected => {
+                        ("● Connected [!]", Style::default().fg(theme.warning))
                     }
                     Some(_) => ("○ Disconnected", Style::default().fg(theme.muted)),
                 };
@@ -232,6 +248,7 @@ mod tests {
             stats: TunnelStats::default(),
             endpoint: Some("1.2.3.4:51820".into()),
             interface: Some("utun4".into()),
+            health_warning: None,
         }
     }
 
@@ -325,6 +342,7 @@ mod tests {
             stats: TunnelStats::default(),
             endpoint: None,
             interface: None,
+            health_warning: None,
         });
         let content = render_overview(&state);
         assert!(
@@ -459,5 +477,132 @@ mod tests {
         });
         state.selected_connection = 99;
         render_overview(&state); // must not panic
+    }
+
+    // ── Commit 5: health indicators ──────────────────────────────────────────
+
+    #[test]
+    fn overview_health_warning_shows_exclamation() {
+        let mut state = three_connection_state();
+        state.connections[0].status = Some(ConnectionStatus {
+            state: ConnectionState::Connected,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats::default(),
+            endpoint: None,
+            interface: None,
+            health_warning: Some("stale handshake".into()),
+        });
+        let content = render_overview(&state);
+        assert!(
+            content.contains("[!]"),
+            "expected '[!]' health indicator in: {content:?}"
+        );
+    }
+
+    #[test]
+    fn overview_healthy_connected_shows_no_exclamation() {
+        let mut state = three_connection_state();
+        state.connections[0].status = Some(connected_status()); // health_warning: None
+        let content = render_overview(&state);
+        assert!(
+            !content.contains("[!]"),
+            "expected no '[!]' for healthy connection in: {content:?}"
+        );
+    }
+
+    // ── Commit 2: bulk connection keybindings ─────────────────────────────────
+
+    #[test]
+    fn overview_u_emits_connect_all() {
+        let mut comp = OverviewComponent::new();
+        let state = three_connection_state();
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('u')), &state),
+            Some(Action::ConnectAll),
+        );
+    }
+
+    #[test]
+    fn overview_d_emits_request_confirm_disconnect_all() {
+        use ferro_wg_tui_core::ConfirmAction;
+        let mut comp = OverviewComponent::new();
+        let state = three_connection_state();
+        let action = comp.handle_key(KeyEvent::from(KeyCode::Char('d')), &state);
+        assert!(
+            matches!(
+                action,
+                Some(Action::RequestConfirm {
+                    action: ConfirmAction::DisconnectAll,
+                    ..
+                })
+            ),
+            "expected RequestConfirm(DisconnectAll), got {action:?}"
+        );
+    }
+
+    #[test]
+    fn overview_u_works_on_empty_connections() {
+        let mut comp = OverviewComponent::new();
+        let state = AppState::new(AppConfig::default());
+        // ConnectAll should still be emitted even with no connections (daemon handles it).
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('u')), &state),
+            Some(Action::ConnectAll),
+        );
+    }
+
+    // ── Commit 3: daemon lifecycle keybindings ────────────────────────────────
+
+    #[test]
+    fn overview_s_emits_start_daemon_when_disconnected() {
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = false;
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('s')), &state),
+            Some(Action::StartDaemon),
+        );
+    }
+
+    #[test]
+    fn overview_s_ignored_when_connected() {
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = true;
+        // lowercase 's' should not produce StartDaemon when already connected
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('s')), &state),
+            None,
+        );
+    }
+
+    #[test]
+    fn overview_shift_s_emits_request_confirm_stop_daemon_when_connected() {
+        use ferro_wg_tui_core::ConfirmAction;
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = true;
+        let action = comp.handle_key(KeyEvent::from(KeyCode::Char('S')), &state);
+        assert!(
+            matches!(
+                action,
+                Some(Action::RequestConfirm {
+                    action: ConfirmAction::StopDaemon,
+                    ..
+                })
+            ),
+            "expected RequestConfirm(StopDaemon), got {action:?}"
+        );
+    }
+
+    #[test]
+    fn overview_shift_s_ignored_when_disconnected() {
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = false;
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('S')), &state),
+            None,
+        );
     }
 }
