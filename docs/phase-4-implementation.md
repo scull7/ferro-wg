@@ -184,11 +184,29 @@ belongs — in `dispatch`, not in the event router.
 On `ReloadConfig`, dispatch `Action::ReloadConfig(app_config)`, which rebuilds
 `state.connections` (same logic as `AppState::new`).
 
-### Daemon start
+### Daemon start — error messaging and recovery
 
 Spawn `tokio::process::Command::new("sudo")` with args `[current_exe, "daemon",
 "--daemonize", "-c", config_path]` (mirrors `cmd_daemon_background` in `main.rs:313`).
-If spawn fails, send `DaemonMessage::CommandError` with the manual command hint.
+
+**Error cases and UX responses:**
+
+| Scenario | Response |
+|----------|----------|
+| Spawn fails (sudo not found, permission denied) | `DaemonError("Could not start daemon: run 'sudo ferro-wg daemon --daemonize'")` |
+| Daemon already running (socket exists) | `DaemonError("Daemon is already running")` — detected by checking socket existence before spawn |
+| Daemon starts but socket not available within 3 s | `DaemonError("Daemon started but not yet reachable — try again in a moment")` |
+| Daemon starts successfully | `DaemonOk("Daemon started")` + connectivity poll picks it up within next tick |
+
+**Post-spawn socket poll:** after spawning, the background task attempts
+`client::send_command(&DaemonCommand::Status)` up to 6 times with 500 ms intervals
+(3 s total). On first success send `DaemonMessage::CommandOk`; on timeout send
+`DaemonMessage::CommandError` with the "not yet reachable" message. This gives the
+user immediate feedback without hanging the event loop.
+
+**Pre-spawn guard:** check if `/tmp/ferro-wg.sock` already exists and is connectable;
+if so, skip spawn and send `DaemonError("Daemon is already running")`. This prevents
+double-spawn races.
 
 ---
 
@@ -266,7 +284,9 @@ returns `None` from `handle_key` when `pending_confirm` is `None`.
 - `ferro-wg-tui-components/src/overview.rs` — `s`/`S` keybindings
 - `ferro-wg-tui-components/src/status_bar.rs` — `s start-daemon` / `S stop-daemon` hints
 
-**Tests:** `StopDaemon` dispatch triggers `RequestConfirm`; `StartDaemon` routing.
+**Tests:** `StopDaemon` dispatch triggers `RequestConfirm`; `StartDaemon` routing;
+socket-exists guard prevents double-spawn; post-spawn poll sends `CommandOk` on success
+and `CommandError` on timeout (mock the socket check with a test helper).
 
 ---
 
