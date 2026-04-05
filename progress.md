@@ -14,9 +14,21 @@
 - Refactored dispatch() to eliminate clippy::too_many_lines allow and improve stratification
 - All tests pass, clippy clean, no warnings
 
+### Commit 2: Toast queue (replaces single-slot Feedback) (COMPLETED)
+- Replaced AppState::feedback: Option<Feedback> with toasts: VecDeque<Toast>
+- Added Toast struct with success/error constructors, is_expired method
+- Added TOAST_DURATION (3s), MAX_VISIBLE_TOASTS (5) constants
+- Added push_toast (FIFO eviction) and clear_expired_toasts to AppState
+- Updated dispatch for DaemonOk/DaemonError to push_toast instead of setting feedback
+- Added ToastComponent: handle_key None, renders bottom-right with Clear underlay
+- Integrated ToastComponent into ComponentBundle and render_ui (above content)
+- Removed feedback rendering branch from StatusBar
+- Comprehensive unit tests for toast lifecycle, eviction, expiration, dispatch
+- Snapshot tests for ToastComponent at 80x24 with multiple toasts
+- All tests pass, clippy clean, no warnings
+
 ## Pending Phases
 
-### Commit 2: Toast queue (replaces single-slot Feedback)
 ### Commit 3: Help overlay component
 ### Commit 4: Mouse support
 ### Commit 5: Responsive layout (80×24 minimum)

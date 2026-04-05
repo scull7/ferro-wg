@@ -169,6 +169,33 @@
           "theme_snapshot_tests",
           "dispatch_refactor_no_clippy_allows"
         ]
+      },
+      {
+        "id": "commit2",
+        "title": "Toast queue (replaces single-slot Feedback)",
+        "status": "completed",
+        "features": [
+          "toast_struct",
+          "toast_success_error_constructors",
+          "toast_is_expired",
+          "toast_duration_constant",
+          "max_visible_toasts_constant",
+          "push_toast_eviction",
+          "clear_expired_toasts",
+          "dispatch_daemon_ok_toast",
+          "dispatch_daemon_error_toast",
+          "toast_component",
+          "toast_render_bottom_right",
+          "toast_clear_underlay",
+          "toast_component_bundle",
+          "toast_render_ui_integration",
+          "status_bar_feedback_removal",
+          "toast_lifecycle_tests",
+          "toast_eviction_tests",
+          "toast_expiration_tests",
+          "toast_dispatch_tests",
+          "toast_snapshot_tests"
+        ]
       }
     ]
   }
