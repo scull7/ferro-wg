@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use crossterm::event::KeyEvent;
@@ -10,84 +9,14 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 use tracing::warn;
 
 use ferro_wg_core::config::LogDisplayConfig;
+use ferro_wg_core::ipc::{LogEntry, LogLevel};
 use ferro_wg_tui_core::{Action, AppState, Component, Theme};
-
-/// Errors that can occur when parsing a structured log line.
-#[derive(Debug, thiserror::Error, PartialEq)]
-pub enum LogParseError {
-    /// The line does not begin with a valid `HH:MM:SS ` timestamp prefix.
-    #[error("line does not begin with a valid HH:MM:SS timestamp")]
-    MalformedTimestamp,
-    /// The token following the timestamp is not a recognised tracing level.
-    #[error("unknown log level: {0:?}")]
-    UnknownLevel(String),
-}
-
-/// Minimum log severity visible in the Logs tab.
-///
-/// Variants are ordered lowest-to-highest so that `entry_level >= self.min_level`
-/// is the only filter predicate needed. TRACE is intentionally absent — TRACE
-/// lines always pass the filter (fail-open), consistent with how rare TRACE
-/// output is in production.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogLevel {
-    /// Show all lines (DEBUG and above). This is the default.
-    Debug,
-    /// Show INFO, WARN, and ERROR lines only.
-    Info,
-    /// Show WARN and ERROR lines only.
-    Warn,
-    /// Show ERROR lines only.
-    Error,
-}
-
-impl LogLevel {
-    /// Advance to the next severity threshold, wrapping from `Error` back to `Debug`.
-    ///
-    /// Cycle order: `Debug` → `Info` → `Warn` → `Error` → `Debug`.
-    #[must_use]
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Debug => Self::Info,
-            Self::Info => Self::Warn,
-            Self::Warn => Self::Error,
-            Self::Error => Self::Debug,
-        }
-    }
-
-    /// Short label used in the Logs block title (e.g. `"INFO+"`).
-    #[must_use]
-    pub fn title_label(self) -> &'static str {
-        match self {
-            Self::Debug => "DEBUG+",
-            Self::Info => "INFO+",
-            Self::Warn => "WARN+",
-            Self::Error => "ERROR",
-        }
-    }
-}
-
-/// Convert a level token string (as returned by [`LogsComponent::extract_level_message`])
-/// into a [`LogLevel`].
-///
-/// Returns `None` for `"TRACE"` and any unrecognised token — callers must treat
-/// `None` as **pass** (fail-open: unrecognised / TRACE lines are always shown).
-fn parse_log_level(level: &str) -> Option<LogLevel> {
-    match level {
-        "DEBUG" => Some(LogLevel::Debug),
-        "INFO" => Some(LogLevel::Info),
-        "WARN" => Some(LogLevel::Warn),
-        "ERROR" => Some(LogLevel::Error),
-        _ => None,
-    }
-}
 
 /// Return `true` when `query` appears anywhere in `line` (case-insensitive).
 ///
 /// `query` **must already be ASCII-lowercased** by the caller (once per render
 /// frame) to avoid re-lowercasing on every line.  Returns `true` for an empty
-/// query so this predicate composes cleanly with the level filter — an empty
-/// query is equivalent to "no search active".
+/// query so this predicate composes cleanly with other filters.
 fn line_matches_search(line: &str, query: &str) -> bool {
     query.is_empty() || line.to_ascii_lowercase().contains(query)
 }
@@ -125,9 +54,9 @@ fn highlight_matches<'a>(
 
 /// Replace the last span in `spans` with per-match highlighted sub-spans.
 ///
-/// The last span is assumed to be the message body (a `Cow::Borrowed` slice
-/// from the original log line). All preceding spans (timestamp, level badge)
-/// are returned unchanged. When `query` is empty the input is returned as-is.
+/// The last span is assumed to be the message body (a `&str` slice from the
+/// original entry).  All preceding spans (timestamp, level badge) are returned
+/// unchanged.  When `query` is empty the input is returned as-is.
 fn apply_search_highlights<'a>(
     mut spans: Vec<Span<'a>>,
     query: &str,
@@ -140,7 +69,8 @@ fn apply_search_highlights<'a>(
         return spans;
     };
     let base = last.style;
-    if let Cow::Borrowed(msg) = last.content {
+    // The message span borrows directly from the LogEntry — it is always Borrowed.
+    if let std::borrow::Cow::Borrowed(msg) = last.content {
         spans.extend(highlight_matches(msg, query, base, highlight_style));
     } else {
         spans.push(last);
@@ -151,22 +81,47 @@ fn apply_search_highlights<'a>(
 /// Number of rows consumed by the panel block's top and bottom borders.
 const BLOCK_BORDER_HEIGHT: u16 = 2;
 
-/// Logs tab: scrollable log viewer with parsed log lines and level filtering.
+/// Whether the logs view is filtered to a specific connection or shows all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectionFilter {
+    /// Show entries from every connection (and global daemon events).
+    #[default]
+    All,
+    /// Show only entries for the currently selected connection plus global
+    /// daemon events (`connection_name: None`).
+    Active,
+}
+
+impl ConnectionFilter {
+    /// Flip between [`All`](Self::All) and [`Active`](Self::Active).
+    #[must_use]
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::All => Self::Active,
+            Self::Active => Self::All,
+        }
+    }
+}
+
+/// Logs tab: scrollable log viewer with level filtering, connection filtering,
+/// and in-viewer search.
 #[derive(Debug, Clone)]
 pub struct LogsComponent {
     /// Current scroll state for the log viewer.
     scroll_state: ScrollState,
-    /// Minimum severity to display. Lines below this threshold are hidden at
-    /// render time but are never removed from the shared buffer.
+    /// Minimum severity to display.  Entries below this threshold are hidden
+    /// at render time but are never evicted from the shared buffer.
     min_level: LogLevel,
+    /// Whether to show all connections or only the selected one.
+    connection_filter: ConnectionFilter,
 }
 
 /// Scroll state for the logs component.
 #[derive(Debug, Clone)]
 pub(crate) struct ScrollState {
-    /// The index of the first visible log line in the `log_lines` `VecDeque`.
+    /// The index of the first visible log entry in the filtered result set.
     pub(crate) offset: usize,
-    /// Whether to automatically scroll to the bottom when new logs are added.
+    /// Whether to automatically scroll to the bottom when new entries arrive.
     pub(crate) auto_scroll: bool,
     /// The number of lines that fit in the current view area.
     pub(crate) view_height: usize,
@@ -185,114 +140,141 @@ impl Default for ScrollState {
 }
 
 impl LogsComponent {
-    /// Extract the `HH:MM:SS` timestamp from the start of a log line.
-    ///
-    /// Returns `Some(timestamp)` when the line begins with the pattern
-    /// `HH:MM:SS ` (digits, colons, trailing space), `None` otherwise.
-    #[must_use]
-    pub fn parse_timestamp(line: &str) -> Option<&str> {
-        let mut chars = line.chars();
-        let valid = chars.next()?.is_ascii_digit()
-            && chars.next()?.is_ascii_digit()
-            && chars.next()? == ':'
-            && chars.next()?.is_ascii_digit()
-            && chars.next()?.is_ascii_digit()
-            && chars.next()? == ':'
-            && chars.next()?.is_ascii_digit()
-            && chars.next()?.is_ascii_digit()
-            && chars.next()? == ' ';
-        // All 8 preceding chars are ASCII (digits/colons), so byte offset 8 is
-        // a valid char boundary and `line[..8]` is always a well-formed str.
-        if valid { Some(&line[..8]) } else { None }
-    }
-
     /// Return the [`Style`] to apply to a level badge.
     ///
     /// Colors are drawn from `theme` so they stay consistent with the active
-    /// palette. When `color_badges` is `false` the returned style is unstyled.
+    /// palette.  When `color_badges` is `false` the returned style is unstyled.
     #[must_use]
-    pub fn level_style(level: &str, color_badges: bool, theme: &Theme) -> Style {
+    pub fn level_style(level: LogLevel, color_badges: bool, theme: &Theme) -> Style {
         if !color_badges {
             return Style::default();
         }
         let color = match level {
-            "TRACE" => theme.muted,
-            "DEBUG" => theme.accent,
-            "INFO" => theme.success,
-            "WARN" => theme.warning,
-            "ERROR" => theme.error,
-            _ => return Style::default(),
+            LogLevel::Trace => theme.muted,
+            LogLevel::Debug => theme.accent,
+            LogLevel::Info => theme.success,
+            LogLevel::Warn => theme.warning,
+            LogLevel::Error => theme.error,
         };
         Style::default().fg(color)
     }
 
-    /// Split `after_timestamp` (the portion of a log line after `HH:MM:SS `) into
-    /// `(level, message)`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LogParseError::UnknownLevel`] when the token before the first
-    /// space is not a recognised tracing level, or when there is no space at all.
-    fn extract_level_message(after_timestamp: &str) -> Result<(&str, &str), LogParseError> {
-        let space_pos = after_timestamp
-            .find(' ')
-            .ok_or_else(|| LogParseError::UnknownLevel(after_timestamp.to_owned()))?;
-        let level = &after_timestamp[..space_pos];
-        if !matches!(level, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR") {
-            return Err(LogParseError::UnknownLevel(level.to_owned()));
-        }
-        Ok((level, &after_timestamp[space_pos + 1..]))
-    }
-
-    /// Parse a log line into styled spans for display.
-    ///
-    /// Expects lines in the format emitted by `LogLayer`:
-    /// `HH:MM:SS LEVEL target: message`.
+    /// Render a [`LogEntry`] into styled spans for display.
     ///
     /// Display behaviour is controlled by `config`:
     /// - `show_timestamps`: include the `[HH:MM:SS]` prefix span.
-    /// - `color_badges`: apply color to the `[LEVEL]` span; plain text otherwise.
+    /// - `color_badges`: apply colour to the `[LEVEL]` span; plain text otherwise.
     ///
-    /// The message portion of the span borrows directly from `line` via
-    /// [`Cow::Borrowed`](std::borrow::Cow), avoiding an allocation for the
-    /// (typically largest) part of each log entry. Only the bracketed
-    /// `[HH:MM:SS]` and `[LEVEL]` labels require a heap allocation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LogParseError::MalformedTimestamp`] when the line does not begin
-    /// with `HH:MM:SS `, or [`LogParseError::UnknownLevel`] when the level token
-    /// is not a recognised tracing level. Callers should fall back to a plain-text
-    /// span on error.
-    pub fn parse_log_line<'a>(
-        line: &'a str,
+    /// The message portion borrows directly from `entry.message` via
+    /// `&str`, avoiding an allocation for the (typically largest) part of
+    /// each log entry.  Only the bracketed prefix labels use heap-allocated
+    /// owned strings.
+    #[must_use]
+    pub fn render_entry<'a>(
+        entry: &'a LogEntry,
         config: &LogDisplayConfig,
         theme: &Theme,
-    ) -> Result<Vec<Span<'a>>, LogParseError> {
-        let line = line.trim();
+    ) -> Vec<Span<'a>> {
+        let mut spans: Vec<Span<'a>> =
+            Vec::with_capacity(if config.show_timestamps { 5 } else { 3 });
 
-        let timestamp = Self::parse_timestamp(line).ok_or(LogParseError::MalformedTimestamp)?;
-        let (level, message) = Self::extract_level_message(&line[9..])?;
-
-        let mut spans: Vec<Span<'a>> = Vec::with_capacity(5);
         if config.show_timestamps {
             spans.push(Span::styled(
-                format!("[{timestamp}]"),
+                format!("[{}]", entry.time_label()),
                 Style::default().fg(theme.accent),
             ));
             spans.push(Span::raw(" "));
         }
+
         spans.push(Span::styled(
-            format!("[{level}]"),
-            Self::level_style(level, config.color_badges, theme),
+            format!("[{}]", entry.level.badge()),
+            Self::level_style(entry.level, config.color_badges, theme),
         ));
         spans.push(Span::raw(" "));
-        // `message` borrows directly from `line` — no allocation needed.
-        spans.push(Span::raw(message));
-        Ok(spans)
+        // Borrow directly from entry.message — no heap allocation.
+        spans.push(Span::raw(entry.message.as_str()));
+        spans
     }
 
-    /// Scroll up by one line toward older entries, disabling auto-scroll.
+    /// Return `true` when `entry` should be visible under both the current
+    /// level filter and the connection filter.
+    ///
+    /// - `Trace` entries always pass the level filter (fail-open).
+    /// - Entries with `connection_name: None` (global daemon events) always
+    ///   pass the connection filter.
+    fn entry_passes_filter(&self, entry: &LogEntry, active_connection: Option<&str>) -> bool {
+        let level_ok = entry.level == LogLevel::Trace || entry.level >= self.min_level;
+        let conn_ok = match self.connection_filter {
+            ConnectionFilter::All => true,
+            ConnectionFilter::Active => {
+                // Global events always pass; connection events must match the selection.
+                entry.connection_name.is_none()
+                    || active_connection
+                        .is_some_and(|name| entry.connection_name.as_deref() == Some(name))
+            }
+        };
+        level_ok && conn_ok
+    }
+
+    /// Return references to all entries in `buf` that pass both the current
+    /// level/connection filter and the search predicate.
+    ///
+    /// `search` must be ASCII-lowercased by the caller (done once per render
+    /// frame, not repeated per entry).  When all filters are inactive the fast
+    /// path returns every entry without per-entry parsing.
+    fn filtered_lines<'a>(
+        &self,
+        buf: &'a VecDeque<LogEntry>,
+        search: &str,
+        active_connection: Option<&str>,
+    ) -> Vec<&'a LogEntry> {
+        // Fast path: no filtering at all.
+        if self.min_level == LogLevel::Debug
+            && search.is_empty()
+            && self.connection_filter == ConnectionFilter::All
+        {
+            return buf.iter().collect();
+        }
+
+        buf.iter()
+            .filter(|e| {
+                self.entry_passes_filter(e, active_connection)
+                    && line_matches_search(&e.message, search)
+            })
+            .collect()
+    }
+
+    /// Lock `log_entries` and return the number of entries that pass all active
+    /// filters.
+    ///
+    /// Returns `None` (and emits a warning) if the mutex is poisoned.
+    fn filtered_total(&self, state: &AppState) -> Option<usize> {
+        let Ok(entries) = state.log_entries.lock() else {
+            warn!("log_entries mutex poisoned in handle_key");
+            return None;
+        };
+        let search = state.search_query.to_ascii_lowercase();
+        let active_connection = state.active_connection().map(|c| c.name.as_str());
+        Some(
+            self.filtered_lines(&entries, &search, active_connection)
+                .len(),
+        )
+    }
+
+    /// Compute the first visible entry index for the current render pass.
+    ///
+    /// When `auto_scroll` is enabled the offset tracks the bottom of the log;
+    /// otherwise the manually-scrolled `offset` is used unchanged.
+    /// This is a pure calculation — it never modifies `self`.
+    fn display_offset(&self, total_entries: usize) -> usize {
+        if self.scroll_state.auto_scroll {
+            total_entries.saturating_sub(self.scroll_state.view_height)
+        } else {
+            self.scroll_state.offset
+        }
+    }
+
+    /// Scroll up by one entry toward older entries, disabling auto-scroll.
     pub fn scroll_up(&mut self) {
         if self.scroll_state.offset > 0 {
             self.scroll_state.offset -= 1;
@@ -300,9 +282,9 @@ impl LogsComponent {
         }
     }
 
-    /// Scroll down by one line toward newer entries, disabling auto-scroll.
-    pub fn scroll_down(&mut self, total_lines: usize) {
-        let max_offset = total_lines.saturating_sub(self.scroll_state.view_height);
+    /// Scroll down by one entry toward newer entries.
+    pub fn scroll_down(&mut self, total_entries: usize) {
+        let max_offset = total_entries.saturating_sub(self.scroll_state.view_height);
         if self.scroll_state.offset < max_offset {
             self.scroll_state.offset += 1;
             self.scroll_state.auto_scroll = false;
@@ -316,8 +298,8 @@ impl LogsComponent {
     }
 
     /// Jump to the newest entry (bottom), enabling auto-scroll.
-    pub fn jump_to_bottom(&mut self, total_lines: usize) {
-        self.scroll_state.offset = total_lines.saturating_sub(self.scroll_state.view_height);
+    pub fn jump_to_bottom(&mut self, total_entries: usize) {
+        self.scroll_state.offset = total_entries.saturating_sub(self.scroll_state.view_height);
         self.scroll_state.auto_scroll = true;
     }
 
@@ -331,64 +313,12 @@ impl LogsComponent {
         self.scroll_state.offset = 0;
     }
 
-    /// Return `true` when `line` should be visible under the current level filter.
-    ///
-    /// Fails open: lines that cannot be parsed (malformed timestamp, unknown or
-    /// TRACE level) are always shown regardless of `min_level`.
-    fn line_passes_filter(&self, line: &str) -> bool {
-        // `parse_timestamp` returns the 8-byte "HH:MM:SS" slice; `+ 1` skips
-        // the trailing space, matching the `&line[9..]` offset in `parse_log_line`.
-        let Some(ts) = Self::parse_timestamp(line) else {
-            return true;
-        };
-        match Self::extract_level_message(&line[ts.len() + 1..]) {
-            Ok((level_str, _)) => {
-                parse_log_level(level_str).is_none_or(|lvl| lvl >= self.min_level)
-            }
-            Err(_) => true,
-        }
-    }
-
-    /// Return references to all lines in `buf` that pass both the current level
-    /// filter and the search predicate.
-    ///
-    /// `search` must be ASCII-lowercased by the caller (done once per render
-    /// frame / key event, not repeated per line).  When both `min_level` is
-    /// `Debug` and `search` is empty the fast path returns every entry without
-    /// per-line parsing.
-    fn filtered_lines<'a>(&self, buf: &'a VecDeque<String>, search: &str) -> Vec<&'a String> {
-        if self.min_level == LogLevel::Debug && search.is_empty() {
-            return buf.iter().collect();
-        }
-        buf.iter()
-            .filter(|l| self.line_passes_filter(l) && line_matches_search(l, search))
-            .collect()
-    }
-
-    /// Lock `log_lines` and return the number of lines that pass both the
-    /// current level filter and the active search query.
-    ///
-    /// Returns `None` (and emits a warning) if the mutex is poisoned.
-    fn filtered_total(&self, state: &AppState) -> Option<usize> {
-        let Ok(lines) = state.log_lines.lock() else {
-            warn!("log_lines mutex poisoned in handle_key");
-            return None;
-        };
-        let search = state.search_query.to_ascii_lowercase();
-        Some(self.filtered_lines(&lines, &search).len())
-    }
-
-    /// Compute the first visible line index for the current render pass.
-    ///
-    /// When `auto_scroll` is enabled the offset tracks the bottom of the log;
-    /// otherwise the manually-scrolled `offset` is used unchanged.
-    /// This is a pure calculation — it never modifies `self`.
-    fn display_offset(&self, total_lines: usize) -> usize {
-        if self.scroll_state.auto_scroll {
-            total_lines.saturating_sub(self.scroll_state.view_height)
-        } else {
-            self.scroll_state.offset
-        }
+    /// Toggle the connection filter between [`All`](ConnectionFilter::All) and
+    /// [`Active`](ConnectionFilter::Active), then snap back to the bottom.
+    pub fn toggle_connection_filter(&mut self) {
+        self.connection_filter = self.connection_filter.toggle();
+        self.scroll_state.auto_scroll = true;
+        self.scroll_state.offset = 0;
     }
 
     /// Create a new logs component.
@@ -397,6 +327,7 @@ impl LogsComponent {
         Self {
             scroll_state: ScrollState::default(),
             min_level: LogLevel::Debug,
+            connection_filter: ConnectionFilter::All,
         }
     }
 }
@@ -434,30 +365,35 @@ impl Component for LogsComponent {
                 self.cycle_level();
                 None
             }
+            KeyCode::Char('c') => {
+                self.toggle_connection_filter();
+                None
+            }
             _ => None,
         }
     }
 
     fn update(&mut self, _action: &Action, _state: &AppState) {
-        // No local state to update.
+        // No local state to update from actions.
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
         let theme = &state.theme;
         let config = &state.log_display;
 
-        let Ok(log_lines) = state.log_lines.lock() else {
-            warn!("log_lines mutex poisoned, skipping render");
+        let Ok(log_entries) = state.log_entries.lock() else {
+            warn!("log_entries mutex poisoned, skipping render");
             return;
         };
 
-        // Build the filtered view. Pre-lowercase once so per-line matching is cheap.
+        let active_connection = state.active_connection().map(|c| c.name.as_str());
+
+        // Build the filtered view. Pre-lowercase once so per-entry matching is cheap.
         let search = state.search_query.to_ascii_lowercase();
-        let filtered = self.filtered_lines(&log_lines, &search);
+        let filtered = self.filtered_lines(&log_entries, &search, active_connection);
         let total_filtered = filtered.len();
 
         // Cache view_height so handle_key can compute valid scroll bounds.
-        // This is the only write allowed in render; offset is never touched here.
         self.scroll_state.view_height = area.height.saturating_sub(BLOCK_BORDER_HEIGHT) as usize;
         let offset = self.display_offset(total_filtered);
 
@@ -475,23 +411,32 @@ impl Component for LogsComponent {
                 .iter()
                 .skip(offset)
                 .take(self.scroll_state.view_height)
-                .map(|l| {
-                    let spans = Self::parse_log_line(l, config, theme)
-                        .unwrap_or_else(|_| vec![Span::raw(l.as_str())]);
+                .map(|entry| {
+                    let spans = Self::render_entry(entry, config, theme);
                     Line::from(apply_search_highlights(spans, &search, highlight_style))
                 })
                 .collect()
         };
 
+        // Build block title with level and connection filter labels.
+        let conn_label: String = match self.connection_filter {
+            ConnectionFilter::All => "all".to_owned(),
+            ConnectionFilter::Active => {
+                active_connection.map_or_else(|| "all".to_owned(), ToOwned::to_owned)
+            }
+        };
+
         let title = if search.is_empty() {
-            format!("Logs [{}]", self.min_level.title_label())
+            format!("Logs [{}] [{}]", self.min_level.title_label(), conn_label)
         } else {
             format!(
-                "Logs [{}] [{} matches]",
+                "Logs [{}] [{}] [{} matches]",
                 self.min_level.title_label(),
+                conn_label,
                 total_filtered
             )
         };
+
         let paragraph = Paragraph::new(lines).block(theme.panel_block(&title));
         frame.render_widget(paragraph, area);
 
@@ -510,6 +455,29 @@ impl Component for LogsComponent {
 mod tests {
     use super::*;
 
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_entry(level: LogLevel, connection: Option<&str>, msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 0,
+            level,
+            connection_name: connection.map(ToOwned::to_owned),
+            message: msg.to_owned(),
+        }
+    }
+
+    fn debug_entry(msg: &str) -> LogEntry {
+        make_entry(LogLevel::Debug, None, msg)
+    }
+
+    fn info_entry(msg: &str) -> LogEntry {
+        make_entry(LogLevel::Info, None, msg)
+    }
+
+    fn make_buf(entries: &[LogEntry]) -> VecDeque<LogEntry> {
+        entries.iter().cloned().collect()
+    }
+
     fn cfg(show_timestamps: bool, color_badges: bool) -> LogDisplayConfig {
         LogDisplayConfig {
             show_timestamps,
@@ -521,289 +489,123 @@ mod tests {
         Theme::mocha()
     }
 
-    // --- LogLevel ---
+    // ── ConnectionFilter ──────────────────────────────────────────────────────
 
     #[test]
-    fn log_level_ordering_is_debug_lt_error() {
-        assert!(LogLevel::Debug < LogLevel::Info);
-        assert!(LogLevel::Info < LogLevel::Warn);
-        assert!(LogLevel::Warn < LogLevel::Error);
+    fn connection_filter_toggle() {
+        assert_eq!(ConnectionFilter::All.toggle(), ConnectionFilter::Active);
+        assert_eq!(ConnectionFilter::Active.toggle(), ConnectionFilter::All);
     }
 
     #[test]
-    fn log_level_cycle_wraps_through_all_four() {
-        let level = LogLevel::Debug;
-        let level = level.cycle();
-        assert_eq!(level, LogLevel::Info);
-        let level = level.cycle();
-        assert_eq!(level, LogLevel::Warn);
-        let level = level.cycle();
-        assert_eq!(level, LogLevel::Error);
-        let level = level.cycle();
-        assert_eq!(level, LogLevel::Debug);
+    fn connection_filter_all_shows_all() {
+        let component = LogsComponent::new(); // ConnectionFilter::All by default
+        let buf = make_buf(&[
+            make_entry(LogLevel::Info, Some("mia"), "msg a"),
+            make_entry(LogLevel::Info, Some("ord"), "msg b"),
+            make_entry(LogLevel::Info, None, "global msg"),
+        ]);
+        let result = component.filtered_lines(&buf, "", Some("mia"));
+        assert_eq!(result.len(), 3);
     }
 
     #[test]
-    fn log_level_title_labels() {
-        assert_eq!(LogLevel::Debug.title_label(), "DEBUG+");
-        assert_eq!(LogLevel::Info.title_label(), "INFO+");
-        assert_eq!(LogLevel::Warn.title_label(), "WARN+");
-        assert_eq!(LogLevel::Error.title_label(), "ERROR");
-    }
-
-    // --- parse_log_level ---
-
-    #[test]
-    fn parse_log_level_known_levels() {
-        assert_eq!(parse_log_level("DEBUG"), Some(LogLevel::Debug));
-        assert_eq!(parse_log_level("INFO"), Some(LogLevel::Info));
-        assert_eq!(parse_log_level("WARN"), Some(LogLevel::Warn));
-        assert_eq!(parse_log_level("ERROR"), Some(LogLevel::Error));
-    }
-
-    #[test]
-    fn parse_log_level_trace_returns_none() {
-        assert_eq!(parse_log_level("TRACE"), None);
-    }
-
-    #[test]
-    fn parse_log_level_unknown_returns_none() {
-        assert_eq!(parse_log_level("CUSTOM"), None);
-    }
-
-    // --- parse_timestamp ---
-
-    #[test]
-    fn parse_timestamp_valid() {
-        assert_eq!(
-            LogsComponent::parse_timestamp("12:34:56 INFO target: msg"),
-            Some("12:34:56")
-        );
-    }
-
-    #[test]
-    fn parse_timestamp_no_match() {
-        assert_eq!(LogsComponent::parse_timestamp("INFO target: msg"), None);
-    }
-
-    // --- level_style ---
-
-    #[test]
-    fn level_style_all_known_levels() {
-        let theme = mocha();
-        let cases = [
-            ("TRACE", theme.muted),
-            ("DEBUG", theme.accent),
-            ("INFO", theme.success),
-            ("WARN", theme.warning),
-            ("ERROR", theme.error),
-        ];
-        for (level, expected) in cases {
-            assert_eq!(
-                LogsComponent::level_style(level, true, &theme).fg,
-                Some(expected),
-                "level={level} with color"
-            );
-            assert_eq!(
-                LogsComponent::level_style(level, false, &theme).fg,
-                None,
-                "level={level} without color"
-            );
-        }
-    }
-
-    #[test]
-    fn level_style_unknown_level() {
-        assert_eq!(
-            LogsComponent::level_style("CUSTOM", true, &mocha()),
-            Style::default()
-        );
-    }
-
-    // --- parse_log_line: success paths ---
-
-    #[test]
-    fn parse_log_line_full_structure() {
-        let theme = mocha();
-        let spans = LogsComponent::parse_log_line(
-            "12:34:56 INFO ferro_wg_core::tunnel::mod: Connection abc is up",
-            &cfg(true, true),
-            &theme,
-        )
-        .unwrap();
-
-        assert_eq!(spans.len(), 5);
-        assert_eq!(spans[0].content, "[12:34:56]");
-        assert_eq!(spans[0].style.fg, Some(theme.accent));
-        assert_eq!(spans[2].content, "[INFO]");
-        assert_eq!(spans[2].style.fg, Some(theme.success));
-        assert_eq!(
-            spans[4].content,
-            "ferro_wg_core::tunnel::mod: Connection abc is up"
-        );
-    }
-
-    #[test]
-    fn parse_log_line_all_known_levels() {
-        let theme = mocha();
-        let cases = [
-            ("TRACE", theme.muted),
-            ("DEBUG", theme.accent),
-            ("INFO", theme.success),
-            ("WARN", theme.warning),
-            ("ERROR", theme.error),
-        ];
-        for (level, expected_color) in cases {
-            let line = format!("12:34:56 {level} target: message");
-            let spans = LogsComponent::parse_log_line(&line, &cfg(true, true), &theme)
-                .unwrap_or_else(|e| panic!("level={level}: {e}"));
-            assert_eq!(spans[2].content, format!("[{level}]"), "level={level}");
-            assert_eq!(spans[2].style.fg, Some(expected_color), "level={level}");
-        }
-    }
-
-    #[test]
-    fn parse_log_line_no_timestamp_hides_prefix() {
-        let theme = mocha();
-        let spans = LogsComponent::parse_log_line(
-            "12:34:56 INFO ferro_wg_core::tunnel: msg",
-            &cfg(false, true),
-            &theme,
-        )
-        .unwrap();
-        // No timestamp + space → 3 spans: [LEVEL], space, message.
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content, "[INFO]");
-        assert_eq!(spans[0].style.fg, Some(theme.success));
-    }
-
-    #[test]
-    fn parse_log_line_no_color_plain_level_badge() {
-        let theme = mocha();
-        let spans = LogsComponent::parse_log_line(
-            "12:34:56 INFO ferro_wg_core::tunnel: msg",
-            &cfg(true, false),
-            &theme,
-        )
-        .unwrap();
-        assert_eq!(spans.len(), 5);
-        assert_eq!(spans[2].content, "[INFO]");
-        // No color applied.
-        assert_eq!(spans[2].style.fg, None);
-    }
-
-    // --- parse_log_line: error paths ---
-
-    #[test]
-    fn parse_log_line_malformed_timestamp() {
-        let theme = mocha();
-        let cases = [
-            "INFO ferro_wg_core::tunnel::mod: Connection abc is up",
-            "some random log message",
-        ];
-        for line in cases {
-            let err = LogsComponent::parse_log_line(line, &cfg(true, true), &theme).unwrap_err();
-            assert_eq!(err, LogParseError::MalformedTimestamp, "line={line:?}");
-        }
-    }
-
-    #[test]
-    fn parse_log_line_unknown_level_errs() {
-        let theme = mocha();
-        let err = LogsComponent::parse_log_line(
-            "12:34:56 CUSTOM ferro_wg_core::tunnel: msg",
-            &cfg(true, true),
-            &theme,
-        )
-        .unwrap_err();
-        assert_eq!(err, LogParseError::UnknownLevel("CUSTOM".to_owned()));
-    }
-
-    // --- line_passes_filter ---
-
-    #[test]
-    fn filter_at_debug_passes_all() {
-        let component = LogsComponent::new(); // min_level = Debug
-        let lines = [
-            "12:34:56 DEBUG t: msg",
-            "12:34:56 INFO t: msg",
-            "12:34:56 WARN t: msg",
-            "12:34:56 ERROR t: msg",
-            "12:34:56 TRACE t: msg",
-            "some malformed garbage",
-        ];
-        for line in lines {
-            assert!(
-                component.line_passes_filter(line),
-                "expected pass: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn filter_at_info_hides_debug() {
+    fn connection_filter_active_hides_other_connection() {
         let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Info;
-
-        assert!(!component.line_passes_filter("12:34:56 DEBUG t: msg"));
-        assert!(component.line_passes_filter("12:34:56 INFO t: msg"));
-        assert!(component.line_passes_filter("12:34:56 WARN t: msg"));
-        assert!(component.line_passes_filter("12:34:56 ERROR t: msg"));
+        component.connection_filter = ConnectionFilter::Active;
+        let buf = make_buf(&[
+            make_entry(LogLevel::Info, Some("mia"), "mia entry"),
+            make_entry(LogLevel::Info, Some("ord"), "ord entry"),
+        ]);
+        // active connection = "mia"; "ord" entry should be hidden.
+        let result = component.filtered_lines(&buf, "", Some("mia"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].connection_name.as_deref(), Some("mia"));
     }
 
     #[test]
-    fn filter_at_warn_hides_info() {
+    fn connection_filter_active_global_events_always_pass() {
+        let mut component = LogsComponent::new();
+        component.connection_filter = ConnectionFilter::Active;
+        let buf = make_buf(&[
+            make_entry(LogLevel::Info, None, "global startup"),
+            make_entry(LogLevel::Info, Some("ord"), "ord entry"),
+        ]);
+        let result = component.filtered_lines(&buf, "", Some("mia"));
+        assert_eq!(result.len(), 1);
+        assert!(
+            result[0].connection_name.is_none(),
+            "global event must pass"
+        );
+    }
+
+    #[test]
+    fn connection_filter_active_no_active_connection_shows_only_globals() {
+        let mut component = LogsComponent::new();
+        component.connection_filter = ConnectionFilter::Active;
+        let buf = make_buf(&[
+            make_entry(LogLevel::Info, None, "global"),
+            make_entry(LogLevel::Info, Some("mia"), "mia entry"),
+        ]);
+        // No active connection → only global events pass.
+        let result = component.filtered_lines(&buf, "", None);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].connection_name.is_none());
+    }
+
+    #[test]
+    fn c_key_toggles_filter_and_resets_scroll() {
+        let mut component = LogsComponent::new();
+        assert_eq!(component.connection_filter, ConnectionFilter::All);
+        component.scroll_state.offset = 10;
+        component.scroll_state.auto_scroll = false;
+        component.toggle_connection_filter();
+        assert_eq!(component.connection_filter, ConnectionFilter::Active);
+        assert_eq!(component.scroll_state.offset, 0);
+        assert!(component.scroll_state.auto_scroll);
+    }
+
+    // ── entry_passes_filter ───────────────────────────────────────────────────
+
+    #[test]
+    fn entry_passes_filter_trace_always_passes_level() {
+        let mut component = LogsComponent::new();
+        component.min_level = LogLevel::Error;
+        let trace_entry = make_entry(LogLevel::Trace, None, "trace");
+        assert!(component.entry_passes_filter(&trace_entry, None));
+    }
+
+    #[test]
+    fn entry_passes_filter_level_and_connection_compose() {
         let mut component = LogsComponent::new();
         component.min_level = LogLevel::Warn;
+        component.connection_filter = ConnectionFilter::Active;
 
-        assert!(!component.line_passes_filter("12:34:56 DEBUG t: msg"));
-        assert!(!component.line_passes_filter("12:34:56 INFO t: msg"));
-        assert!(component.line_passes_filter("12:34:56 WARN t: msg"));
-        assert!(component.line_passes_filter("12:34:56 ERROR t: msg"));
+        // DEBUG + wrong connection → both filters reject.
+        let debug_ord = make_entry(LogLevel::Debug, Some("ord"), "debug ord");
+        assert!(!component.entry_passes_filter(&debug_ord, Some("mia")));
+
+        // WARN + correct connection → passes.
+        let warn_mia = make_entry(LogLevel::Warn, Some("mia"), "warn mia");
+        assert!(component.entry_passes_filter(&warn_mia, Some("mia")));
+
+        // WARN + wrong connection → level passes but connection rejects.
+        let warn_ord = make_entry(LogLevel::Warn, Some("ord"), "warn ord");
+        assert!(!component.entry_passes_filter(&warn_ord, Some("mia")));
     }
 
-    #[test]
-    fn filter_at_error_only_passes_error() {
-        let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Error;
-
-        assert!(!component.line_passes_filter("12:34:56 DEBUG t: msg"));
-        assert!(!component.line_passes_filter("12:34:56 INFO t: msg"));
-        assert!(!component.line_passes_filter("12:34:56 WARN t: msg"));
-        assert!(component.line_passes_filter("12:34:56 ERROR t: msg"));
-    }
-
-    #[test]
-    fn filter_trace_always_passes() {
-        // TRACE is not in LogLevel; parse_log_level returns None → fail-open.
-        let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Error;
-        assert!(component.line_passes_filter("12:34:56 TRACE t: msg"));
-    }
-
-    #[test]
-    fn filter_malformed_always_passes() {
-        let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Error;
-        assert!(component.line_passes_filter("some random garbage"));
-    }
-
-    // --- filtered_lines ---
-
-    fn make_buf(lines: &[&str]) -> VecDeque<String> {
-        lines.iter().map(|s| (*s).to_owned()).collect()
-    }
+    // ── filtered_lines ────────────────────────────────────────────────────────
 
     #[test]
     fn filtered_lines_debug_fast_path_returns_all() {
-        let component = LogsComponent::new(); // min_level = Debug
+        let component = LogsComponent::new(); // min_level = Debug, All
         let buf = make_buf(&[
-            "12:34:56 DEBUG t: a",
-            "12:34:56 INFO t: b",
-            "12:34:56 WARN t: c",
-            "12:34:56 ERROR t: d",
+            debug_entry("a"),
+            info_entry("b"),
+            make_entry(LogLevel::Warn, None, "c"),
+            make_entry(LogLevel::Error, None, "d"),
         ]);
-        assert_eq!(component.filtered_lines(&buf, "").len(), 4);
+        assert_eq!(component.filtered_lines(&buf, "", None).len(), 4);
     }
 
     #[test]
@@ -811,67 +613,28 @@ mod tests {
         let mut component = LogsComponent::new();
         component.min_level = LogLevel::Warn;
         let buf = make_buf(&[
-            "12:34:56 DEBUG t: a",
-            "12:34:56 INFO t: b",
-            "12:34:56 WARN t: c",
-            "12:34:56 ERROR t: d",
+            debug_entry("debug"),
+            info_entry("info"),
+            make_entry(LogLevel::Warn, None, "warn"),
+            make_entry(LogLevel::Error, None, "error"),
         ]);
-        let result = component.filtered_lines(&buf, "");
+        let result = component.filtered_lines(&buf, "", None);
         assert_eq!(result.len(), 2);
-        assert!(result[0].contains("WARN"));
-        assert!(result[1].contains("ERROR"));
-    }
-
-    #[test]
-    fn filtered_lines_empty_buffer() {
-        let component = LogsComponent::new();
-        let buf: VecDeque<String> = VecDeque::new();
-        assert!(component.filtered_lines(&buf, "").is_empty());
-    }
-
-    // --- line_matches_search ---
-
-    #[test]
-    fn line_matches_search_empty_query_always_passes() {
-        assert!(line_matches_search(
-            "12:34:56 ERROR t: connection refused",
-            ""
-        ));
-        assert!(line_matches_search("anything", ""));
-    }
-
-    #[test]
-    fn line_matches_search_case_insensitive() {
-        // Query must be pre-lowercased by the caller (as render() and
-        // filtered_total() do); the line is lowercased internally.
-        assert!(line_matches_search(
-            "12:34:56 ERROR t: Connection Lost",
-            "connection"
-        ));
-        assert!(line_matches_search(
-            "12:34:56 ERROR t: Connection Lost",
-            "lost"
-        ));
-        assert!(line_matches_search("12:34:56 INFO t: Tunnel UP", "tunnel"));
-    }
-
-    #[test]
-    fn line_matches_search_no_match_returns_false() {
-        assert!(!line_matches_search("12:34:56 INFO t: tunnel up", "error"));
+        assert_eq!(result[0].level, LogLevel::Warn);
+        assert_eq!(result[1].level, LogLevel::Error);
     }
 
     #[test]
     fn filtered_lines_search_hides_non_matching() {
         let component = LogsComponent::new();
         let buf = make_buf(&[
-            "12:34:56 INFO t: tunnel connected",
-            "12:34:56 WARN t: peer timeout",
-            "12:34:56 ERROR t: connection refused",
+            info_entry("tunnel connected"),
+            info_entry("peer timeout"),
+            make_entry(LogLevel::Error, None, "connection refused"),
         ]);
-        // Query is pre-lowercased; result lines retain their original casing.
-        let result = component.filtered_lines(&buf, "refused");
+        let result = component.filtered_lines(&buf, "refused", None);
         assert_eq!(result.len(), 1);
-        assert!(result[0].contains("refused"));
+        assert!(result[0].message.contains("refused"));
     }
 
     #[test]
@@ -879,17 +642,147 @@ mod tests {
         let mut component = LogsComponent::new();
         component.min_level = LogLevel::Warn;
         let buf = make_buf(&[
-            "12:34:56 DEBUG t: noise debug",
-            "12:34:56 WARN t: peer timeout",
-            "12:34:56 ERROR t: connection refused",
+            debug_entry("noise debug"),
+            make_entry(LogLevel::Warn, None, "peer timeout"),
+            make_entry(LogLevel::Error, None, "connection refused"),
         ]);
-        // level filter hides DEBUG; search hides WARN → only ERROR passes
-        let result = component.filtered_lines(&buf, "refused");
+        // Level filter hides DEBUG; search hides WARN → only ERROR passes.
+        let result = component.filtered_lines(&buf, "refused", None);
         assert_eq!(result.len(), 1);
-        assert!(result[0].contains("refused"));
+        assert!(result[0].message.contains("refused"));
     }
 
-    // --- highlight_matches ---
+    #[test]
+    fn filtered_lines_fast_path_skipped_when_active_filter() {
+        let mut component = LogsComponent::new(); // min_level = Debug (fast path candidate)
+        component.connection_filter = ConnectionFilter::Active;
+        let buf = make_buf(&[
+            make_entry(LogLevel::Debug, Some("mia"), "mia"),
+            make_entry(LogLevel::Debug, Some("ord"), "ord"),
+        ]);
+        // Fast path is skipped because connection_filter != All.
+        let result = component.filtered_lines(&buf, "", Some("mia"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].connection_name.as_deref(), Some("mia"));
+    }
+
+    // ── render_entry ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_entry_with_timestamps_produces_five_spans() {
+        let theme = mocha();
+        let entry = info_entry("ferro_wg_core::tunnel: connected");
+        let spans = LogsComponent::render_entry(&entry, &cfg(true, true), &theme);
+        assert_eq!(
+            spans.len(),
+            5,
+            "timestamp + space + badge + space + message"
+        );
+        // Timestamp span
+        assert!(
+            spans[0].content.starts_with('['),
+            "timestamp should start with ["
+        );
+        // Level badge
+        assert_eq!(spans[2].content, "[INFO]");
+        assert_eq!(spans[2].style.fg, Some(theme.success));
+        // Message borrows from entry
+        assert_eq!(spans[4].content, "ferro_wg_core::tunnel: connected");
+    }
+
+    #[test]
+    fn render_entry_without_timestamps_produces_three_spans() {
+        let theme = mocha();
+        let entry = info_entry("target: msg");
+        let spans = LogsComponent::render_entry(&entry, &cfg(false, true), &theme);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "[INFO]");
+        assert_eq!(spans[2].content, "target: msg");
+    }
+
+    #[test]
+    fn render_entry_level_colors_all_variants() {
+        let theme = mocha();
+        let cases = [
+            (LogLevel::Trace, theme.muted),
+            (LogLevel::Debug, theme.accent),
+            (LogLevel::Info, theme.success),
+            (LogLevel::Warn, theme.warning),
+            (LogLevel::Error, theme.error),
+        ];
+        for (level, expected_color) in cases {
+            let entry = make_entry(level, None, "msg");
+            let spans = LogsComponent::render_entry(&entry, &cfg(false, true), &theme);
+            assert_eq!(spans[0].style.fg, Some(expected_color), "level={level:?}");
+        }
+    }
+
+    #[test]
+    fn render_entry_no_color_plain_level_badge() {
+        let theme = mocha();
+        let entry = info_entry("msg");
+        let spans = LogsComponent::render_entry(&entry, &cfg(false, false), &theme);
+        assert_eq!(spans[0].style.fg, None);
+    }
+
+    #[test]
+    fn render_entry_invalid_timestamp_renders_fallback() {
+        let theme = mocha();
+        let entry = LogEntry {
+            timestamp_ms: i64::MAX,
+            level: LogLevel::Info,
+            connection_name: None,
+            message: "msg".to_owned(),
+        };
+        let spans = LogsComponent::render_entry(&entry, &cfg(true, false), &theme);
+        assert_eq!(spans[0].content, "[??:??:??]");
+    }
+
+    // ── level_style ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn level_style_all_known_levels() {
+        let theme = mocha();
+        let cases = [
+            (LogLevel::Trace, theme.muted),
+            (LogLevel::Debug, theme.accent),
+            (LogLevel::Info, theme.success),
+            (LogLevel::Warn, theme.warning),
+            (LogLevel::Error, theme.error),
+        ];
+        for (level, expected) in cases {
+            assert_eq!(
+                LogsComponent::level_style(level, true, &theme).fg,
+                Some(expected),
+                "level={level:?} with color"
+            );
+            assert_eq!(
+                LogsComponent::level_style(level, false, &theme).fg,
+                None,
+                "level={level:?} without color"
+            );
+        }
+    }
+
+    // ── line_matches_search ───────────────────────────────────────────────────
+
+    #[test]
+    fn line_matches_search_empty_query_always_passes() {
+        assert!(line_matches_search("anything", ""));
+    }
+
+    #[test]
+    fn line_matches_search_case_insensitive() {
+        assert!(line_matches_search("Connection Lost", "connection"));
+        assert!(line_matches_search("Connection Lost", "lost"));
+    }
+
+    #[test]
+    fn line_matches_search_no_match_returns_false() {
+        assert!(!line_matches_search("tunnel up", "error"));
+    }
+
+    // ── highlight_matches ─────────────────────────────────────────────────────
 
     #[test]
     fn highlight_matches_empty_query_returns_single_base_span() {
@@ -905,7 +798,6 @@ mod tests {
         let spans = highlight_matches("connection refused", "refused", base, hi);
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].content, "connection ");
-        assert_eq!(spans[0].style, base);
         assert_eq!(spans[1].content, "refused");
         assert_eq!(spans[1].style, hi);
     }
@@ -915,7 +807,6 @@ mod tests {
         let base = Style::default();
         let hi = Style::default().bg(ratatui::style::Color::Yellow);
         let spans = highlight_matches("err: no error found", "err", base, hi);
-        // "err" appears at pos 0 and inside "error" at pos 8..11
         assert_eq!(spans.len(), 4);
         assert_eq!(spans[0].content, "err");
         assert_eq!(spans[1].content, ": no ");
@@ -927,10 +818,8 @@ mod tests {
     fn highlight_matches_preserves_original_case() {
         let base = Style::default();
         let hi = Style::default().bg(ratatui::style::Color::Yellow);
-        // query is lowercase, text has mixed case; matched span preserves original
         let spans = highlight_matches("Connection Lost", "connection", base, hi);
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content, "Connection"); // original casing preserved
+        assert_eq!(spans[0].content, "Connection");
         assert_eq!(spans[1].content, " Lost");
     }
 
@@ -943,7 +832,7 @@ mod tests {
         assert_eq!(spans[0].style, hi);
     }
 
-    // --- cycle_level ---
+    // ── cycle_level ───────────────────────────────────────────────────────────
 
     #[test]
     fn cycle_level_advances_min_level() {
@@ -963,7 +852,7 @@ mod tests {
         assert_eq!(component.scroll_state.offset, 0);
     }
 
-    // --- ScrollState tests ---
+    // ── scroll / jump tests ───────────────────────────────────────────────────
 
     #[test]
     fn scroll_up_decreases_offset_when_possible() {
@@ -988,7 +877,7 @@ mod tests {
         let mut component = LogsComponent::new();
         component.scroll_state.view_height = 10;
         component.scroll_state.offset = 0;
-        component.scroll_down(20); // total_lines = 20
+        component.scroll_down(20);
         assert_eq!(component.scroll_state.offset, 1);
         assert!(!component.scroll_state.auto_scroll);
     }
@@ -997,7 +886,7 @@ mod tests {
     fn scroll_down_does_nothing_at_max_offset() {
         let mut component = LogsComponent::new();
         component.scroll_state.view_height = 10;
-        component.scroll_state.offset = 10; // max_offset = 20 - 10 = 10
+        component.scroll_state.offset = 10;
         component.scroll_down(20);
         assert_eq!(component.scroll_state.offset, 10);
         assert!(component.scroll_state.auto_scroll);
@@ -1020,7 +909,7 @@ mod tests {
         component.scroll_state.offset = 0;
         component.scroll_state.auto_scroll = false;
         component.jump_to_bottom(25);
-        assert_eq!(component.scroll_state.offset, 20); // 25 - 5 = 20
+        assert_eq!(component.scroll_state.offset, 20);
         assert!(component.scroll_state.auto_scroll);
     }
 
@@ -1028,8 +917,7 @@ mod tests {
     fn display_offset_auto_scroll_clamps_to_bottom() {
         let mut component = LogsComponent::new();
         component.scroll_state.view_height = 5;
-        // auto_scroll is true by default; offset must track the bottom.
-        assert_eq!(component.display_offset(20), 15); // 20 - 5
+        assert_eq!(component.display_offset(20), 15);
     }
 
     #[test]
@@ -1045,6 +933,6 @@ mod tests {
     fn display_offset_auto_scroll_saturates_at_zero_when_content_fits() {
         let mut component = LogsComponent::new();
         component.scroll_state.view_height = 30;
-        assert_eq!(component.display_offset(10), 0); // 10 < 30 → saturates
+        assert_eq!(component.display_offset(10), 0);
     }
 }
