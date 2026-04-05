@@ -146,15 +146,16 @@ pub async fn stream_logs_from(
             match reader.read_line(&mut line).await {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    if let Ok(DaemonResponse::LogEntry(entry)) =
-                        ipc::decode_message::<DaemonResponse>(&line)
-                    {
-                        if tx.send(entry).await.is_err() {
-                            break;
-                        }
-                    }
                     // Non-LogEntry responses are silently ignored so that a
                     // future protocol extension doesn't break the stream.
+                    let Ok(DaemonResponse::LogEntry(entry)) =
+                        ipc::decode_message::<DaemonResponse>(&line)
+                    else {
+                        continue;
+                    };
+                    if tx.send(entry).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
