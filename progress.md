@@ -27,9 +27,17 @@
 - Snapshot tests for ToastComponent at 80x24 with multiple toasts
 - All tests pass, clippy clean, no warnings
 
+### Commit 3: Help overlay component (COMPLETED)
+- Added KEYBINDINGS constant in ferro-wg-tui-core/src/ux.rs with 37 keybinding entries
+- Extracted centered_rect to ferro-wg-tui-components/src/util.rs
+- Added HelpOverlayComponent: renders two-column Table in Clear-backed overlay at 90% width x min(height/2, 30) rows
+- Handle_key returns HideHelp for ?/Esc/q when show_help, swallows other keys
+- Wired into ComponentBundle, resolve_key_action guard, render_ui topmost, dispatch_all
+- Comprehensive tests for handle_key logic, KEYBINDINGS validation, render snapshots at 80x24 and 120x40
+- All tests pass, clippy clean, no warnings
+
 ## Pending Phases
 
-### Commit 3: Help overlay component
 ### Commit 4: Mouse support
 ### Commit 5: Responsive layout (80×24 minimum)
 

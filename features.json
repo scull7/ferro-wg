@@ -196,6 +196,26 @@
           "toast_dispatch_tests",
           "toast_snapshot_tests"
         ]
+      },
+      {
+        "id": "commit3",
+        "title": "Help overlay component",
+        "status": "completed",
+        "features": [
+          "keybindings_constant",
+          "centered_rect_extraction",
+          "help_overlay_component",
+          "help_overlay_handle_key",
+          "help_overlay_render",
+          "help_overlay_clear_underlay",
+          "help_overlay_component_bundle",
+          "help_overlay_key_guard",
+          "help_overlay_render_topmost",
+          "help_overlay_dispatch_all",
+          "help_overlay_handle_key_tests",
+          "keybindings_validation_tests",
+          "help_overlay_snapshot_tests"
+        ]
       }
     ]
   }
