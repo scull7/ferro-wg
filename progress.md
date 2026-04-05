@@ -36,9 +36,20 @@
 - Comprehensive tests for handle_key logic, KEYBINDINGS validation, render snapshots at 80x24 and 120x40
 - All tests pass, clippy clean, no warnings
 
+### Commit 4: Mouse support (COMPLETED)
+- Added AppEvent::Mouse(crossterm::event::MouseEvent) in ferro-wg-tui/src/event.rs
+- Forwarded Event::Mouse in event-loop maybe_event arm
+- Enabled EnableMouseCapture after EnterAlternateScreen, DisableMouseCapture on cleanup
+- Added resolve_mouse_action fn in ferro-wg-tui-core/src/ux.rs: ScrollDown/Up -> NextRow/PrevRow, left-click tab bar -> SelectTab via tab_hit_test
+- Added tab_hit_test and tab_label_at_column using Tab::ALL and title() at compile time
+- Added handle_mouse default method to Component trait in ferro-wg-tui-core/src/component.rs
+- Computed layout before event handling in event loop for tab bar rects
+- Added guards: ignore mouse when show_help || pending_confirm || config_diff_pending
+- Comprehensive tests for mouse actions, tab hit tests, guards
+- All tests pass, clippy clean, no warnings
+
 ## Pending Phases
 
-### Commit 4: Mouse support
 ### Commit 5: Responsive layout (80×24 minimum)
 
 ## Verification Status

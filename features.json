@@ -216,6 +216,25 @@
           "keybindings_validation_tests",
           "help_overlay_snapshot_tests"
         ]
+      },
+      {
+        "id": "commit4",
+        "title": "Mouse support",
+        "status": "completed",
+        "features": [
+          "app_event_mouse",
+          "event_mouse_forwarding",
+          "enable_mouse_capture",
+          "resolve_mouse_action",
+          "tab_hit_test",
+          "tab_label_at_column",
+          "handle_mouse_default",
+          "layout_before_mouse",
+          "mouse_guards",
+          "mouse_scroll_tests",
+          "tab_click_tests",
+          "guard_tests"
+        ]
       }
     ]
   }
