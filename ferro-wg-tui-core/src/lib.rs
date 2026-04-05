@@ -32,5 +32,5 @@ pub use state::{
     AppState, ConfirmPending, ConnectionState, ConnectionStatus, ConnectionView, Feedback,
     compute_health_warning,
 };
-pub use theme::Theme;
+pub use theme::{Theme, ThemeKind};
 pub use util::{format_bytes, format_handshake_age};

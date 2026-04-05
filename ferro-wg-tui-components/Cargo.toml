@@ -23,6 +23,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 criterion = "0.5"
+insta = { version = "1", features = ["yaml"] }
 
 [[bench]]
 name = "log_parsing"

@@ -570,6 +570,8 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('5') => Some(Action::SelectTab(Tab::Config)),
         KeyCode::Char('6') => Some(Action::SelectTab(Tab::Logs)),
         KeyCode::Char('/') => Some(Action::EnterSearch),
+        KeyCode::Char('T') => Some(Action::ToggleTheme),
+        KeyCode::Char('?') => Some(Action::ShowHelp),
         KeyCode::Char('i') => Some(Action::EnterImport),
         _ => None,
     }

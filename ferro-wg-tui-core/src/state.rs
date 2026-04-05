@@ -29,7 +29,7 @@ use crate::config_edit::{
     ConfigDiffPending, ConfigEditState, ConfigSection, EditableField, config_diff,
     field_current_value, fields_for_section, validate_field,
 };
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeKind};
 
 /// How long feedback messages are displayed before expiring.
 const FEEDBACK_DURATION: Duration = Duration::from_secs(3);
@@ -182,6 +182,7 @@ impl Feedback {
 ///
 /// All shared data lives here. Components never own or duplicate this
 /// data — they receive `&AppState` for read-only access during rendering.
+#[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     /// Whether the app is still running.
     pub running: bool,
@@ -198,8 +199,12 @@ pub struct AppState {
     pub selected_connection: usize,
     /// Structured log entries for the Logs tab.
     pub log_entries: Arc<Mutex<VecDeque<LogEntry>>>,
+    /// Current theme kind (Mocha or Latte).
+    pub theme_kind: ThemeKind,
     /// Active color theme.
     pub theme: Theme,
+    /// Whether the help overlay is shown.
+    pub show_help: bool,
     /// Whether the daemon is currently reachable.
     pub daemon_connected: bool,
     /// Transient feedback message (success or error) with expiry.
@@ -272,6 +277,7 @@ impl AppState {
             })
             .collect();
 
+        let theme_kind = ThemeKind::default();
         Self {
             running: true,
             active_tab: Tab::Overview,
@@ -280,7 +286,9 @@ impl AppState {
             connections,
             selected_connection: 0,
             log_entries: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
-            theme: Theme::mocha(),
+            theme_kind,
+            theme: theme_kind.into_theme(),
+            show_help: false,
             daemon_connected: false,
             feedback: None,
             log_display: app_config.log_display,
@@ -329,40 +337,198 @@ impl AppState {
     /// # Panics
     ///
     /// Panics if `SystemTime` is before `UNIX_EPOCH` (impossible in practice).
-    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     pub fn dispatch(&mut self, action: &Action) {
         match action {
             Action::Quit => self.running = false,
-            Action::NextTab => {
-                if self.input_mode == InputMode::EditField {
-                    if let Some(edit) = self.config_edit.as_mut() {
-                        edit.edit_buffer = None;
-                        edit.field_error = None;
-                    }
-                    self.input_mode = InputMode::Normal;
-                }
-                self.active_tab = self.active_tab.next();
+            Action::NextTab | Action::PrevTab | Action::SelectTab(_) => {
+                self.handle_tab_actions(action)
             }
-            Action::PrevTab => {
-                if self.input_mode == InputMode::EditField {
-                    if let Some(edit) = self.config_edit.as_mut() {
-                        edit.edit_buffer = None;
-                        edit.field_error = None;
-                    }
-                    self.input_mode = InputMode::Normal;
-                }
-                self.active_tab = self.active_tab.prev();
+            Action::EnterSearch
+            | Action::ExitSearch
+            | Action::ClearSearch
+            | Action::SearchInput(_)
+            | Action::SearchBackspace => self.handle_search_actions(action),
+            Action::SelectNextConnection
+            | Action::SelectPrevConnection
+            | Action::SelectConnection(_) => self.handle_connection_actions(action),
+            Action::UpdatePeers(_) => self.handle_peer_actions(action),
+            Action::DaemonConnectivityChanged(_) => self.handle_daemon_actions(action),
+            Action::DaemonOk(_) | Action::DaemonError(_) => self.handle_feedback_actions(action),
+            Action::NextRow | Action::PrevRow => self.handle_row_actions(action),
+            Action::EnterImport | Action::ImportKey(_) => self.handle_import_actions(action),
+            Action::StartBenchmark
+            | Action::StartBenchmarkForBackend(_)
+            | Action::BenchmarkProgressUpdate(_)
+            | Action::BenchmarkComplete(_) => self.handle_benchmark_actions(action),
+            Action::ToggleCompareView => self.handle_compare_actions(action),
+            Action::ToggleTheme => self.handle_theme_action(action),
+            Action::ShowHelp | Action::HideHelp => self.handle_help_action(action),
+            Action::EnterExport
+            | Action::ExportKey(_)
+            | Action::SubmitImport
+            | Action::ExitImport
+            | Action::SubmitExport
+            | Action::ExitExport => self.handle_export_actions(action),
+            Action::RequestConfirm { .. } | Action::ConfirmYes | Action::ConfirmNo => {
+                self.handle_confirm_actions(action)
             }
-            Action::SelectTab(tab) => {
-                if self.input_mode == InputMode::EditField {
-                    if let Some(edit) = self.config_edit.as_mut() {
-                        edit.edit_buffer = None;
-                        edit.field_error = None;
-                    }
-                    self.input_mode = InputMode::Normal;
+
+            Action::EnterConfigEdit { .. }
+            | Action::ConfigEditKey(_)
+            | Action::ConfigFocusNext
+            | Action::ConfigFocusPrev
+            | Action::ConfigFocusInterface
+            | Action::ConfigFocusPeer(_)
+            | Action::AddConfigPeer
+            | Action::DeleteConfigPeer(_)
+            | Action::PreviewConfig
+            | Action::ConfigDiffScrollDown
+            | Action::ConfigDiffScrollUp
+            | Action::SaveConfig { .. }
+            | Action::DiscardConfigEdits => self.handle_config_actions(action),
+            // These are handled by the event loop (maybe_spawn_command) or
+            // components. They carry no state-machine side-effects here.
+            _ => {}
+        }
+    }
+
+    /// Handle a key event when in [`InputMode::Import`].
+    ///
+    /// Appends typed characters to the path buffer and removes the last
+    /// character on `Backspace`. All other keys are silently ignored.
+    fn apply_import_key(&mut self, key: &crossterm::event::KeyEvent) {
+        if let InputMode::Import(ref mut buf) = self.input_mode {
+            match key.code {
+                KeyCode::Char(c) => buf.push(c),
+                KeyCode::Backspace => {
+                    buf.pop();
                 }
-                self.active_tab = *tab;
+                _ => {}
             }
+        }
+    }
+
+    /// Handle a key event when in [`InputMode::Export`].
+    ///
+    /// Appends typed characters to the path buffer and removes the last
+    /// character on `Backspace`. All other keys are silently ignored.
+    fn apply_export_key(&mut self, key: &crossterm::event::KeyEvent) {
+        if let InputMode::Export(ref mut buf) = self.input_mode {
+            match key.code {
+                KeyCode::Char(c) => buf.push(c),
+                KeyCode::Backspace => {
+                    buf.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Apply a batch of peer status updates from a daemon poll.
+    ///
+    /// Marks the daemon as reachable, updates each named connection, and
+    /// clamps `selected_connection` into bounds in case the list changed.
+    fn apply_peer_updates(&mut self, statuses: &[ferro_wg_core::ipc::PeerStatus]) {
+        self.daemon_connected = true;
+        for s in statuses {
+            if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
+                let state = if s.connected {
+                    ConnectionState::Connected
+                } else {
+                    ConnectionState::Disconnected
+                };
+                let health_warning = if s.connected {
+                    compute_health_warning(&s.stats)
+                } else {
+                    None
+                };
+                conn.status = Some(ConnectionStatus {
+                    state,
+                    backend: s.backend,
+                    stats: s.stats.clone(),
+                    endpoint: s.endpoint.clone(),
+                    interface: s.interface.clone(),
+                    health_warning,
+                });
+            } else {
+                warn!(name = %s.name, "UpdatePeers received status for unknown connection");
+            }
+        }
+        // Clamp in case connections changed (defensive; static in Phase 2).
+        self.selected_connection = self
+            .selected_connection
+            .min(self.connections.len().saturating_sub(1));
+    }
+
+    /// The current import path buffer, when in [`InputMode::Import`].
+    ///
+    /// Returns `None` when not in import mode.
+    #[must_use]
+    pub fn import_buffer(&self) -> Option<&str> {
+        if let InputMode::Import(ref buf) = self.input_mode {
+            Some(buf.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// The current export path buffer, when in [`InputMode::Export`].
+    ///
+    /// Returns `None` when not in export mode.
+    #[must_use]
+    pub fn export_buffer(&self) -> Option<&str> {
+        if let InputMode::Export(ref buf) = self.input_mode {
+            Some(buf.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// Rebuild the connection list from a new [`AppConfig`].
+    ///
+    /// Preserves `selected_connection` by clamping it into bounds.
+    /// All other connection state (live status, peer row) is reset because
+    /// the daemon will push fresh status on the next poll.
+    pub fn reload_from_config(&mut self, app_config: AppConfig) {
+        let AppConfig {
+            connections,
+            log_display,
+        } = app_config;
+        self.connections = connections
+            .into_iter()
+            .map(|(name, config)| ConnectionView {
+                name,
+                config,
+                status: None,
+                selected_peer_row: 0,
+            })
+            .collect();
+        self.log_display = log_display;
+        self.selected_connection = self
+            .selected_connection
+            .min(self.connections.len().saturating_sub(1));
+    }
+
+    /// Handle tab-related actions.
+    fn handle_tab_actions(&mut self, action: &Action) {
+        if self.input_mode == InputMode::EditField {
+            if let Some(edit) = self.config_edit.as_mut() {
+                edit.edit_buffer = None;
+                edit.field_error = None;
+            }
+            self.input_mode = InputMode::Normal;
+        }
+        match action {
+            Action::NextTab => self.active_tab = self.active_tab.next(),
+            Action::PrevTab => self.active_tab = self.active_tab.prev(),
+            Action::SelectTab(tab) => self.active_tab = *tab,
+            _ => {}
+        }
+    }
+
+    /// Handle search-related actions.
+    fn handle_search_actions(&mut self, action: &Action) {
+        match action {
             Action::EnterSearch => {
                 self.input_mode = InputMode::Search;
                 self.search_query.clear();
@@ -376,6 +542,13 @@ impl AppState {
             Action::SearchBackspace => {
                 self.search_query.pop();
             }
+            _ => {}
+        }
+    }
+
+    /// Handle connection selection actions.
+    fn handle_connection_actions(&mut self, action: &Action) {
+        match action {
             Action::SelectNextConnection => {
                 if !self.connections.is_empty() {
                     self.selected_connection =
@@ -404,16 +577,40 @@ impl AppState {
                     self.search_query.clear();
                 }
             }
-            Action::UpdatePeers(statuses) => self.apply_peer_updates(statuses),
-            Action::DaemonConnectivityChanged(connected) => {
-                self.daemon_connected = *connected;
-            }
+            _ => {}
+        }
+    }
+
+    /// Handle peer-related actions.
+    fn handle_peer_actions(&mut self, action: &Action) {
+        if let Action::UpdatePeers(statuses) = action {
+            self.apply_peer_updates(statuses);
+        }
+    }
+
+    /// Handle daemon connectivity actions.
+    fn handle_daemon_actions(&mut self, action: &Action) {
+        if let Action::DaemonConnectivityChanged(connected) = action {
+            self.daemon_connected = *connected;
+        }
+    }
+
+    /// Handle feedback actions.
+    fn handle_feedback_actions(&mut self, action: &Action) {
+        match action {
             Action::DaemonOk(msg) => {
                 self.feedback = Some(Feedback::success(msg.clone()));
             }
             Action::DaemonError(msg) => {
                 self.feedback = Some(Feedback::error(msg.clone()));
             }
+            _ => {}
+        }
+    }
+
+    /// Handle row navigation actions.
+    fn handle_row_actions(&mut self, action: &Action) {
+        match action {
             Action::NextRow => {
                 if let Some(conn) = self.connections.get_mut(self.selected_connection) {
                     let max = conn.config.peers.len().saturating_sub(1);
@@ -425,13 +622,24 @@ impl AppState {
                     conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
                 }
             }
-            // -- wg-quick import --
+            _ => {}
+        }
+    }
+
+    /// Handle import-related actions.
+    fn handle_import_actions(&mut self, action: &Action) {
+        match action {
             Action::EnterImport => {
                 self.input_mode = InputMode::Import(String::new());
             }
             Action::ImportKey(key) => self.apply_import_key(key),
+            _ => {}
+        }
+    }
 
-            // -- Benchmark actions --
+    /// Handle benchmark-related actions.
+    fn handle_benchmark_actions(&mut self, action: &Action) {
+        match action {
             Action::StartBenchmark | Action::StartBenchmarkForBackend(_) => {
                 if self.benchmark_running {
                     self.feedback = Some(Feedback::error("benchmark already running".to_owned()));
@@ -451,11 +659,15 @@ impl AppState {
                 self.benchmark_running = false;
                 self.benchmark_results
                     .insert(result.backend.clone(), result.clone());
-                let run = BenchmarkRun {
-                    timestamp_ms: SystemTime::now()
+                let timestamp_ms = i64::try_from(
+                    SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
-                        .as_millis() as i64, // Safe as millis since epoch fits in i64
+                        .as_millis(),
+                )
+                .expect("timestamp fits in i64");
+                let run = BenchmarkRun {
+                    timestamp_ms,
                     connection_name: self
                         .active_connection()
                         .map(|c| c.name.clone())
@@ -468,12 +680,23 @@ impl AppState {
                     BENCHMARK_HISTORY_CAP,
                 );
             }
-            Action::ToggleCompareView => {
-                self.compare_view = match self.compare_view {
-                    CompareView::Live => CompareView::Historical,
-                    CompareView::Historical => CompareView::Live,
-                };
-            }
+            _ => {}
+        }
+    }
+
+    /// Handle compare view actions.
+    fn handle_compare_actions(&mut self, action: &Action) {
+        if action == &Action::ToggleCompareView {
+            self.compare_view = match self.compare_view {
+                CompareView::Live => CompareView::Historical,
+                CompareView::Historical => CompareView::Live,
+            };
+        }
+    }
+
+    /// Handle export-related actions.
+    fn handle_export_actions(&mut self, action: &Action) {
+        match action {
             Action::EnterExport => {
                 self.input_mode = InputMode::Export(String::new());
             }
@@ -484,7 +707,13 @@ impl AppState {
             | Action::ExitExport => {
                 self.input_mode = InputMode::Normal;
             }
-            // -- Confirmation dialog --
+            _ => {}
+        }
+    }
+
+    /// Handle confirmation dialog actions.
+    fn handle_confirm_actions(&mut self, action: &Action) {
+        match action {
             Action::RequestConfirm { message, action } => {
                 self.pending_confirm = Some(ConfirmPending {
                     message: message.clone(),
@@ -501,8 +730,14 @@ impl AppState {
             Action::ConfirmNo => {
                 self.pending_confirm = None;
             }
+            _ => {}
+        }
+    }
 
-            // -- Config editing --
+    /// Handle config editing actions.
+    #[allow(clippy::too_many_lines)]
+    fn handle_config_actions(&mut self, action: &Action) {
+        match action {
             Action::EnterConfigEdit { section, field_idx } => {
                 if let Some(conn) = self.active_connection() {
                     let fields = fields_for_section(*section, false);
@@ -676,127 +911,25 @@ impl AppState {
                 self.config_diff_pending = None;
                 self.input_mode = InputMode::Normal;
             }
-            // These are handled by the event loop (maybe_spawn_command) or
-            // components. They carry no state-machine side-effects here.
             _ => {}
         }
     }
 
-    /// Handle a key event when in [`InputMode::Import`].
-    ///
-    /// Appends typed characters to the path buffer and removes the last
-    /// character on `Backspace`. All other keys are silently ignored.
-    fn apply_import_key(&mut self, key: &crossterm::event::KeyEvent) {
-        if let InputMode::Import(ref mut buf) = self.input_mode {
-            match key.code {
-                KeyCode::Char(c) => buf.push(c),
-                KeyCode::Backspace => {
-                    buf.pop();
-                }
-                _ => {}
-            }
+    /// Handle theme-related actions.
+    fn handle_theme_action(&mut self, action: &Action) {
+        if action == &Action::ToggleTheme {
+            self.theme_kind = self.theme_kind.toggle();
+            self.theme = self.theme_kind.into_theme();
         }
     }
 
-    /// Handle a key event when in [`InputMode::Export`].
-    ///
-    /// Appends typed characters to the path buffer and removes the last
-    /// character on `Backspace`. All other keys are silently ignored.
-    fn apply_export_key(&mut self, key: &crossterm::event::KeyEvent) {
-        if let InputMode::Export(ref mut buf) = self.input_mode {
-            match key.code {
-                KeyCode::Char(c) => buf.push(c),
-                KeyCode::Backspace => {
-                    buf.pop();
-                }
-                _ => {}
-            }
+    /// Handle help-related actions.
+    fn handle_help_action(&mut self, action: &Action) {
+        match action {
+            Action::ShowHelp => self.show_help = true,
+            Action::HideHelp => self.show_help = false,
+            _ => {}
         }
-    }
-
-    /// Apply a batch of peer status updates from a daemon poll.
-    ///
-    /// Marks the daemon as reachable, updates each named connection, and
-    /// clamps `selected_connection` into bounds in case the list changed.
-    fn apply_peer_updates(&mut self, statuses: &[ferro_wg_core::ipc::PeerStatus]) {
-        self.daemon_connected = true;
-        for s in statuses {
-            if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
-                let state = if s.connected {
-                    ConnectionState::Connected
-                } else {
-                    ConnectionState::Disconnected
-                };
-                let health_warning = if s.connected {
-                    compute_health_warning(&s.stats)
-                } else {
-                    None
-                };
-                conn.status = Some(ConnectionStatus {
-                    state,
-                    backend: s.backend,
-                    stats: s.stats.clone(),
-                    endpoint: s.endpoint.clone(),
-                    interface: s.interface.clone(),
-                    health_warning,
-                });
-            } else {
-                warn!(name = %s.name, "UpdatePeers received status for unknown connection");
-            }
-        }
-        // Clamp in case connections changed (defensive; static in Phase 2).
-        self.selected_connection = self
-            .selected_connection
-            .min(self.connections.len().saturating_sub(1));
-    }
-
-    /// The current import path buffer, when in [`InputMode::Import`].
-    ///
-    /// Returns `None` when not in import mode.
-    #[must_use]
-    pub fn import_buffer(&self) -> Option<&str> {
-        if let InputMode::Import(ref buf) = self.input_mode {
-            Some(buf.as_str())
-        } else {
-            None
-        }
-    }
-
-    /// The current export path buffer, when in [`InputMode::Export`].
-    ///
-    /// Returns `None` when not in export mode.
-    #[must_use]
-    pub fn export_buffer(&self) -> Option<&str> {
-        if let InputMode::Export(ref buf) = self.input_mode {
-            Some(buf.as_str())
-        } else {
-            None
-        }
-    }
-
-    /// Rebuild the connection list from a new [`AppConfig`].
-    ///
-    /// Preserves `selected_connection` by clamping it into bounds.
-    /// All other connection state (live status, peer row) is reset because
-    /// the daemon will push fresh status on the next poll.
-    pub fn reload_from_config(&mut self, app_config: AppConfig) {
-        let AppConfig {
-            connections,
-            log_display,
-        } = app_config;
-        self.connections = connections
-            .into_iter()
-            .map(|(name, config)| ConnectionView {
-                name,
-                config,
-                status: None,
-                selected_peer_row: 0,
-            })
-            .collect();
-        self.log_display = log_display;
-        self.selected_connection = self
-            .selected_connection
-            .min(self.connections.len().saturating_sub(1));
     }
 
     /// Clear expired feedback messages. Called on each tick.
@@ -829,6 +962,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
     use std::collections::BTreeMap;
 
     use ferro_wg_core::config::{InterfaceConfig, PeerConfig};
@@ -1225,6 +1359,40 @@ mod tests {
             assert!(conn.status.is_none());
             assert_eq!(conn.selected_peer_row, 0);
         }
+    }
+
+    #[test]
+    fn dispatch_toggle_theme_from_mocha_to_latte() {
+        let mut state = two_connection_state();
+        assert_eq!(state.theme_kind, ThemeKind::Mocha);
+        state.dispatch(&Action::ToggleTheme);
+        assert_eq!(state.theme_kind, ThemeKind::Latte);
+        assert_eq!(state.theme.accent, Color::Rgb(114, 135, 253));
+    }
+
+    #[test]
+    fn dispatch_toggle_theme_twice_back_to_mocha() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::ToggleTheme);
+        state.dispatch(&Action::ToggleTheme);
+        assert_eq!(state.theme_kind, ThemeKind::Mocha);
+        assert_eq!(state.theme.accent, Color::Rgb(180, 190, 254));
+    }
+
+    #[test]
+    fn dispatch_show_help() {
+        let mut state = two_connection_state();
+        assert!(!state.show_help);
+        state.dispatch(&Action::ShowHelp);
+        assert!(state.show_help);
+    }
+
+    #[test]
+    fn dispatch_hide_help() {
+        let mut state = two_connection_state();
+        state.show_help = true;
+        state.dispatch(&Action::HideHelp);
+        assert!(!state.show_help);
     }
 
     #[test]

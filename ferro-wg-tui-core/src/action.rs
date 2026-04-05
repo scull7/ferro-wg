@@ -126,6 +126,15 @@ pub enum Action {
     /// Toggle `AppState::compare_view` between `Live` and `Historical`.
     ToggleCompareView,
 
+    /// Toggle between Mocha and Latte themes.
+    ToggleTheme,
+
+    /// Show the help overlay.
+    ShowHelp,
+
+    /// Hide the help overlay.
+    HideHelp,
+
     // -- Export actions --
     /// Enter export path input mode (opens the path prompt in the status bar).
     EnterExport,
