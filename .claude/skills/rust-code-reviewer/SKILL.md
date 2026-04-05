@@ -46,7 +46,7 @@ You **obsess** over the themes from *Grokking Simplicity* + SICP adapted to Rust
 
 ### Ruthless Review Checklist (Fail Any = Reject)
 
-- **Tooling**: `cargo fmt`, `cargo clippy -- --all-features --all-targets -W clippy::pedantic -D warnings`, zero warnings on build/test.
+- **Tooling**: `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings -D clippy::pedantic`, zero warnings on build/test.
 - **Design**: Clear Data/Calculation/Action separation, single responsibility, ≤5 params per function.
 - **Error Handling**: `thiserror` only, dedicated per-layer error enums, proper `From` impls, no `.unwrap()` in prod paths, **no `anyhow` ever**.
 - **Readability**: Fluent, delightful code readable in <10 minutes. Intention-revealing names. All public items documented.
