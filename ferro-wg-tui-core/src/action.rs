@@ -4,6 +4,7 @@
 //! [`AppState`](crate::state::AppState) processes them in `dispatch()`,
 //! then components receive the action again via `update()`.
 
+use crossterm::event::KeyEvent;
 use ferro_wg_core::ipc::PeerStatus;
 
 use crate::app::Tab;
@@ -83,6 +84,16 @@ pub enum Action {
     StartDaemon,
     /// Stop the running daemon.
     StopDaemon,
+
+    // -- wg-quick import actions --
+    /// Enter import path input mode.
+    EnterImport,
+    /// Forward a key event to the import path buffer in [`AppState`].
+    ImportKey(KeyEvent),
+    /// Submit the current import path for processing.
+    SubmitImport,
+    /// Cancel import and return to normal mode.
+    ExitImport,
 
     // -- Confirmation dialog actions --
     /// Show a confirmation dialog before executing a destructive action.
