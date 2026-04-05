@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use ferro_wg_core::client;
-use ferro_wg_core::config::AppConfig;
+use ferro_wg_core::config::{AppConfig, toml as config_toml, wg_quick};
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
 use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_WIDTH};
@@ -69,6 +69,8 @@ enum DaemonMessage {
     CommandError(String),
     /// Daemon is unreachable.
     Unreachable,
+    /// A wg-quick import succeeded; reload state from the new config.
+    ReloadConfig(AppConfig, String),
 }
 
 /// All TUI components, grouped to reduce function parameter counts.
@@ -116,6 +118,10 @@ fn handle_daemon_messages(
 ) {
     while let Ok(msg) = daemon_rx.try_recv() {
         let actions: Vec<Action> = match msg {
+            DaemonMessage::ReloadConfig(config, ok_msg) => {
+                state.reload_from_config(config);
+                vec![Action::DaemonOk(ok_msg)]
+            }
             DaemonMessage::StatusUpdate(peers) => vec![Action::UpdatePeers(peers)],
             DaemonMessage::CommandOk(msg) => vec![Action::DaemonOk(msg)],
             DaemonMessage::CommandError(msg) => vec![Action::DaemonError(msg)],
@@ -163,7 +169,8 @@ fn handle_key_event(
     let action = if state.pending_confirm.is_some() {
         // Confirmation dialog captures all keys; no other handler runs.
         bundle.confirm_dialog.handle_key(key, state)
-    } else if state.input_mode == InputMode::Search {
+    } else if matches!(state.input_mode, InputMode::Search | InputMode::Import(_)) {
+        // Text-input modes are handled exclusively by the status bar.
         bundle.status_bar.handle_key(key, state)
     } else {
         handle_global_key(key)
@@ -184,12 +191,27 @@ fn handle_key_event(
         None
     };
 
+    // For SubmitImport: capture the path buffer *before* dispatch resets the
+    // input mode back to Normal (clearing the buffer from state).
+    let import_path = if matches!(action, Action::SubmitImport) {
+        state
+            .import_buffer()
+            .map(std::path::Path::new)
+            .map(std::path::Path::to_path_buf)
+    } else {
+        None
+    };
+
     dispatch_all(state, action, bundle);
     maybe_spawn_command(action, daemon_tx, tasks, config_path);
 
     if let Some(ref follow) = follow_up {
         dispatch_all(state, follow, bundle);
         maybe_spawn_command(follow, daemon_tx, tasks, config_path);
+    }
+
+    if let Some(path) = import_path {
+        spawn_import_task(path, config_path, daemon_tx, tasks);
     }
 }
 
@@ -409,6 +431,7 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('5') => Some(Action::SelectTab(Tab::Config)),
         KeyCode::Char('6') => Some(Action::SelectTab(Tab::Logs)),
         KeyCode::Char('/') => Some(Action::EnterSearch),
+        KeyCode::Char('i') => Some(Action::EnterImport),
         _ => None,
     }
 }
@@ -505,6 +528,74 @@ fn spawn_daemon_start(
             "Daemon started but not yet reachable — try again in a moment".into(),
         ));
     });
+}
+
+/// Derive a connection name from a file path.
+///
+/// Uses the file stem (e.g. `mia` from `/etc/wireguard/mia.conf`).
+/// Returns an error string if the stem is absent or not valid UTF-8.
+fn connection_name_from_path(path: &Path) -> Result<String, String> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "cannot derive connection name from path: {}",
+                path.display()
+            )
+        })
+}
+
+/// Import a wg-quick config file and persist it into the ferro-wg config.
+///
+/// Flow:
+/// 1. Derive a connection name from the filename stem.
+/// 2. Parse the file as wg-quick format.
+/// 3. Load the existing [`AppConfig`] from `config_path`.
+/// 4. Insert the new connection (overwriting any existing entry with the same name).
+/// 5. Write the updated config back to disk.
+/// 6. Send [`DaemonMessage::ReloadConfig`] with the new config.
+fn spawn_import_task(
+    import_path: PathBuf,
+    config_path: &Path,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let config_path = config_path.to_path_buf();
+    let tx = tx.clone();
+
+    tasks.spawn(async move {
+        // All I/O is blocking but small — run on the async executor directly.
+        // (tokio::task::spawn_blocking is unnecessary for short file reads.)
+        let msg = import_and_persist(&import_path, &config_path);
+        let _ = tx.send(msg);
+    });
+}
+
+/// Parse the wg-quick file, merge it into the existing config, and write it back.
+///
+/// Returns the updated [`AppConfig`] and the derived connection name on success,
+/// or an error string that will be shown in the status bar.
+fn try_import(import_path: &Path, config_path: &Path) -> Result<(AppConfig, String), String> {
+    let name = connection_name_from_path(import_path)?;
+    let wg_config =
+        wg_quick::load_from_file(import_path).map_err(|e| format!("Import failed: {e}"))?;
+    let mut app_config = config_toml::load_app_config(config_path)
+        .map_err(|e| format!("Could not load config: {e}"))?;
+    app_config.insert(name.clone(), wg_config);
+    config_toml::save_app_config(&app_config, config_path)
+        .map_err(|e| format!("Could not save config: {e}"))?;
+    Ok((app_config, name))
+}
+
+/// Map the fallible import result to a [`DaemonMessage`] for the event loop.
+fn import_and_persist(import_path: &Path, config_path: &Path) -> DaemonMessage {
+    // I/O is blocking (std::fs). This is user-initiated and infrequent — acceptable
+    // on the async executor. Use spawn_blocking if config files ever grow large.
+    match try_import(import_path, config_path) {
+        Ok((config, name)) => DaemonMessage::ReloadConfig(config, format!("Imported: {name}")),
+        Err(e) => DaemonMessage::CommandError(e),
+    }
 }
 
 /// If the action is a peer command or daemon lifecycle command, spawn a background task.

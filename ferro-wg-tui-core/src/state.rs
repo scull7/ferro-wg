@@ -15,6 +15,8 @@ use ferro_wg_core::ipc::LogEntry;
 use ferro_wg_core::stats::TunnelStats;
 use tracing::warn;
 
+use crossterm::event::KeyCode;
+
 use crate::action::{Action, ConfirmAction};
 use crate::app::{InputMode, Tab};
 use crate::theme::Theme;
@@ -284,6 +286,14 @@ impl AppState {
                     conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
                 }
             }
+            // -- wg-quick import --
+            Action::EnterImport => {
+                self.input_mode = InputMode::Import(String::new());
+            }
+            Action::ImportKey(key) => self.apply_import_key(key),
+            Action::SubmitImport | Action::ExitImport => {
+                self.input_mode = InputMode::Normal;
+            }
             // -- Confirmation dialog --
             Action::RequestConfirm { message, action } => {
                 self.pending_confirm = Some(ConfirmPending {
@@ -304,6 +314,22 @@ impl AppState {
             | Action::DisconnectAll
             | Action::StartDaemon
             | Action::StopDaemon => {}
+        }
+    }
+
+    /// Handle a key event when in [`InputMode::Import`].
+    ///
+    /// Appends typed characters to the path buffer and removes the last
+    /// character on `Backspace`. All other keys are silently ignored.
+    fn apply_import_key(&mut self, key: &crossterm::event::KeyEvent) {
+        if let InputMode::Import(ref mut buf) = self.input_mode {
+            match key.code {
+                KeyCode::Char(c) => buf.push(c),
+                KeyCode::Backspace => {
+                    buf.pop();
+                }
+                _ => {}
+            }
         }
     }
 
@@ -332,6 +358,43 @@ impl AppState {
             }
         }
         // Clamp in case connections changed (defensive; static in Phase 2).
+        self.selected_connection = self
+            .selected_connection
+            .min(self.connections.len().saturating_sub(1));
+    }
+
+    /// The current import path buffer, when in [`InputMode::Import`].
+    ///
+    /// Returns `None` when not in import mode.
+    #[must_use]
+    pub fn import_buffer(&self) -> Option<&str> {
+        if let InputMode::Import(ref buf) = self.input_mode {
+            Some(buf.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// Rebuild the connection list from a new [`AppConfig`].
+    ///
+    /// Preserves `selected_connection` by clamping it into bounds.
+    /// All other connection state (live status, peer row) is reset because
+    /// the daemon will push fresh status on the next poll.
+    pub fn reload_from_config(&mut self, app_config: AppConfig) {
+        let AppConfig {
+            connections,
+            log_display,
+        } = app_config;
+        self.connections = connections
+            .into_iter()
+            .map(|(name, config)| ConnectionView {
+                name,
+                config,
+                status: None,
+                selected_peer_row: 0,
+            })
+            .collect();
+        self.log_display = log_display;
         self.selected_connection = self
             .selected_connection
             .min(self.connections.len().saturating_sub(1));
@@ -857,6 +920,79 @@ mod tests {
         state.dispatch(&Action::ConfirmYes);
         state.dispatch(&Action::ConfirmNo);
         assert!(state.pending_confirm.is_none());
+    }
+
+    // ── wg-quick import tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn enter_import_sets_mode() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        assert_eq!(state.input_mode, InputMode::Import(String::new()));
+    }
+
+    #[test]
+    fn import_key_appends_char() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('a'));
+        state.dispatch(&Action::ImportKey(key));
+        assert_eq!(state.import_buffer(), Some("a"));
+    }
+
+    #[test]
+    fn import_key_backspace_removes_last_char() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        let a = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('a'));
+        let b = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('b'));
+        let bs = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Backspace);
+        state.dispatch(&Action::ImportKey(a));
+        state.dispatch(&Action::ImportKey(b));
+        state.dispatch(&Action::ImportKey(bs));
+        assert_eq!(state.import_buffer(), Some("a"));
+    }
+
+    #[test]
+    fn submit_import_returns_to_normal() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        state.dispatch(&Action::SubmitImport);
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn exit_import_returns_to_normal() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        state.dispatch(&Action::ExitImport);
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn import_buffer_none_when_normal() {
+        let state = two_connection_state();
+        assert!(state.import_buffer().is_none());
+    }
+
+    #[test]
+    fn reload_from_config_replaces_connections() {
+        let mut state = two_connection_state();
+        // Reload with a single-connection config.
+        let new_config = make_app_config(&[("new-conn", vec![make_peer("p1")])]);
+        state.reload_from_config(new_config);
+        assert_eq!(state.connections.len(), 1);
+        assert_eq!(state.connections[0].name, "new-conn");
+    }
+
+    #[test]
+    fn reload_from_config_clamps_selection() {
+        let mut state = two_connection_state();
+        state.selected_connection = 1; // points at second connection
+        // Reload with only one connection — selection must clamp to 0.
+        let new_config = make_app_config(&[("only", vec![])]);
+        state.reload_from_config(new_config);
+        assert_eq!(state.selected_connection, 0);
     }
 
     #[test]
