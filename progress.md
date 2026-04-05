@@ -37,10 +37,14 @@
 - Cap history at 50 runs, graceful error handling
 - All tests pass, clippy clean, no warnings
 
-## Pending Phases
+### Commit 5: Export functionality (COMPLETED)
+- Added spawn_export_task for async CSV/JSON export to file
+- Extension determines format (.csv → CSV, else JSON)
+- Error handling for serialization and I/O failures, propagated via DaemonMessage
+- Unit tests covering CSV/JSON export, file I/O success/failure, and error propagation
+- All tests pass, clippy clean, no warnings
 
-### Commit 5: Export functionality
-### Commit 5: Export functionality
+## Pending Phases
 
 ## Verification Status
 - Tooling checks: PASSED (fmt, test, clippy, build)

@@ -455,4 +455,10 @@ mod tests {
             "timestamp_ms,connection_name,backend,throughput_bps,avg_latency_us,p50_latency_us,p95_latency_us,p99_latency_us\n"
         );
     }
+
+    #[test]
+    fn benchmark_to_json_empty() {
+        let json = benchmark_to_json(&[]).unwrap();
+        assert_eq!(json, "[]");
+    }
 }

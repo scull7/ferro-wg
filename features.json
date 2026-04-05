@@ -56,8 +56,14 @@
       {
         "id": "commit5",
         "title": "Export functionality",
-        "status": "pending",
-        "features": []
+        "status": "completed",
+        "features": [
+          "spawn_export_task",
+          "csv_export",
+          "json_export",
+          "export_io_error_handling",
+          "export_tests"
+        ]
       }
     ]
   }

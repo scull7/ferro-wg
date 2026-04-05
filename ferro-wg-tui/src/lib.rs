@@ -231,7 +231,10 @@ fn handle_key_event(
     let action = if state.pending_confirm.is_some() {
         // Confirmation dialog captures all keys; no other handler runs.
         bundle.confirm_dialog.handle_key(key, state)
-    } else if matches!(state.input_mode, InputMode::Search | InputMode::Import(_)) {
+    } else if matches!(
+        state.input_mode,
+        InputMode::Search | InputMode::Import(_) | InputMode::Export(_)
+    ) {
         // Text-input modes are handled exclusively by the status bar.
         bundle.status_bar.handle_key(key, state)
     } else {
@@ -264,6 +267,17 @@ fn handle_key_event(
         None
     };
 
+    // For SubmitExport: capture the path buffer *before* dispatch resets the
+    // input mode back to Normal (clearing the buffer from state).
+    let export_path = if matches!(action, Action::SubmitExport) {
+        state
+            .export_buffer()
+            .map(std::path::Path::new)
+            .map(std::path::Path::to_path_buf)
+    } else {
+        None
+    };
+
     dispatch_all(state, action, bundle);
     maybe_spawn_command(
         action,
@@ -288,6 +302,10 @@ fn handle_key_event(
 
     if let Some(path) = import_path {
         spawn_import_task(path, config_path, daemon_tx, tasks);
+    }
+
+    if let Some(path) = export_path {
+        spawn_export_task(path, &state.benchmark_history.clone(), daemon_tx, tasks);
     }
 }
 
@@ -730,6 +748,37 @@ fn spawn_benchmark_task(
     });
 }
 
+/// Spawn an async task that serialises `runs` and writes the result to `path`.
+///
+/// Extension determines format: `.csv` → CSV; anything else → JSON.
+fn spawn_export_task(
+    path: PathBuf,
+    runs: &[ferro_wg_tui_core::benchmark::BenchmarkRun],
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    use ferro_wg_tui_core::benchmark::{BenchmarkError, benchmark_to_csv, benchmark_to_json};
+
+    let runs = runs.to_vec();
+    let daemon_tx = daemon_tx.clone();
+    tasks.spawn(async move {
+        let result: Result<(), BenchmarkError> = async {
+            let content = match path.extension().and_then(|e| e.to_str()) {
+                Some("csv") => benchmark_to_csv(&runs),
+                _ => benchmark_to_json(&runs)?,
+            };
+            tokio::fs::write(&path, content).await?;
+            Ok(())
+        }
+        .await;
+        let msg = match result {
+            Ok(()) => DaemonMessage::CommandOk(format!("exported to {}", path.display())),
+            Err(e) => DaemonMessage::CommandError(TuiError::Generic(e.to_string())),
+        };
+        let _ = daemon_tx.send(msg);
+    });
+}
+
 /// Spawn a background task to switch the benchmark backend for the active connection.
 fn spawn_switch_backend_task(
     backend: String,
@@ -889,8 +938,11 @@ fn maybe_spawn_command(
 mod tests {
     use super::*;
     use ferro_wg_core::config::AppConfig;
+    use ferro_wg_core::stats::BenchmarkResult;
     use ferro_wg_tui_core::AppState;
+    use ferro_wg_tui_core::benchmark::{BenchmarkResultMap, BenchmarkRun};
     use std::path::PathBuf;
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::task::JoinSet;
 
@@ -947,5 +999,99 @@ mod tests {
         if let DaemonMessage::CommandError(TuiError::DaemonResponse(s)) = msg {
             assert!(s.contains("no active connection"));
         }
+    }
+
+    fn make_test_run() -> BenchmarkRun {
+        let mut results = BenchmarkResultMap::new();
+        results.insert(
+            "boringtun".to_string(),
+            BenchmarkResult {
+                backend: "boringtun".to_string(),
+                packets_processed: 1000,
+                bytes_encapsulated: 100_000,
+                elapsed: Duration::from_secs(1),
+                throughput_bps: 800_000.0,
+                avg_latency: Duration::from_micros(100),
+                p50_latency: Duration::ZERO,
+                p95_latency: Duration::ZERO,
+                p99_latency: Duration::ZERO,
+            },
+        );
+        BenchmarkRun {
+            timestamp_ms: 1_234_567_890,
+            connection_name: "test_conn".to_string(),
+            results,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_export_task_csv_success() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_export.csv");
+        let runs = vec![make_test_run()];
+        let (tx, mut rx) = mpsc::unbounded_channel::<DaemonMessage>();
+        let mut tasks = JoinSet::new();
+
+        spawn_export_task(path.clone(), &runs, &tx, &mut tasks);
+
+        // Wait for the task to complete
+        tasks.join_next().await.unwrap().unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg, DaemonMessage::CommandOk(_)));
+
+        // Check file content
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("timestamp_ms,connection_name,backend"));
+        assert!(content.contains("1234567890"));
+        assert!(content.contains("test_conn"));
+        assert!(content.contains("boringtun"));
+        assert!(content.contains("800000"));
+
+        // Cleanup
+        tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_spawn_export_task_json_success() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_export.json");
+        let runs = vec![make_test_run()];
+        let (tx, mut rx) = mpsc::unbounded_channel::<DaemonMessage>();
+        let mut tasks = JoinSet::new();
+
+        spawn_export_task(path.clone(), &runs, &tx, &mut tasks);
+
+        // Wait for the task to complete
+        tasks.join_next().await.unwrap().unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg, DaemonMessage::CommandOk(_)));
+
+        // Check file content
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("\"timestamp_ms\":"));
+        assert!(content.contains("1234567890"));
+        assert!(content.contains("\"connection_name\": \"test_conn\""));
+        assert!(content.contains("\"boringtun\""));
+
+        // Cleanup
+        tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_spawn_export_task_io_failure() {
+        let path = PathBuf::from("/invalid/path/test.json");
+        let runs = vec![make_test_run()];
+        let (tx, mut rx) = mpsc::unbounded_channel::<DaemonMessage>();
+        let mut tasks = JoinSet::new();
+
+        spawn_export_task(path, &runs, &tx, &mut tasks);
+
+        // Wait for the task to complete
+        tasks.join_next().await.unwrap().unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg, DaemonMessage::CommandError(_)));
     }
 }
