@@ -8,6 +8,7 @@
 mod event;
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -28,10 +29,11 @@ use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_
 use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
 use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
-    CompareComponent, ConfigComponent, ConnectionBarComponent, LogsComponent, OverviewComponent,
-    PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
+    CompareComponent, ConfigComponent, ConfirmDialogComponent, ConnectionBarComponent,
+    LogsComponent, OverviewComponent, PeersComponent, StatusBarComponent, StatusComponent,
+    TabBarComponent,
 };
-use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
+use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
 use tracing::warn;
 
 use event::{AppEvent, EventHandler};
@@ -72,8 +74,8 @@ enum DaemonMessage {
 /// All TUI components, grouped to reduce function parameter counts.
 ///
 /// Components are split into tab content (`tabs`) and fixed chrome
-/// (`tab_bar`, `status_bar`, `connection_bar`).  The index into `tabs`
-/// corresponds to [`Tab::index()`](ferro_wg_tui_core::Tab).
+/// (`tab_bar`, `status_bar`, `connection_bar`, `confirm_dialog`).
+/// The index into `tabs` corresponds to [`Tab::index()`](ferro_wg_tui_core::Tab).
 struct ComponentBundle {
     /// Tab content components in tab-index order.
     tabs: Vec<Box<dyn Component>>,
@@ -83,6 +85,8 @@ struct ComponentBundle {
     status_bar: StatusBarComponent,
     /// Optional chrome: multi-connection selector bar.
     connection_bar: ConnectionBarComponent,
+    /// Modal overlay: confirmation dialog (rendered on top of everything).
+    confirm_dialog: ConfirmDialogComponent,
 }
 
 impl ComponentBundle {
@@ -99,6 +103,7 @@ impl ComponentBundle {
             tab_bar: TabBarComponent::new(),
             status_bar: StatusBarComponent::new(),
             connection_bar: ConnectionBarComponent::new(),
+            confirm_dialog: ConfirmDialogComponent::new(),
         }
     }
 }
@@ -140,6 +145,8 @@ fn render_ui(
         }
         bundle.tabs[state.active_tab.index()].render(frame, chunks[2], true, state);
         bundle.status_bar.render(frame, chunks[3], false, state);
+        // Render the confirmation dialog last so it floats on top of all other content.
+        bundle.confirm_dialog.render(frame, chunks[2], false, state);
     })?;
     Ok(())
 }
@@ -152,16 +159,36 @@ fn handle_key_event(
     daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
 ) {
-    let action = if state.input_mode == InputMode::Search {
+    let action = if state.pending_confirm.is_some() {
+        // Confirmation dialog captures all keys; no other handler runs.
+        bundle.confirm_dialog.handle_key(key, state)
+    } else if state.input_mode == InputMode::Search {
         bundle.status_bar.handle_key(key, state)
     } else {
         handle_global_key(key)
             .or_else(|| bundle.connection_bar.handle_key(key, state))
             .or_else(|| bundle.tabs[state.active_tab.index()].handle_key(key, state))
     };
-    if let Some(ref action) = action {
-        dispatch_all(state, action, bundle);
-        maybe_spawn_command(action, daemon_tx, tasks);
+
+    let Some(ref action) = action else { return };
+
+    // For ConfirmYes: peek at the pending action *before* dispatch clears it,
+    // so we can immediately dispatch the confirmed follow-up action.
+    let follow_up = if matches!(action, Action::ConfirmYes) {
+        state
+            .pending_confirm
+            .as_ref()
+            .map(|p| confirmed_action(&p.action))
+    } else {
+        None
+    };
+
+    dispatch_all(state, action, bundle);
+    maybe_spawn_command(action, daemon_tx, tasks);
+
+    if let Some(ref follow) = follow_up {
+        dispatch_all(state, follow, bundle);
+        maybe_spawn_command(follow, daemon_tx, tasks);
     }
 }
 
@@ -240,7 +267,10 @@ fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
 /// - The [`Terminal`] backend cannot be created or cleared
 /// - A terminal draw call fails (e.g. the underlying writer returns an I/O error)
 /// - The event handler fails to read a terminal event
-pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    app_config: AppConfig,
+    config_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -250,7 +280,7 @@ pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>
     terminal.clear()?;
 
     // Run the event loop, then restore terminal regardless of outcome.
-    let result = event_loop(&mut terminal, app_config).await;
+    let result = event_loop(&mut terminal, app_config, config_path).await;
 
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
@@ -263,6 +293,7 @@ pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app_config: AppConfig,
+    _config_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new(app_config);
     let mut bundle = ComponentBundle::new();
@@ -339,6 +370,19 @@ fn dispatch_all(state: &mut AppState, action: &Action, bundle: &mut ComponentBun
     }
     bundle.tab_bar.update(action, state);
     bundle.status_bar.update(action, state);
+    bundle.confirm_dialog.update(action, state);
+}
+
+/// Map a [`ConfirmAction`] to the [`Action`] that should execute after confirmation.
+///
+/// Called by [`handle_key_event`] when the user presses `y` to confirm.
+/// This is the bridge between the confirmation dialog and the downstream
+/// command dispatch.
+fn confirmed_action(action: &ConfirmAction) -> Action {
+    match action {
+        ConfirmAction::DisconnectAll => Action::DisconnectAll,
+        ConfirmAction::StopDaemon => Action::StopDaemon,
+    }
 }
 
 /// Handle global key events that apply regardless of which component

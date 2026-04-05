@@ -15,7 +15,7 @@ use ferro_wg_core::ipc::LogEntry;
 use ferro_wg_core::stats::TunnelStats;
 use tracing::warn;
 
-use crate::action::Action;
+use crate::action::{Action, ConfirmAction};
 use crate::app::{InputMode, Tab};
 use crate::theme::Theme;
 
@@ -64,6 +64,18 @@ pub struct ConnectionView {
     /// Which peer row is selected in the Status/Peers tabs for this
     /// connection. Preserved when switching away and back.
     pub selected_peer_row: usize,
+}
+
+/// A pending action awaiting user confirmation.
+///
+/// Stored on [`AppState`] while the confirmation overlay is visible.
+/// Cleared by [`Action::ConfirmYes`] or [`Action::ConfirmNo`].
+#[derive(Debug, Clone)]
+pub struct ConfirmPending {
+    /// The message shown in the confirmation overlay.
+    pub message: String,
+    /// The action to execute if the user confirms.
+    pub action: ConfirmAction,
 }
 
 /// A transient feedback message shown in the status bar.
@@ -133,6 +145,8 @@ pub struct AppState {
     pub feedback: Option<Feedback>,
     /// Log display preferences forwarded from [`AppConfig`].
     pub log_display: LogDisplayConfig,
+    /// Pending confirmation dialog, or `None` when no dialog is active.
+    pub pending_confirm: Option<ConfirmPending>,
 }
 
 impl AppState {
@@ -167,6 +181,7 @@ impl AppState {
             daemon_connected: false,
             feedback: None,
             log_display: app_config.log_display,
+            pending_confirm: None,
         }
     }
 
@@ -248,31 +263,7 @@ impl AppState {
                     self.search_query.clear();
                 }
             }
-            Action::UpdatePeers(statuses) => {
-                self.daemon_connected = true;
-                for s in statuses {
-                    if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
-                        let state = if s.connected {
-                            ConnectionState::Connected
-                        } else {
-                            ConnectionState::Disconnected
-                        };
-                        conn.status = Some(ConnectionStatus {
-                            state,
-                            backend: s.backend,
-                            stats: s.stats.clone(),
-                            endpoint: s.endpoint.clone(),
-                            interface: s.interface.clone(),
-                        });
-                    } else {
-                        warn!(name = %s.name, "UpdatePeers received status for unknown connection");
-                    }
-                }
-                // Clamp in case connections changed (defensive; static in Phase 2).
-                self.selected_connection = self
-                    .selected_connection
-                    .min(self.connections.len().saturating_sub(1));
-            }
+            Action::UpdatePeers(statuses) => self.apply_peer_updates(statuses),
             Action::DaemonConnectivityChanged(connected) => {
                 self.daemon_connected = *connected;
             }
@@ -293,12 +284,57 @@ impl AppState {
                     conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
                 }
             }
-            // Tick and peer commands are handled by components or the event loop.
+            // -- Confirmation dialog --
+            Action::RequestConfirm { message, action } => {
+                self.pending_confirm = Some(ConfirmPending {
+                    message: message.clone(),
+                    action: action.clone(),
+                });
+            }
+            Action::ConfirmYes | Action::ConfirmNo => {
+                self.pending_confirm = None;
+            }
+            // These are handled by the event loop (maybe_spawn_command) or
+            // components. They carry no state-machine side-effects here.
             Action::Tick
             | Action::ConnectPeer(_)
             | Action::DisconnectPeer(_)
-            | Action::CyclePeerBackend(_) => {}
+            | Action::CyclePeerBackend(_)
+            | Action::ConnectAll
+            | Action::DisconnectAll
+            | Action::StartDaemon
+            | Action::StopDaemon => {}
         }
+    }
+
+    /// Apply a batch of peer status updates from a daemon poll.
+    ///
+    /// Marks the daemon as reachable, updates each named connection, and
+    /// clamps `selected_connection` into bounds in case the list changed.
+    fn apply_peer_updates(&mut self, statuses: &[ferro_wg_core::ipc::PeerStatus]) {
+        self.daemon_connected = true;
+        for s in statuses {
+            if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
+                let state = if s.connected {
+                    ConnectionState::Connected
+                } else {
+                    ConnectionState::Disconnected
+                };
+                conn.status = Some(ConnectionStatus {
+                    state,
+                    backend: s.backend,
+                    stats: s.stats.clone(),
+                    endpoint: s.endpoint.clone(),
+                    interface: s.interface.clone(),
+                });
+            } else {
+                warn!(name = %s.name, "UpdatePeers received status for unknown connection");
+            }
+        }
+        // Clamp in case connections changed (defensive; static in Phase 2).
+        self.selected_connection = self
+            .selected_connection
+            .min(self.connections.len().saturating_sub(1));
     }
 
     /// Clear expired feedback messages. Called on each tick.
@@ -771,5 +807,71 @@ mod tests {
         assert_eq!(buf.len(), 1000);
         assert_eq!(buf.back().unwrap().message, "overflow");
         assert_eq!(buf.front().unwrap().message, "line1");
+    }
+
+    // ── Confirmation dialog tests ─────────────────────────────────────────────
+
+    use crate::action::ConfirmAction;
+
+    #[test]
+    fn request_confirm_sets_pending() {
+        let mut state = two_connection_state();
+        assert!(state.pending_confirm.is_none());
+        state.dispatch(&Action::RequestConfirm {
+            message: "Disconnect all?".into(),
+            action: ConfirmAction::DisconnectAll,
+        });
+        let pending = state.pending_confirm.as_ref().expect("pending must be set");
+        assert_eq!(pending.message, "Disconnect all?");
+        assert_eq!(pending.action, ConfirmAction::DisconnectAll);
+    }
+
+    #[test]
+    fn confirm_yes_clears_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::RequestConfirm {
+            message: "Stop daemon?".into(),
+            action: ConfirmAction::StopDaemon,
+        });
+        assert!(state.pending_confirm.is_some());
+        state.dispatch(&Action::ConfirmYes);
+        assert!(state.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_no_clears_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::RequestConfirm {
+            message: "Disconnect all?".into(),
+            action: ConfirmAction::DisconnectAll,
+        });
+        assert!(state.pending_confirm.is_some());
+        state.dispatch(&Action::ConfirmNo);
+        assert!(state.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_no_pending_is_noop() {
+        let mut state = two_connection_state();
+        // Dispatching ConfirmYes/No with no pending is a no-op (must not panic).
+        state.dispatch(&Action::ConfirmYes);
+        state.dispatch(&Action::ConfirmNo);
+        assert!(state.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn second_request_confirm_replaces_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::RequestConfirm {
+            message: "First?".into(),
+            action: ConfirmAction::DisconnectAll,
+        });
+        state.dispatch(&Action::RequestConfirm {
+            message: "Second?".into(),
+            action: ConfirmAction::StopDaemon,
+        });
+        let pending = state.pending_confirm.as_ref().unwrap();
+        assert_eq!(pending.message, "Second?");
+        assert_eq!(pending.action, ConfirmAction::StopDaemon);
     }
 }

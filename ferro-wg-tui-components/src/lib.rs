@@ -18,6 +18,7 @@
 
 pub mod compare;
 pub mod config;
+pub mod confirm_dialog;
 pub mod connection_bar;
 pub mod logs;
 pub mod overview;
@@ -28,6 +29,7 @@ pub mod tab_bar;
 
 pub use compare::CompareComponent;
 pub use config::ConfigComponent;
+pub use confirm_dialog::ConfirmDialogComponent;
 pub use connection_bar::ConnectionBarComponent;
 pub use logs::LogsComponent;
 pub use overview::OverviewComponent;
