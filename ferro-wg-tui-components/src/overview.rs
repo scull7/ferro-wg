@@ -7,7 +7,8 @@ use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use ferro_wg_tui_core::{
-    Action, AppState, Component, ConnectionState, Tab, format_bytes, format_handshake_age,
+    Action, AppState, Component, ConfirmAction, ConnectionState, Tab, format_bytes,
+    format_handshake_age,
 };
 
 // Overview table column widths. Must sum to 100 for the percentage columns
@@ -55,15 +56,12 @@ impl Default for OverviewComponent {
 
 impl Component for OverviewComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
-        if state.connections.is_empty() {
-            return None;
-        }
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') if !state.connections.is_empty() => {
                 let next = (state.selected_connection + 1) % state.connections.len();
                 Some(Action::SelectConnection(next))
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') if !state.connections.is_empty() => {
                 let prev = state
                     .selected_connection
                     .checked_sub(1)
@@ -71,6 +69,13 @@ impl Component for OverviewComponent {
                 Some(Action::SelectConnection(prev))
             }
             KeyCode::Enter => Some(Action::SelectTab(Tab::Status)),
+            // Bulk connection control (daemon must be connected to be useful,
+            // but we don't gate here — feedback from the daemon handles errors).
+            KeyCode::Char('u') => Some(Action::ConnectAll),
+            KeyCode::Char('d') => Some(Action::RequestConfirm {
+                message: "Tear down all connections?".to_owned(),
+                action: ConfirmAction::DisconnectAll,
+            }),
             _ => None,
         }
     }
@@ -459,5 +464,46 @@ mod tests {
         });
         state.selected_connection = 99;
         render_overview(&state); // must not panic
+    }
+
+    // ── Commit 2: bulk connection keybindings ─────────────────────────────────
+
+    #[test]
+    fn overview_u_emits_connect_all() {
+        let mut comp = OverviewComponent::new();
+        let state = three_connection_state();
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('u')), &state),
+            Some(Action::ConnectAll),
+        );
+    }
+
+    #[test]
+    fn overview_d_emits_request_confirm_disconnect_all() {
+        use ferro_wg_tui_core::ConfirmAction;
+        let mut comp = OverviewComponent::new();
+        let state = three_connection_state();
+        let action = comp.handle_key(KeyEvent::from(KeyCode::Char('d')), &state);
+        assert!(
+            matches!(
+                action,
+                Some(Action::RequestConfirm {
+                    action: ConfirmAction::DisconnectAll,
+                    ..
+                })
+            ),
+            "expected RequestConfirm(DisconnectAll), got {action:?}"
+        );
+    }
+
+    #[test]
+    fn overview_u_works_on_empty_connections() {
+        let mut comp = OverviewComponent::new();
+        let state = AppState::new(AppConfig::default());
+        // ConnectAll should still be emitted even with no connections (daemon handles it).
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('u')), &state),
+            Some(Action::ConnectAll),
+        );
     }
 }

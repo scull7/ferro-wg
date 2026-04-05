@@ -87,15 +87,22 @@ impl Component for StatusBarComponent {
                         Span::styled("/", hotkey),
                         Span::raw(" search  "),
                     ];
-                    if state.active_tab == Tab::Status {
-                        spans.extend([
+                    match state.active_tab {
+                        Tab::Overview => spans.extend([
+                            Span::styled("u", hotkey),
+                            Span::raw(" up-all  "),
+                            Span::styled("d", hotkey),
+                            Span::raw(" down-all  "),
+                        ]),
+                        Tab::Status => spans.extend([
                             Span::styled("u", hotkey),
                             Span::raw(" up  "),
                             Span::styled("d", hotkey),
                             Span::raw(" down  "),
                             Span::styled("b", hotkey),
                             Span::raw(" backend  "),
-                        ]);
+                        ]),
+                        _ => {}
                     }
                     spans.extend([Span::styled("j/k", hotkey), Span::raw(" nav")]);
                     Line::from(spans)

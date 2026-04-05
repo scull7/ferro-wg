@@ -459,6 +459,19 @@ fn maybe_spawn_command(
             },
             format!("Switched backend: {name}"),
         ),
+        Action::ConnectAll => (
+            DaemonCommand::Up {
+                connection_name: None,
+                backend: BackendKind::Boringtun,
+            },
+            "All connections up".to_owned(),
+        ),
+        Action::DisconnectAll => (
+            DaemonCommand::Down {
+                connection_name: None,
+            },
+            "All connections down".to_owned(),
+        ),
         _ => return,
     };
 
