@@ -224,17 +224,60 @@ double-spawn races.
 
 ---
 
-## New keybindings (Overview tab)
+## New keybindings
+
+### Conflict analysis
+
+All existing global keys must remain unaffected. Full audit:
+
+| Key | Existing binding | New binding | Conflict? |
+|-----|-----------------|-------------|-----------|
+| `q` / `Esc` | Quit | — | No |
+| `Tab` / `Right` | NextTab | — | No |
+| `BackTab` / `Left` | PrevTab | — | No |
+| `1`–`6` | SelectTab | — | No |
+| `/` | EnterSearch | — | No |
+| `j` / `k` / `↑` / `↓` | NextRow / PrevRow | — | No |
+| `u` | (Overview only) ConnectPeer on Status tab | **ConnectAll on Overview** | No — different tabs |
+| `d` | (Status only) DisconnectPeer | **DisconnectAll on Overview** | No — different tabs |
+| `b` | (Status only) CyclePeerBackend | — | No |
+| `c` | (Logs only) ConnectionFilter toggle | — | No |
+| `l` | (Logs only) CycleLogLevel | — | No |
+| `g` / `G` | (Logs only) scroll top/bottom | — | No |
+| `s` | **new** StartDaemon (Overview, `!daemon_connected`) | — | No |
+| `S` | **new** StopDaemon (Overview, `daemon_connected`) | — | No |
+| `i` | **new** EnterImport (global, Normal mode) | — | No |
+
+`u` and `d` are safe because Overview and Status are different tabs; only the active
+tab's component receives key events.
+
+### Overview tab bindings
+
+| Key | Action | Shown in hint? |
+|-----|--------|----------------|
+| `u` | `ConnectAll` | Yes |
+| `d` | `DisconnectAll` → confirm | Yes |
+| `s` | `StartDaemon` | Only when `!daemon_connected` |
+| `S` | `StopDaemon` → confirm | Only when `daemon_connected` |
+
+### Global binding
 
 | Key | Action | Condition |
 |-----|--------|-----------|
-| `u` | `ConnectAll` | always |
-| `d` | `DisconnectAll` → confirm | always |
-| `s` | `StartDaemon` | `!daemon_connected` |
-| `S` | `StopDaemon` → confirm | `daemon_connected` |
-| `i` | `EnterImport` | global (Normal mode only) |
+| `i` | `EnterImport` | Normal mode only (not Search, Import, or confirm pending) |
 
-Status bar hint line updated to show these when on the Overview tab.
+### Status bar hint line length
+
+The hint line already uses a compact format (`q quit  / search  j/k nav`).
+New hints are additive only for the active context:
+
+- **Overview normal, daemon connected:** `q quit  u up-all  d down-all  S stop  i import`
+- **Overview normal, daemon disconnected:** `q quit  u up-all  d down-all  s start  i import`
+- **Overview, confirm pending:** *(hint replaced by dialog — status bar hidden)*
+- **Import mode:** `Esc cancel  Enter submit` (replaces all other hints)
+
+At 80-column minimum terminal width these lines fit within ~60 chars, leaving room
+for the daemon connectivity indicator `[*]` or `[o]` on the right.
 
 ---
 
@@ -342,7 +385,8 @@ and `CommandError` on timeout (mock the socket check with a test helper).
 - `ferro-wg-tui-core/src/state.rs` — dispatch import mode actions; dispatch `ReloadConfig` (rebuild `connections`)
 - `ferro-wg-tui/src/lib.rs` — import mode key routing; spawn import background task; `DaemonMessage::ReloadConfig` variant
 - `ferro-wg-tui-components/src/status_bar.rs` — render `Import path: <buf>█` in Import mode; `i import` hint in Normal mode
-- Global key `i` → `EnterImport` (added to `handle_global_key` when not in Search/Import/confirm mode)
+- Global key `i` → `EnterImport` (added to `handle_global_key`; guarded: no-op when
+  `InputMode::Search`, `InputMode::Import(_)`, or `pending_confirm.is_some()`)
 
 **Tests:** `EnterImport` sets mode; `ImportKey(Char('x'))` appends to buffer;
 `ImportKey(Backspace)` pops last char; `SubmitImport` returns to Normal;
