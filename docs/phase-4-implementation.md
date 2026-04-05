@@ -173,13 +173,27 @@ This collapses two Action variants (`ImportInput` + `ImportBackspace`) into one
 (`ImportKey`), keeping the enum lean while placing the char-handling logic where it
 belongs — in `dispatch`, not in the event router.
 
-### After import submit
+### After import submit — validation and error handling
 
-`lib.rs` extracts the path string from the action, spawns a background task:
-1. `config::wg_quick::load_from_file(path)` — parse
-2. Name peers (same logic as `cmd_import` in `ferro-wg/src/main.rs:336`)
-3. Load or create `AppConfig`, insert connection, `config::toml::save_app_config`
-4. Re-read `AppConfig` from disk, send `DaemonMessage::ReloadConfig(new_config)`
+`lib.rs` extracts the path string from the action and spawns a background task.
+Each step fails fast and sends a typed `DaemonMessage::CommandError` on failure.
+
+**Step-by-step with error cases:**
+
+| Step | Operation | Error case | User-visible message |
+|------|-----------|------------|----------------------|
+| 1 | Check `path.exists()` | File not found | `"Import failed: file not found: <path>"` |
+| 2 | Check `std::fs::metadata(path).is_ok()` | Permission denied | `"Import failed: cannot read file: <path>"` |
+| 3 | `config::wg_quick::load_from_file(path)` | Malformed config | `"Import failed: <WgQuickParse error with line number>"` |
+| 4 | Name peers (mirrors `cmd_import` in `main.rs:336`) | — | — |
+| 5 | `config::toml::load_app_config` or `AppConfig::default()` if not exists | Parse error on existing config | `"Import failed: could not read existing config: <e>"` |
+| 6 | Check `app_config.connections.contains_key(&conn_name)` | Name conflict | `DaemonOk("Replaced existing connection: <name>")` — overwrite silently, matching CLI behaviour |
+| 7 | `app_config.insert(conn_name, wg_config)` | — | — |
+| 8 | `config::toml::save_app_config(&app_config, config_path)` | Write error (permissions, disk full) | `"Import failed: could not save config: <e>"` |
+| 9 | Send `DaemonMessage::ReloadConfig(new_config)` | — | `DaemonOk("Imported: <conn_name>")` |
+
+**`WgError::WgQuickParse`** already carries `line` and `reason` fields
+(`ferro-wg-core/src/error.rs:51`). Surface them verbatim — no extra wrapping needed.
 
 On `ReloadConfig`, dispatch `Action::ReloadConfig(app_config)`, which rebuilds
 `state.connections` (same logic as `AppState::new`).
@@ -303,7 +317,9 @@ and `CommandError` on timeout (mock the socket check with a test helper).
 
 **Tests:** `EnterImport` sets mode; `ImportKey(Char('x'))` appends to buffer;
 `ImportKey(Backspace)` pops last char; `SubmitImport` returns to Normal;
-`ReloadConfig` rebuilds connections.
+`ReloadConfig` rebuilds connections; import task returns `CommandError` for missing file,
+unreadable file, and malformed wg-quick content (unit-test the background task logic
+using a temp dir).
 
 ---
 
