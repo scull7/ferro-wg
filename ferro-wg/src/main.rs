@@ -112,7 +112,7 @@ fn cmd_up(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
-        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
+        DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
     }
 }
 
@@ -131,7 +131,7 @@ fn cmd_down(peer: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
-        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
+        DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
     }
 }
 
@@ -200,7 +200,7 @@ fn cmd_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Ok => Err("unexpected response from daemon".into()),
-        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
+        DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
     }
 }
 
@@ -270,7 +270,7 @@ fn cmd_daemon(
     println!("Press Ctrl+C to stop.\n");
 
     // Bounded channel: sender blocks under backpressure instead of dropping messages.
-    let (log_tx, log_rx) = tokio::sync::mpsc::channel::<String>(4096);
+    let (log_tx, log_rx) = tokio::sync::mpsc::channel::<ferro_wg_core::ipc::LogEntry>(4096);
     let log_buffer = ferro_wg_core::daemon::LogBuffer::new(1000);
     let log_buffer_for_broadcast = log_buffer.clone();
 
@@ -280,9 +280,9 @@ fn cmd_daemon(
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                let lines = log_buffer_for_broadcast.drain_logs();
-                for line in lines {
-                    if log_tx.send(line).await.is_err() {
+                let entries = log_buffer_for_broadcast.drain_logs();
+                for entry in entries {
+                    if log_tx.send(entry).await.is_err() {
                         // Receiver dropped; daemon is shutting down.
                         return;
                     }
@@ -305,7 +305,7 @@ fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
         }
         DaemonResponse::Error(e) => Err(e.into()),
         DaemonResponse::Status(_) => Err("unexpected response from daemon".into()),
-        DaemonResponse::LogLine(_) => Err("unexpected log line response".into()),
+        DaemonResponse::LogEntry(_) => Err("unexpected log entry response".into()),
     }
 }
 

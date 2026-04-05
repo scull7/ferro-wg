@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use ferro_wg_core::daemon::{LogBuffer, LogLayer};
+use ferro_wg_core::ipc::LogEntry;
 use tokio::sync::mpsc;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -42,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Bounded channel: sender blocks under backpressure instead of dropping messages.
-    let (log_tx, log_rx) = mpsc::channel::<String>(4096);
+    let (log_tx, log_rx) = mpsc::channel::<LogEntry>(4096);
     let log_buffer = LogBuffer::new(1000);
 
     // Spawn broadcaster task to isolate async I/O from the tracing layer.
@@ -52,9 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rt.block_on(async {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                let lines = log_buffer_for_broadcast.drain_logs();
-                for line in lines {
-                    if log_tx.send(line).await.is_err() {
+                let entries = log_buffer_for_broadcast.drain_logs();
+                for entry in entries {
+                    if log_tx.send(entry).await.is_err() {
                         // Receiver dropped; daemon is shutting down.
                         return;
                     }

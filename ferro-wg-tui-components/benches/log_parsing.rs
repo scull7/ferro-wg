@@ -1,18 +1,27 @@
-//! Performance benchmarks for `LogsComponent::parse_log_line`.
+//! Performance benchmarks for `LogsComponent::render_entry`.
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ferro_wg_core::config::LogDisplayConfig;
+use ferro_wg_core::ipc::{LogEntry, LogLevel};
 use ferro_wg_tui_components::logs::LogsComponent;
 use ferro_wg_tui_core::Theme;
 
-fn benchmark_log_parsing(c: &mut Criterion) {
-    let test_lines = vec![
-        "12:34:56 INFO ferro_wg_core::tunnel::mod: Connection established",
-        "12:34:57 ERROR ferro_wg_core::error: Failed to bind socket",
-        "12:34:58 WARN ferro_wg_core::tunnel: Handshake timeout",
-        "12:34:59 DEBUG ferro_wg_core::stats: Packets: 42 rx, 37 tx",
-        "INFO ferro_wg_core::legacy: Old format log", // Legacy format
-        "some malformed log message",                 // Malformed
+fn make_entry(level: LogLevel, connection: Option<&str>, msg: &str) -> LogEntry {
+    LogEntry {
+        timestamp_ms: 1_712_188_800_000,
+        level,
+        connection_name: connection.map(ToOwned::to_owned),
+        message: msg.to_owned(),
+    }
+}
+
+fn benchmark_render_entry(c: &mut Criterion) {
+    let entries = vec![
+        make_entry(LogLevel::Info, Some("mia"), "Connection established"),
+        make_entry(LogLevel::Error, Some("mia"), "Failed to bind socket"),
+        make_entry(LogLevel::Warn, None, "Handshake timeout"),
+        make_entry(LogLevel::Debug, Some("lon"), "Packets: 42 rx, 37 tx"),
+        make_entry(LogLevel::Trace, None, "Internal trace event"),
     ];
 
     let cfg_all = LogDisplayConfig {
@@ -30,30 +39,30 @@ fn benchmark_log_parsing(c: &mut Criterion) {
 
     let theme = Theme::mocha();
 
-    c.bench_function("parse_log_lines", |b| {
+    c.bench_function("render_entry_all_options", |b| {
         b.iter(|| {
-            for line in &test_lines {
-                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_all, &theme));
+            for entry in &entries {
+                let _ = black_box(LogsComponent::render_entry(entry, &cfg_all, &theme));
             }
         });
     });
 
-    c.bench_function("parse_log_lines_no_timestamps", |b| {
+    c.bench_function("render_entry_no_timestamps", |b| {
         b.iter(|| {
-            for line in &test_lines {
-                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_ts, &theme));
+            for entry in &entries {
+                let _ = black_box(LogsComponent::render_entry(entry, &cfg_no_ts, &theme));
             }
         });
     });
 
-    c.bench_function("parse_log_lines_no_colors", |b| {
+    c.bench_function("render_entry_no_colors", |b| {
         b.iter(|| {
-            for line in &test_lines {
-                let _ = black_box(LogsComponent::parse_log_line(line, &cfg_no_color, &theme));
+            for entry in &entries {
+                let _ = black_box(LogsComponent::render_entry(entry, &cfg_no_color, &theme));
             }
         });
     });
 }
 
-criterion_group!(benches, benchmark_log_parsing);
+criterion_group!(benches, benchmark_render_entry);
 criterion_main!(benches);

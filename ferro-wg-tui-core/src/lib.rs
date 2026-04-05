@@ -19,6 +19,7 @@ pub mod util;
 pub use action::Action;
 pub use app::{InputMode, Tab};
 pub use component::Component;
+pub use ferro_wg_core::ipc::LogEntry;
 pub use state::{AppState, ConnectionState, ConnectionStatus, ConnectionView, Feedback};
 pub use theme::Theme;
 pub use util::{format_bytes, format_handshake_age};
