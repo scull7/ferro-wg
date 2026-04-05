@@ -240,12 +240,41 @@ Status bar hint line updated to show these when on the Overview tab.
 
 ## Health indicator computation
 
-Computed during `dispatch(UpdatePeers)` in `state.rs`, stored in `ConnectionStatus`:
+### Pure computation function
 
+Health warnings are derived from peer data via a standalone pure function — **not**
+computed inline in `dispatch`. This isolates the calculation layer from the state
+mutation layer (Grokking Simplicity: separate calculations from actions).
+
+```rust
+/// Pure: derives a health warning from a connected tunnel's stats.
+///
+/// Returns `None` when the connection is healthy or disconnected.
+/// Called from `dispatch(UpdatePeers)` and unit-testable without `AppState`.
+pub fn compute_health_warning(connected: bool, stats: &TunnelStats) -> Option<String> {
+    if !connected {
+        return None;
+    }
+    if stats.tx_bytes > 0 && stats.rx_bytes == 0 {
+        return Some("sending but not receiving".to_owned());
+    }
+    if stats.last_handshake.map_or(false, |hs| hs > Duration::from_secs(180)) {
+        return Some("handshake stale".to_owned());
+    }
+    None
+}
 ```
-connected && tx_bytes > 0 && rx_bytes == 0  →  "sending but not receiving"
-connected && last_handshake > 180 s          →  "handshake stale"
+
+Lives in `ferro-wg-tui-core/src/state.rs` as a module-level `pub fn` (not a method).
+`dispatch(UpdatePeers)` calls it after updating each `ConnectionStatus`:
+
+```rust
+status.health_warning = compute_health_warning(peer.connected, &peer.stats);
 ```
+
+`ConnectionStatus` gains `pub health_warning: Option<String>`.
+
+### Rendering
 
 Rendered as `[!]` in `theme.warning` color in:
 - **Overview** — new `Health` column (after Backend)
@@ -331,7 +360,9 @@ using a temp dir).
 - `ferro-wg-tui-components/src/status.rs` — warning line in connection summary header
 - `ferro-wg-tui-components/src/connection_bar.rs` — `!` appended to state indicator
 
-**Tests:** Unit test health computation for "sending but not receiving" and "handshake stale" conditions.
+**Tests:** Unit test `compute_health_warning` directly (no `AppState` needed):
+disconnected → `None`; `tx > 0 && rx == 0` → `Some`; `last_handshake > 180s` → `Some`;
+both healthy → `None`; `dispatch(UpdatePeers)` propagates warning into `ConnectionStatus`.
 
 ---
 
