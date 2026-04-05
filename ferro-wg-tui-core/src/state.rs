@@ -15,7 +15,9 @@ use ferro_wg_core::ipc::LogEntry;
 use ferro_wg_core::stats::TunnelStats;
 use tracing::warn;
 
-use crate::action::Action;
+use crossterm::event::KeyCode;
+
+use crate::action::{Action, ConfirmAction};
 use crate::app::{InputMode, Tab};
 use crate::theme::Theme;
 
@@ -36,6 +38,13 @@ pub enum ConnectionState {
     Disconnected,
 }
 
+/// Stale-handshake threshold: a connected tunnel whose last successful
+/// handshake is older than this is considered unhealthy.
+const STALE_HANDSHAKE: Duration = Duration::from_secs(180);
+
+/// Packet-loss threshold above which a connected tunnel is considered unhealthy.
+const HIGH_PACKET_LOSS: f32 = 0.1;
+
 /// Live status for one connection, sourced from a `PeerStatus` daemon response.
 #[derive(Debug, Clone)]
 pub struct ConnectionStatus {
@@ -49,6 +58,38 @@ pub struct ConnectionStatus {
     pub endpoint: Option<String>,
     /// The local TUN interface name (e.g. `utun4`).
     pub interface: Option<String>,
+    /// Short human-readable health warning, `None` when the tunnel is healthy.
+    ///
+    /// Only set for [`ConnectionState::Connected`] tunnels; always `None`
+    /// when the tunnel is down.
+    pub health_warning: Option<String>,
+}
+
+/// Derive a health warning from tunnel statistics for a **connected** tunnel.
+///
+/// Returns `None` when the tunnel appears healthy. Stale handshake takes
+/// priority over high packet loss when both conditions are present.
+///
+/// # Arguments
+///
+/// * `stats` — statistics snapshot for the active tunnel.
+#[must_use]
+pub fn compute_health_warning(stats: &TunnelStats) -> Option<String> {
+    // Stale handshake: reported age exceeds the threshold.
+    if stats
+        .last_handshake
+        .is_some_and(|age| age > STALE_HANDSHAKE)
+    {
+        return Some("stale handshake".to_owned());
+    }
+    // High packet loss.
+    if stats.packet_loss > HIGH_PACKET_LOSS {
+        return Some(format!(
+            "high packet loss ({:.0}%)",
+            stats.packet_loss * 100.0
+        ));
+    }
+    None
 }
 
 /// Static config and live status for one named connection.
@@ -64,6 +105,18 @@ pub struct ConnectionView {
     /// Which peer row is selected in the Status/Peers tabs for this
     /// connection. Preserved when switching away and back.
     pub selected_peer_row: usize,
+}
+
+/// A pending action awaiting user confirmation.
+///
+/// Stored on [`AppState`] while the confirmation overlay is visible.
+/// Cleared by [`Action::ConfirmYes`] or [`Action::ConfirmNo`].
+#[derive(Debug, Clone)]
+pub struct ConfirmPending {
+    /// The message shown in the confirmation overlay.
+    pub message: String,
+    /// The action to execute if the user confirms.
+    pub action: ConfirmAction,
 }
 
 /// A transient feedback message shown in the status bar.
@@ -133,6 +186,8 @@ pub struct AppState {
     pub feedback: Option<Feedback>,
     /// Log display preferences forwarded from [`AppConfig`].
     pub log_display: LogDisplayConfig,
+    /// Pending confirmation dialog, or `None` when no dialog is active.
+    pub pending_confirm: Option<ConfirmPending>,
 }
 
 impl AppState {
@@ -167,6 +222,7 @@ impl AppState {
             daemon_connected: false,
             feedback: None,
             log_display: app_config.log_display,
+            pending_confirm: None,
         }
     }
 
@@ -248,31 +304,7 @@ impl AppState {
                     self.search_query.clear();
                 }
             }
-            Action::UpdatePeers(statuses) => {
-                self.daemon_connected = true;
-                for s in statuses {
-                    if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
-                        let state = if s.connected {
-                            ConnectionState::Connected
-                        } else {
-                            ConnectionState::Disconnected
-                        };
-                        conn.status = Some(ConnectionStatus {
-                            state,
-                            backend: s.backend,
-                            stats: s.stats.clone(),
-                            endpoint: s.endpoint.clone(),
-                            interface: s.interface.clone(),
-                        });
-                    } else {
-                        warn!(name = %s.name, "UpdatePeers received status for unknown connection");
-                    }
-                }
-                // Clamp in case connections changed (defensive; static in Phase 2).
-                self.selected_connection = self
-                    .selected_connection
-                    .min(self.connections.len().saturating_sub(1));
-            }
+            Action::UpdatePeers(statuses) => self.apply_peer_updates(statuses),
             Action::DaemonConnectivityChanged(connected) => {
                 self.daemon_connected = *connected;
             }
@@ -293,12 +325,124 @@ impl AppState {
                     conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
                 }
             }
-            // Tick and peer commands are handled by components or the event loop.
+            // -- wg-quick import --
+            Action::EnterImport => {
+                self.input_mode = InputMode::Import(String::new());
+            }
+            Action::ImportKey(key) => self.apply_import_key(key),
+            Action::SubmitImport | Action::ExitImport => {
+                self.input_mode = InputMode::Normal;
+            }
+            // -- Confirmation dialog --
+            Action::RequestConfirm { message, action } => {
+                self.pending_confirm = Some(ConfirmPending {
+                    message: message.clone(),
+                    action: action.clone(),
+                });
+            }
+            Action::ConfirmYes | Action::ConfirmNo => {
+                self.pending_confirm = None;
+            }
+            // These are handled by the event loop (maybe_spawn_command) or
+            // components. They carry no state-machine side-effects here.
             Action::Tick
             | Action::ConnectPeer(_)
             | Action::DisconnectPeer(_)
-            | Action::CyclePeerBackend(_) => {}
+            | Action::CyclePeerBackend(_)
+            | Action::ConnectAll
+            | Action::DisconnectAll
+            | Action::StartDaemon
+            | Action::StopDaemon => {}
         }
+    }
+
+    /// Handle a key event when in [`InputMode::Import`].
+    ///
+    /// Appends typed characters to the path buffer and removes the last
+    /// character on `Backspace`. All other keys are silently ignored.
+    fn apply_import_key(&mut self, key: &crossterm::event::KeyEvent) {
+        if let InputMode::Import(ref mut buf) = self.input_mode {
+            match key.code {
+                KeyCode::Char(c) => buf.push(c),
+                KeyCode::Backspace => {
+                    buf.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Apply a batch of peer status updates from a daemon poll.
+    ///
+    /// Marks the daemon as reachable, updates each named connection, and
+    /// clamps `selected_connection` into bounds in case the list changed.
+    fn apply_peer_updates(&mut self, statuses: &[ferro_wg_core::ipc::PeerStatus]) {
+        self.daemon_connected = true;
+        for s in statuses {
+            if let Some(conn) = self.connections.iter_mut().find(|c| c.name == s.name) {
+                let state = if s.connected {
+                    ConnectionState::Connected
+                } else {
+                    ConnectionState::Disconnected
+                };
+                let health_warning = if s.connected {
+                    compute_health_warning(&s.stats)
+                } else {
+                    None
+                };
+                conn.status = Some(ConnectionStatus {
+                    state,
+                    backend: s.backend,
+                    stats: s.stats.clone(),
+                    endpoint: s.endpoint.clone(),
+                    interface: s.interface.clone(),
+                    health_warning,
+                });
+            } else {
+                warn!(name = %s.name, "UpdatePeers received status for unknown connection");
+            }
+        }
+        // Clamp in case connections changed (defensive; static in Phase 2).
+        self.selected_connection = self
+            .selected_connection
+            .min(self.connections.len().saturating_sub(1));
+    }
+
+    /// The current import path buffer, when in [`InputMode::Import`].
+    ///
+    /// Returns `None` when not in import mode.
+    #[must_use]
+    pub fn import_buffer(&self) -> Option<&str> {
+        if let InputMode::Import(ref buf) = self.input_mode {
+            Some(buf.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// Rebuild the connection list from a new [`AppConfig`].
+    ///
+    /// Preserves `selected_connection` by clamping it into bounds.
+    /// All other connection state (live status, peer row) is reset because
+    /// the daemon will push fresh status on the next poll.
+    pub fn reload_from_config(&mut self, app_config: AppConfig) {
+        let AppConfig {
+            connections,
+            log_display,
+        } = app_config;
+        self.connections = connections
+            .into_iter()
+            .map(|(name, config)| ConnectionView {
+                name,
+                config,
+                status: None,
+                selected_peer_row: 0,
+            })
+            .collect();
+        self.log_display = log_display;
+        self.selected_connection = self
+            .selected_connection
+            .min(self.connections.len().saturating_sub(1));
     }
 
     /// Clear expired feedback messages. Called on each tick.
@@ -771,5 +915,250 @@ mod tests {
         assert_eq!(buf.len(), 1000);
         assert_eq!(buf.back().unwrap().message, "overflow");
         assert_eq!(buf.front().unwrap().message, "line1");
+    }
+
+    // ── Health indicator tests ────────────────────────────────────────────────
+
+    #[test]
+    fn compute_health_warning_healthy_tunnel() {
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(30)),
+            packet_loss: 0.0,
+            ..TunnelStats::default()
+        };
+        assert!(compute_health_warning(&stats).is_none());
+    }
+
+    #[test]
+    fn compute_health_warning_stale_handshake() {
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(200)),
+            packet_loss: 0.0,
+            ..TunnelStats::default()
+        };
+        let warning = compute_health_warning(&stats);
+        assert!(warning.is_some());
+        assert_eq!(warning.unwrap(), "stale handshake");
+    }
+
+    #[test]
+    fn compute_health_warning_high_packet_loss() {
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(30)),
+            packet_loss: 0.5,
+            ..TunnelStats::default()
+        };
+        let warning = compute_health_warning(&stats);
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("packet loss"));
+    }
+
+    #[test]
+    fn compute_health_warning_stale_takes_priority_over_packet_loss() {
+        // Both conditions; stale handshake must win.
+        let stats = TunnelStats {
+            last_handshake: Some(Duration::from_secs(300)),
+            packet_loss: 0.9,
+            ..TunnelStats::default()
+        };
+        let warning = compute_health_warning(&stats).unwrap();
+        assert_eq!(warning, "stale handshake");
+    }
+
+    #[test]
+    fn compute_health_warning_no_handshake_yet() {
+        // No handshake recorded → cannot be stale.
+        let stats = TunnelStats {
+            last_handshake: None,
+            packet_loss: 0.0,
+            ..TunnelStats::default()
+        };
+        assert!(compute_health_warning(&stats).is_none());
+    }
+
+    #[test]
+    fn update_peers_sets_health_warning_for_stale_connected_peer() {
+        let mut state = two_connection_state();
+        let mut statuses = vec![PeerStatus {
+            name: "mia".into(),
+            connected: true,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats {
+                last_handshake: Some(Duration::from_secs(300)), // stale
+                packet_loss: 0.0,
+                ..TunnelStats::default()
+            },
+            endpoint: None,
+            interface: None,
+        }];
+        state.dispatch(&Action::UpdatePeers(statuses.clone()));
+        let conn = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        let warning = conn.status.as_ref().unwrap().health_warning.as_deref();
+        assert_eq!(warning, Some("stale handshake"));
+
+        // A healthy reconnect must clear the warning.
+        statuses[0].stats.last_handshake = Some(Duration::from_secs(10));
+        state.dispatch(&Action::UpdatePeers(statuses));
+        let conn = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        assert!(conn.status.as_ref().unwrap().health_warning.is_none());
+    }
+
+    #[test]
+    fn update_peers_no_health_warning_when_disconnected() {
+        let mut state = two_connection_state();
+        // Even with stale stats, a disconnected peer must have no warning.
+        state.dispatch(&Action::UpdatePeers(vec![PeerStatus {
+            name: "mia".into(),
+            connected: false,
+            backend: BackendKind::Boringtun,
+            stats: TunnelStats {
+                last_handshake: Some(Duration::from_secs(9999)),
+                packet_loss: 1.0,
+                ..TunnelStats::default()
+            },
+            endpoint: None,
+            interface: None,
+        }]));
+        let conn = state.connections.iter().find(|c| c.name == "mia").unwrap();
+        assert!(conn.status.as_ref().unwrap().health_warning.is_none());
+    }
+
+    // ── Confirmation dialog tests ─────────────────────────────────────────────
+
+    use crate::action::ConfirmAction;
+
+    #[test]
+    fn request_confirm_sets_pending() {
+        let mut state = two_connection_state();
+        assert!(state.pending_confirm.is_none());
+        state.dispatch(&Action::RequestConfirm {
+            message: "Disconnect all?".into(),
+            action: ConfirmAction::DisconnectAll,
+        });
+        let pending = state.pending_confirm.as_ref().expect("pending must be set");
+        assert_eq!(pending.message, "Disconnect all?");
+        assert_eq!(pending.action, ConfirmAction::DisconnectAll);
+    }
+
+    #[test]
+    fn confirm_yes_clears_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::RequestConfirm {
+            message: "Stop daemon?".into(),
+            action: ConfirmAction::StopDaemon,
+        });
+        assert!(state.pending_confirm.is_some());
+        state.dispatch(&Action::ConfirmYes);
+        assert!(state.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_no_clears_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::RequestConfirm {
+            message: "Disconnect all?".into(),
+            action: ConfirmAction::DisconnectAll,
+        });
+        assert!(state.pending_confirm.is_some());
+        state.dispatch(&Action::ConfirmNo);
+        assert!(state.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_no_pending_is_noop() {
+        let mut state = two_connection_state();
+        // Dispatching ConfirmYes/No with no pending is a no-op (must not panic).
+        state.dispatch(&Action::ConfirmYes);
+        state.dispatch(&Action::ConfirmNo);
+        assert!(state.pending_confirm.is_none());
+    }
+
+    // ── wg-quick import tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn enter_import_sets_mode() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        assert_eq!(state.input_mode, InputMode::Import(String::new()));
+    }
+
+    #[test]
+    fn import_key_appends_char() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('a'));
+        state.dispatch(&Action::ImportKey(key));
+        assert_eq!(state.import_buffer(), Some("a"));
+    }
+
+    #[test]
+    fn import_key_backspace_removes_last_char() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        let a = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('a'));
+        let b = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('b'));
+        let bs = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Backspace);
+        state.dispatch(&Action::ImportKey(a));
+        state.dispatch(&Action::ImportKey(b));
+        state.dispatch(&Action::ImportKey(bs));
+        assert_eq!(state.import_buffer(), Some("a"));
+    }
+
+    #[test]
+    fn submit_import_returns_to_normal() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        state.dispatch(&Action::SubmitImport);
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn exit_import_returns_to_normal() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterImport);
+        state.dispatch(&Action::ExitImport);
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn import_buffer_none_when_normal() {
+        let state = two_connection_state();
+        assert!(state.import_buffer().is_none());
+    }
+
+    #[test]
+    fn reload_from_config_replaces_connections() {
+        let mut state = two_connection_state();
+        // Reload with a single-connection config.
+        let new_config = make_app_config(&[("new-conn", vec![make_peer("p1")])]);
+        state.reload_from_config(new_config);
+        assert_eq!(state.connections.len(), 1);
+        assert_eq!(state.connections[0].name, "new-conn");
+    }
+
+    #[test]
+    fn reload_from_config_clamps_selection() {
+        let mut state = two_connection_state();
+        state.selected_connection = 1; // points at second connection
+        // Reload with only one connection — selection must clamp to 0.
+        let new_config = make_app_config(&[("only", vec![])]);
+        state.reload_from_config(new_config);
+        assert_eq!(state.selected_connection, 0);
+    }
+
+    #[test]
+    fn second_request_confirm_replaces_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::RequestConfirm {
+            message: "First?".into(),
+            action: ConfirmAction::DisconnectAll,
+        });
+        state.dispatch(&Action::RequestConfirm {
+            message: "Second?".into(),
+            action: ConfirmAction::StopDaemon,
+        });
+        let pending = state.pending_confirm.as_ref().unwrap();
+        assert_eq!(pending.message, "Second?");
+        assert_eq!(pending.action, ConfirmAction::StopDaemon);
     }
 }

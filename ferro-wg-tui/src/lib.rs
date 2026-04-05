@@ -8,6 +8,7 @@
 mod event;
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -21,17 +22,18 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use ferro_wg_core::client;
-use ferro_wg_core::config::AppConfig;
+use ferro_wg_core::config::{AppConfig, toml as config_toml, wg_quick};
 use ferro_wg_core::error::BackendKind;
 use ferro_wg_core::ipc::{DaemonCommand, DaemonResponse, PeerStatus};
 use ferro_wg_tui_components::connection_bar::{CONNECTION_BAR_HEIGHT, MIN_USEFUL_WIDTH};
 use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
 use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
-    CompareComponent, ConfigComponent, ConnectionBarComponent, LogsComponent, OverviewComponent,
-    PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
+    CompareComponent, ConfigComponent, ConfirmDialogComponent, ConnectionBarComponent,
+    LogsComponent, OverviewComponent, PeersComponent, StatusBarComponent, StatusComponent,
+    TabBarComponent,
 };
-use ferro_wg_tui_core::{Action, AppState, Component, InputMode, Tab};
+use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
 use tracing::warn;
 
 use event::{AppEvent, EventHandler};
@@ -67,13 +69,15 @@ enum DaemonMessage {
     CommandError(String),
     /// Daemon is unreachable.
     Unreachable,
+    /// A wg-quick import succeeded; reload state from the new config.
+    ReloadConfig(AppConfig, String),
 }
 
 /// All TUI components, grouped to reduce function parameter counts.
 ///
 /// Components are split into tab content (`tabs`) and fixed chrome
-/// (`tab_bar`, `status_bar`, `connection_bar`).  The index into `tabs`
-/// corresponds to [`Tab::index()`](ferro_wg_tui_core::Tab).
+/// (`tab_bar`, `status_bar`, `connection_bar`, `confirm_dialog`).
+/// The index into `tabs` corresponds to [`Tab::index()`](ferro_wg_tui_core::Tab).
 struct ComponentBundle {
     /// Tab content components in tab-index order.
     tabs: Vec<Box<dyn Component>>,
@@ -83,6 +87,8 @@ struct ComponentBundle {
     status_bar: StatusBarComponent,
     /// Optional chrome: multi-connection selector bar.
     connection_bar: ConnectionBarComponent,
+    /// Modal overlay: confirmation dialog (rendered on top of everything).
+    confirm_dialog: ConfirmDialogComponent,
 }
 
 impl ComponentBundle {
@@ -99,6 +105,7 @@ impl ComponentBundle {
             tab_bar: TabBarComponent::new(),
             status_bar: StatusBarComponent::new(),
             connection_bar: ConnectionBarComponent::new(),
+            confirm_dialog: ConfirmDialogComponent::new(),
         }
     }
 }
@@ -111,6 +118,10 @@ fn handle_daemon_messages(
 ) {
     while let Ok(msg) = daemon_rx.try_recv() {
         let actions: Vec<Action> = match msg {
+            DaemonMessage::ReloadConfig(config, ok_msg) => {
+                state.reload_from_config(config);
+                vec![Action::DaemonOk(ok_msg)]
+            }
             DaemonMessage::StatusUpdate(peers) => vec![Action::UpdatePeers(peers)],
             DaemonMessage::CommandOk(msg) => vec![Action::DaemonOk(msg)],
             DaemonMessage::CommandError(msg) => vec![Action::DaemonError(msg)],
@@ -140,6 +151,8 @@ fn render_ui(
         }
         bundle.tabs[state.active_tab.index()].render(frame, chunks[2], true, state);
         bundle.status_bar.render(frame, chunks[3], false, state);
+        // Render the confirmation dialog last so it floats on top of all other content.
+        bundle.confirm_dialog.render(frame, chunks[2], false, state);
     })?;
     Ok(())
 }
@@ -151,17 +164,54 @@ fn handle_key_event(
     bundle: &mut ComponentBundle,
     daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
+    config_path: &Path,
 ) {
-    let action = if state.input_mode == InputMode::Search {
+    let action = if state.pending_confirm.is_some() {
+        // Confirmation dialog captures all keys; no other handler runs.
+        bundle.confirm_dialog.handle_key(key, state)
+    } else if matches!(state.input_mode, InputMode::Search | InputMode::Import(_)) {
+        // Text-input modes are handled exclusively by the status bar.
         bundle.status_bar.handle_key(key, state)
     } else {
         handle_global_key(key)
             .or_else(|| bundle.connection_bar.handle_key(key, state))
             .or_else(|| bundle.tabs[state.active_tab.index()].handle_key(key, state))
     };
-    if let Some(ref action) = action {
-        dispatch_all(state, action, bundle);
-        maybe_spawn_command(action, daemon_tx, tasks);
+
+    let Some(ref action) = action else { return };
+
+    // For ConfirmYes: peek at the pending action *before* dispatch clears it,
+    // so we can immediately dispatch the confirmed follow-up action.
+    let follow_up = if matches!(action, Action::ConfirmYes) {
+        state
+            .pending_confirm
+            .as_ref()
+            .map(|p| confirmed_action(&p.action))
+    } else {
+        None
+    };
+
+    // For SubmitImport: capture the path buffer *before* dispatch resets the
+    // input mode back to Normal (clearing the buffer from state).
+    let import_path = if matches!(action, Action::SubmitImport) {
+        state
+            .import_buffer()
+            .map(std::path::Path::new)
+            .map(std::path::Path::to_path_buf)
+    } else {
+        None
+    };
+
+    dispatch_all(state, action, bundle);
+    maybe_spawn_command(action, daemon_tx, tasks, config_path);
+
+    if let Some(ref follow) = follow_up {
+        dispatch_all(state, follow, bundle);
+        maybe_spawn_command(follow, daemon_tx, tasks, config_path);
+    }
+
+    if let Some(path) = import_path {
+        spawn_import_task(path, config_path, daemon_tx, tasks);
     }
 }
 
@@ -240,7 +290,10 @@ fn error_to_message(err: &client::DaemonClientError) -> DaemonMessage {
 /// - The [`Terminal`] backend cannot be created or cleared
 /// - A terminal draw call fails (e.g. the underlying writer returns an I/O error)
 /// - The event handler fails to read a terminal event
-pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    app_config: AppConfig,
+    config_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -250,7 +303,7 @@ pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>
     terminal.clear()?;
 
     // Run the event loop, then restore terminal regardless of outcome.
-    let result = event_loop(&mut terminal, app_config).await;
+    let result = event_loop(&mut terminal, app_config, config_path).await;
 
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
@@ -263,6 +316,7 @@ pub async fn run(app_config: AppConfig) -> Result<(), Box<dyn std::error::Error>
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app_config: AppConfig,
+    config_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new(app_config);
     let mut bundle = ComponentBundle::new();
@@ -284,7 +338,14 @@ async fn event_loop(
 
         match events.next().await {
             Some(AppEvent::Key(key)) => {
-                handle_key_event(key, &mut state, &mut bundle, &daemon_tx, &mut tasks);
+                handle_key_event(
+                    key,
+                    &mut state,
+                    &mut bundle,
+                    &daemon_tx,
+                    &mut tasks,
+                    &config_path,
+                );
             }
             Some(AppEvent::Tick) => spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks),
             None => break,
@@ -339,6 +400,19 @@ fn dispatch_all(state: &mut AppState, action: &Action, bundle: &mut ComponentBun
     }
     bundle.tab_bar.update(action, state);
     bundle.status_bar.update(action, state);
+    bundle.confirm_dialog.update(action, state);
+}
+
+/// Map a [`ConfirmAction`] to the [`Action`] that should execute after confirmation.
+///
+/// Called by [`handle_key_event`] when the user presses `y` to confirm.
+/// This is the bridge between the confirmation dialog and the downstream
+/// command dispatch.
+fn confirmed_action(action: &ConfirmAction) -> Action {
+    match action {
+        ConfirmAction::DisconnectAll => Action::DisconnectAll,
+        ConfirmAction::StopDaemon => Action::StopDaemon,
+    }
 }
 
 /// Handle global key events that apply regardless of which component
@@ -357,6 +431,7 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('5') => Some(Action::SelectTab(Tab::Config)),
         KeyCode::Char('6') => Some(Action::SelectTab(Tab::Logs)),
         KeyCode::Char('/') => Some(Action::EnterSearch),
+        KeyCode::Char('i') => Some(Action::EnterImport),
         _ => None,
     }
 }
@@ -388,11 +463,147 @@ fn spawn_status_poll(
     });
 }
 
-/// If the action is a peer command, spawn a background daemon task.
+/// Attempt to start the daemon as a background subprocess.
+///
+/// Flow:
+/// 1. If the socket is already reachable, send `CommandError("Daemon is already running")`.
+/// 2. Spawn `sudo <exe> daemon --daemonize -c <config_path>` detached.
+/// 3. Poll the socket up to 6 × 500 ms. On first success send `CommandOk`.
+///    On timeout send `CommandError("not yet reachable")`.
+fn spawn_daemon_start(
+    config_path: &Path,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let config_path = config_path.to_path_buf();
+    let tx = tx.clone();
+
+    tasks.spawn(async move {
+        // Pre-spawn guard: abort if daemon is already reachable.
+        if client::send_command(&DaemonCommand::Status).await.is_ok() {
+            let _ = tx.send(DaemonMessage::CommandError(
+                "Daemon is already running".into(),
+            ));
+            return;
+        }
+
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = tx.send(DaemonMessage::CommandError(format!(
+                    "Could not start daemon: run 'sudo ferro-wg daemon --daemonize' ({e})"
+                )));
+                return;
+            }
+        };
+
+        let spawn_result = tokio::process::Command::new("sudo")
+            .arg(&exe)
+            .arg("daemon")
+            .arg("--daemonize")
+            .arg("-c")
+            .arg(&config_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        if let Err(e) = spawn_result {
+            let _ = tx.send(DaemonMessage::CommandError(format!(
+                "Could not start daemon: run 'sudo ferro-wg daemon --daemonize' ({e})"
+            )));
+            return;
+        }
+
+        // Post-spawn poll: wait up to 3 s for the socket to become available.
+        for _ in 0_u8..6 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if client::send_command(&DaemonCommand::Status).await.is_ok() {
+                let _ = tx.send(DaemonMessage::CommandOk("Daemon started".into()));
+                return;
+            }
+        }
+
+        let _ = tx.send(DaemonMessage::CommandError(
+            "Daemon started but not yet reachable — try again in a moment".into(),
+        ));
+    });
+}
+
+/// Derive a connection name from a file path.
+///
+/// Uses the file stem (e.g. `mia` from `/etc/wireguard/mia.conf`).
+/// Returns an error string if the stem is absent or not valid UTF-8.
+fn connection_name_from_path(path: &Path) -> Result<String, String> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "cannot derive connection name from path: {}",
+                path.display()
+            )
+        })
+}
+
+/// Import a wg-quick config file and persist it into the ferro-wg config.
+///
+/// Flow:
+/// 1. Derive a connection name from the filename stem.
+/// 2. Parse the file as wg-quick format.
+/// 3. Load the existing [`AppConfig`] from `config_path`.
+/// 4. Insert the new connection (overwriting any existing entry with the same name).
+/// 5. Write the updated config back to disk.
+/// 6. Send [`DaemonMessage::ReloadConfig`] with the new config.
+fn spawn_import_task(
+    import_path: PathBuf,
+    config_path: &Path,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let config_path = config_path.to_path_buf();
+    let tx = tx.clone();
+
+    tasks.spawn(async move {
+        // All I/O is blocking but small — run on the async executor directly.
+        // (tokio::task::spawn_blocking is unnecessary for short file reads.)
+        let msg = import_and_persist(&import_path, &config_path);
+        let _ = tx.send(msg);
+    });
+}
+
+/// Parse the wg-quick file, merge it into the existing config, and write it back.
+///
+/// Returns the updated [`AppConfig`] and the derived connection name on success,
+/// or an error string that will be shown in the status bar.
+fn try_import(import_path: &Path, config_path: &Path) -> Result<(AppConfig, String), String> {
+    let name = connection_name_from_path(import_path)?;
+    let wg_config =
+        wg_quick::load_from_file(import_path).map_err(|e| format!("Import failed: {e}"))?;
+    let mut app_config = config_toml::load_app_config(config_path)
+        .map_err(|e| format!("Could not load config: {e}"))?;
+    app_config.insert(name.clone(), wg_config);
+    config_toml::save_app_config(&app_config, config_path)
+        .map_err(|e| format!("Could not save config: {e}"))?;
+    Ok((app_config, name))
+}
+
+/// Map the fallible import result to a [`DaemonMessage`] for the event loop.
+fn import_and_persist(import_path: &Path, config_path: &Path) -> DaemonMessage {
+    // I/O is blocking (std::fs). This is user-initiated and infrequent — acceptable
+    // on the async executor. Use spawn_blocking if config files ever grow large.
+    match try_import(import_path, config_path) {
+        Ok((config, name)) => DaemonMessage::ReloadConfig(config, format!("Imported: {name}")),
+        Err(e) => DaemonMessage::CommandError(e),
+    }
+}
+
+/// If the action is a peer command or daemon lifecycle command, spawn a background task.
 fn maybe_spawn_command(
     action: &Action,
     tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
+    config_path: &Path,
 ) {
     let (cmd, description) = match action {
         Action::ConnectPeer(name) => (
@@ -415,6 +626,24 @@ fn maybe_spawn_command(
             },
             format!("Switched backend: {name}"),
         ),
+        Action::ConnectAll => (
+            DaemonCommand::Up {
+                connection_name: None,
+                backend: BackendKind::Boringtun,
+            },
+            "All connections up".to_owned(),
+        ),
+        Action::DisconnectAll => (
+            DaemonCommand::Down {
+                connection_name: None,
+            },
+            "All connections down".to_owned(),
+        ),
+        Action::StopDaemon => (DaemonCommand::Shutdown, "Daemon stopped".to_owned()),
+        Action::StartDaemon => {
+            spawn_daemon_start(config_path, tx, tasks);
+            return;
+        }
         _ => return,
     };
 

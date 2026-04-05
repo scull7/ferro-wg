@@ -20,6 +20,9 @@ pub const STATUS_BAR_HEIGHT: u16 = 3;
 ///
 /// In search mode, key events are routed here and converted to search
 /// actions (`SearchInput`, `SearchBackspace`, `ExitSearch`).
+///
+/// In import mode, key events are routed here and converted to import
+/// actions (`ImportKey`, `SubmitImport`, `ExitImport`).
 pub struct StatusBarComponent;
 
 impl StatusBarComponent {
@@ -38,15 +41,19 @@ impl Default for StatusBarComponent {
 
 impl Component for StatusBarComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
-        if state.input_mode != InputMode::Search {
-            return None;
-        }
-
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter => Some(Action::ExitSearch),
-            KeyCode::Backspace => Some(Action::SearchBackspace),
-            KeyCode::Char(c) => Some(Action::SearchInput(c)),
-            _ => None,
+        match &state.input_mode {
+            InputMode::Search => match key.code {
+                KeyCode::Esc | KeyCode::Enter => Some(Action::ExitSearch),
+                KeyCode::Backspace => Some(Action::SearchBackspace),
+                KeyCode::Char(c) => Some(Action::SearchInput(c)),
+                _ => None,
+            },
+            InputMode::Import(_) => match key.code {
+                KeyCode::Esc => Some(Action::ExitImport),
+                KeyCode::Enter => Some(Action::SubmitImport),
+                _ => Some(Action::ImportKey(key)),
+            },
+            InputMode::Normal => None,
         }
     }
 
@@ -71,10 +78,15 @@ impl Component for StatusBarComponent {
                 Span::styled(&fb.message, style),
             ])
         } else {
-            match state.input_mode {
+            match &state.input_mode {
                 InputMode::Search => Line::from(vec![
                     Span::styled(" /", Style::default().fg(theme.warning)),
-                    Span::raw(&state.search_query),
+                    Span::raw(state.search_query.clone()),
+                    Span::styled("_", Style::default().fg(theme.muted)),
+                ]),
+                InputMode::Import(buf) => Line::from(vec![
+                    Span::styled(" Import path: ", Style::default().fg(theme.warning)),
+                    Span::raw(buf.clone()),
                     Span::styled("_", Style::default().fg(theme.muted)),
                 ]),
                 InputMode::Normal => {
@@ -86,16 +98,32 @@ impl Component for StatusBarComponent {
                         Span::raw(" quit  "),
                         Span::styled("/", hotkey),
                         Span::raw(" search  "),
+                        Span::styled("i", hotkey),
+                        Span::raw(" import  "),
                     ];
-                    if state.active_tab == Tab::Status {
-                        spans.extend([
+                    match state.active_tab {
+                        Tab::Overview => {
+                            spans.extend([
+                                Span::styled("u", hotkey),
+                                Span::raw(" up-all  "),
+                                Span::styled("d", hotkey),
+                                Span::raw(" down-all  "),
+                            ]);
+                            if state.daemon_connected {
+                                spans.extend([Span::styled("S", hotkey), Span::raw(" stop  ")]);
+                            } else {
+                                spans.extend([Span::styled("s", hotkey), Span::raw(" start  ")]);
+                            }
+                        }
+                        Tab::Status => spans.extend([
                             Span::styled("u", hotkey),
                             Span::raw(" up  "),
                             Span::styled("d", hotkey),
                             Span::raw(" down  "),
                             Span::styled("b", hotkey),
                             Span::raw(" backend  "),
-                        ]);
+                        ]),
+                        _ => {}
                     }
                     spans.extend([Span::styled("j/k", hotkey), Span::raw(" nav")]);
                     Line::from(spans)
@@ -126,6 +154,12 @@ mod tests {
     fn search_state() -> AppState {
         let mut state = AppState::new(AppConfig::default());
         state.dispatch(&Action::EnterSearch);
+        state
+    }
+
+    fn import_state() -> AppState {
+        let mut state = AppState::new(AppConfig::default());
+        state.dispatch(&Action::EnterImport);
         state
     }
 
@@ -177,5 +211,33 @@ mod tests {
             comp.handle_key(KeyEvent::from(KeyCode::Char('a')), &state),
             None
         );
+    }
+
+    #[test]
+    fn import_esc_emits_exit_import() {
+        let mut comp = StatusBarComponent::new();
+        let state = import_state();
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Esc), &state),
+            Some(Action::ExitImport)
+        );
+    }
+
+    #[test]
+    fn import_enter_emits_submit_import() {
+        let mut comp = StatusBarComponent::new();
+        let state = import_state();
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Enter), &state),
+            Some(Action::SubmitImport)
+        );
+    }
+
+    #[test]
+    fn import_char_emits_import_key() {
+        let mut comp = StatusBarComponent::new();
+        let state = import_state();
+        let key = KeyEvent::from(KeyCode::Char('a'));
+        assert_eq!(comp.handle_key(key, &state), Some(Action::ImportKey(key)));
     }
 }
