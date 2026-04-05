@@ -1,11 +1,11 @@
 //! Toast notifications: bottom-right corner overlays.
 
 use crossterm::event::KeyEvent;
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
-use ratatui::Frame;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
 
@@ -68,10 +68,10 @@ impl Component for ToastComponent {
 mod tests {
     use super::*;
     use ferro_wg_core::config::AppConfig;
-    use ferro_wg_tui_core::theme::ThemeKind;
     use ferro_wg_tui_core::Toast;
-    use ratatui::backend::TestBackend;
+    use ferro_wg_tui_core::theme::ThemeKind;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn terminal_to_string(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();

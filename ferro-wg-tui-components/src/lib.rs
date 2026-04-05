@@ -15,12 +15,14 @@
 //! - [`TabBarComponent`] — top-of-screen tab selector
 //! - [`StatusBarComponent`] — bottom help text / search input
 //! - [`ConnectionBarComponent`] — connection selector strip (multi-connection only)
+//! - [`HelpOverlayComponent`] — modal help overlay
 
 pub mod compare;
 pub mod config;
 pub mod confirm_dialog;
 pub mod connection_bar;
 pub mod diff_preview;
+pub mod help_overlay;
 pub mod logs;
 pub mod overview;
 pub mod peers;
@@ -35,6 +37,7 @@ pub use config::ConfigComponent;
 pub use confirm_dialog::ConfirmDialogComponent;
 pub use connection_bar::ConnectionBarComponent;
 pub use diff_preview::DiffPreviewComponent;
+pub use help_overlay::HelpOverlayComponent;
 pub use logs::LogsComponent;
 pub use overview::OverviewComponent;
 pub use peers::PeersComponent;

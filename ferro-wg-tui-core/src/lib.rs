@@ -17,6 +17,7 @@ pub mod config_edit;
 pub mod state;
 pub mod theme;
 pub mod util;
+pub mod ux;
 
 pub use action::{Action, ConfirmAction};
 pub use app::{InputMode, Tab};
@@ -34,3 +35,4 @@ pub use state::{
 };
 pub use theme::{Theme, ThemeKind};
 pub use util::{format_bytes, format_handshake_age};
+pub use ux::KEYBINDINGS;
