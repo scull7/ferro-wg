@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -230,6 +230,41 @@ fn render_ui(
     Ok(())
 }
 
+/// Handle a mouse event: resolve it to an action, dispatch, and spawn any command.
+#[allow(clippy::too_many_arguments)]
+fn handle_mouse_event(
+    mouse: MouseEvent,
+    state: &mut AppState,
+    bundle: &mut ComponentBundle,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+    config_path: &Path,
+    benchmarks_path: &Path,
+    chunks: &[ratatui::layout::Rect],
+) {
+    let action = if state.show_help
+        || state.pending_confirm.is_some()
+        || state.config_diff_pending.is_some()
+    {
+        None
+    } else {
+        ferro_wg_tui_core::ux::resolve_mouse_action(&mouse, chunks[0])
+            .or_else(|| bundle.tabs[state.active_tab.index()].handle_mouse(mouse, state))
+    };
+
+    let Some(ref action) = action else { return };
+
+    dispatch_all(state, action, bundle);
+    maybe_spawn_command(
+        action,
+        state,
+        daemon_tx,
+        tasks,
+        config_path,
+        benchmarks_path,
+    );
+}
+
 /// Handle a key event: resolve it to an action, dispatch, and spawn any command.
 fn handle_key_event(
     key: KeyEvent,
@@ -432,7 +467,7 @@ pub async fn run(
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -441,7 +476,11 @@ pub async fn run(
     let result = event_loop(&mut terminal, app_config, config_path, benchmarks_path).await;
 
     let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = crossterm::execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
     let _ = terminal.show_cursor();
 
     result
@@ -483,7 +522,6 @@ async fn event_loop(
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         let (chunks, show_bar) = compute_layout(area, state.connections.len());
-        render_ui(terminal, &state, &mut bundle, &chunks, show_bar, area)?;
 
         match events.next().await {
             Some(AppEvent::Key(key)) => {
@@ -497,9 +535,23 @@ async fn event_loop(
                     &benchmarks_path,
                 );
             }
+            Some(AppEvent::Mouse(mouse)) => {
+                handle_mouse_event(
+                    mouse,
+                    &mut state,
+                    &mut bundle,
+                    &daemon_tx,
+                    &mut tasks,
+                    &config_path,
+                    &benchmarks_path,
+                    &chunks,
+                );
+            }
             Some(AppEvent::Tick) => spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks),
             None => break,
         }
+
+        render_ui(terminal, &state, &mut bundle, &chunks, show_bar, area)?;
     }
     tasks.abort_all();
     Ok(())

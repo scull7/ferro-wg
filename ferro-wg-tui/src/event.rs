@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream, KeyEvent};
+use crossterm::event::{Event, EventStream, KeyEvent, MouseEvent};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -29,6 +29,8 @@ pub enum EventError {
 pub enum AppEvent {
     /// A key was pressed.
     Key(KeyEvent),
+    /// A mouse event occurred.
+    Mouse(MouseEvent),
     /// A periodic tick (used for UI refresh and animation).
     Tick,
 }
@@ -79,7 +81,11 @@ impl EventHandler {
                             tx.send(AppEvent::Key(key))
                                 .map_err(|_| EventError::ChannelClosed)?;
                         }
-                        Some(Ok(_)) => {} // ignore mouse, resize, etc.
+                        Some(Ok(Event::Mouse(mouse))) => {
+                            tx.send(AppEvent::Mouse(mouse))
+                                .map_err(|_| EventError::ChannelClosed)?;
+                        }
+                        Some(Ok(_)) => {} // ignore resize, etc.
                         Some(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {} // EINTR — retry
                         Some(Err(e)) => return Err(EventError::Crossterm(e)),
                         None => return Ok(()), // stream ended cleanly
