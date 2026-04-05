@@ -144,5 +144,32 @@
         ]
       }
     ]
+  },
+  "phase7": {
+    "status": "in_progress",
+    "commits": [
+      {
+        "id": "commit1",
+        "title": "Catppuccin color palette + ThemeKind + theme toggle",
+        "status": "completed",
+        "features": [
+          "theme_kind_enum",
+          "catppuccin_rgb_values",
+          "toggle_theme_action",
+          "show_help_action",
+          "hide_help_action",
+          "theme_kind_state_field",
+          "show_help_state_field",
+          "theme_toggle_keybinding",
+          "help_show_keybinding",
+          "insta_dev_dependency",
+          "theme_toggle_tests",
+          "theme_color_tests",
+          "dispatch_action_tests",
+          "theme_snapshot_tests",
+          "dispatch_refactor_no_clippy_allows"
+        ]
+      }
+    ]
   }
 }
