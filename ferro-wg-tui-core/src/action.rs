@@ -9,6 +9,7 @@ use ferro_wg_core::ipc::{BenchmarkProgress, PeerStatus};
 use ferro_wg_core::stats::BenchmarkResult;
 
 use crate::app::Tab;
+use crate::config_edit::ConfigSection;
 
 /// An action that requires user confirmation before executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,20 +154,23 @@ pub enum Action {
 
     // -- Config editing --
     /// Enter edit mode for the focused field in the Config tab.
-    /// Copies the current field value into `AppState::config_edit.edit_buffer`.
-    EnterConfigEdit,
+    ///
+    /// Carries the current focus so `AppState::dispatch` can initialise
+    /// `config_edit` with the correct section, field index, and pre-filled
+    /// edit buffer copied from the live config.
+    EnterConfigEdit {
+        /// Which section of the form is focused.
+        section: ConfigSection,
+        /// Which field within that section is focused.
+        field_idx: usize,
+    },
 
     /// Forward a key event to the active edit buffer.
-    /// `AppState::dispatch` unpacks char/backspace; `Enter` → `CommitConfigEdit`;
-    /// `Esc` → `CancelConfigEdit`.
+    ///
+    /// `AppState::dispatch` unpacks `Char` → append, `Backspace` → pop,
+    /// `Enter` → commit (clear buffer, revert to `Normal`),
+    /// `Esc` → cancel (clear buffer, revert to `Normal`).
     ConfigEditKey(KeyEvent),
-
-    /// Commit the current buffer to the draft, run the field validator, and
-    /// return to focused-but-not-editing state. Blocked if `field_error` is Some.
-    CommitConfigEdit,
-
-    /// Discard the current buffer and return to focused-but-not-editing state.
-    CancelConfigEdit,
 
     /// Move field focus down within the current section (wraps).
     ConfigFocusNext,

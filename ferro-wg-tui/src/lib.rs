@@ -32,8 +32,8 @@ use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
 use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, ConfirmDialogComponent, ConnectionBarComponent,
-    LogsComponent, OverviewComponent, PeersComponent, StatusBarComponent, StatusComponent,
-    TabBarComponent,
+    DiffPreviewComponent, LogsComponent, OverviewComponent, PeersComponent, StatusBarComponent,
+    StatusComponent, TabBarComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
 use futures::StreamExt;
@@ -132,8 +132,10 @@ struct ComponentBundle {
     status_bar: StatusBarComponent,
     /// Optional chrome: multi-connection selector bar.
     connection_bar: ConnectionBarComponent,
-    /// Modal overlay: confirmation dialog (rendered on top of everything).
+    /// Modal overlay: confirmation dialog.
     confirm_dialog: ConfirmDialogComponent,
+    /// Modal overlay: diff preview (rendered on top of everything).
+    diff_preview: DiffPreviewComponent,
 }
 
 impl ComponentBundle {
@@ -151,6 +153,7 @@ impl ComponentBundle {
             status_bar: StatusBarComponent::new(),
             connection_bar: ConnectionBarComponent::new(),
             confirm_dialog: ConfirmDialogComponent::new(),
+            diff_preview: DiffPreviewComponent::new(),
         }
     }
 }
@@ -212,8 +215,8 @@ fn render_ui(
         }
         bundle.tabs[state.active_tab.index()].render(frame, chunks[2], true, state);
         bundle.status_bar.render(frame, chunks[3], false, state);
-        // Render the confirmation dialog last so it floats on top of all other content.
         bundle.confirm_dialog.render(frame, chunks[2], false, state);
+        bundle.diff_preview.render(frame, chunks[2], false, state); // topmost
     })?;
     Ok(())
 }
@@ -228,7 +231,10 @@ fn handle_key_event(
     config_path: &Path,
     benchmarks_path: &Path,
 ) {
-    let action = if state.pending_confirm.is_some() {
+    let action = if state.config_diff_pending.is_some() {
+        // Diff preview captures all keys while open.
+        bundle.diff_preview.handle_key(key, state)
+    } else if state.pending_confirm.is_some() {
         // Confirmation dialog captures all keys; no other handler runs.
         bundle.confirm_dialog.handle_key(key, state)
     } else if matches!(

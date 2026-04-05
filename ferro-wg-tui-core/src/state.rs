@@ -22,11 +22,12 @@ use crossterm::event::KeyCode;
 use crate::action::{Action, ConfirmAction};
 use crate::app::{InputMode, Tab};
 use crate::benchmark::{
-    cap_history, BenchmarkResultMap, BenchmarkRun, BENCHMARK_HISTORY_CAP,
-    BENCHMARK_PROGRESS_HISTORY_CAP,
+    BENCHMARK_HISTORY_CAP, BENCHMARK_PROGRESS_HISTORY_CAP, BenchmarkResultMap, BenchmarkRun,
+    cap_history,
 };
 use crate::config_edit::{
-    fields_for_section, ConfigDiffPending, ConfigEditState, ConfigSection, DiffLine,
+    ConfigDiffPending, ConfigEditState, ConfigSection, DiffLine, EditableField,
+    field_current_value, fields_for_section,
 };
 use crate::theme::Theme;
 
@@ -492,7 +493,8 @@ impl AppState {
             }
             Action::ConfirmYes => {
                 if let Some(pending) = self.pending_confirm.take()
-                    && let ConfirmAction::DeletePeer(i) = pending.action {
+                    && let ConfirmAction::DeletePeer(i) = pending.action
+                {
                     self.dispatch(&Action::DeleteConfigPeer(i));
                 }
             }
@@ -501,9 +503,29 @@ impl AppState {
             }
 
             // -- Config editing --
+            Action::EnterConfigEdit { section, field_idx } => {
+                if let Some(conn) = self.active_connection() {
+                    let fields = fields_for_section(*section, false);
+                    let field: EditableField = fields
+                        .get(*field_idx)
+                        .copied()
+                        .unwrap_or(EditableField::ListenPort);
+                    let initial_value = field_current_value(field, *section, &conn.config);
+                    self.config_edit = Some(ConfigEditState {
+                        connection_name: conn.name.clone(),
+                        draft: conn.config.clone(),
+                        focused_section: *section,
+                        focused_field_idx: *field_idx,
+                        edit_buffer: Some(initial_value),
+                        field_error: None,
+                    });
+                    self.input_mode = InputMode::EditField;
+                }
+            }
             Action::ConfigEditKey(key) => {
                 if let Some(edit) = self.config_edit.as_mut()
-                    && let Some(ref mut buf) = edit.edit_buffer {
+                    && let Some(ref mut buf) = edit.edit_buffer
+                {
                     match key.code {
                         KeyCode::Char(c) => buf.push(c),
                         KeyCode::Backspace => {
@@ -571,7 +593,8 @@ impl AppState {
             }
             Action::DeleteConfigPeer(i) => {
                 if let Some(edit) = self.config_edit.as_mut()
-                    && *i < edit.draft.peers.len() {
+                    && *i < edit.draft.peers.len()
+                {
                     edit.draft.peers.remove(*i);
                     // Clamp focus
                     if edit.draft.peers.is_empty() {
@@ -584,7 +607,8 @@ impl AppState {
             }
             Action::PreviewConfig => {
                 if let Some(edit) = self.config_edit.as_ref()
-                    && edit.field_error.is_none() {
+                    && edit.field_error.is_none()
+                {
                     // Mock diff for now
                     let diff_lines = vec![DiffLine::Context("mock".to_string())];
                     self.config_diff_pending = Some(ConfigDiffPending {
@@ -1431,7 +1455,7 @@ mod tests {
     fn reload_from_config_clamps_selection() {
         let mut state = two_connection_state();
         state.selected_connection = 1; // points at second connection
-                                       // Reload with only one connection — selection must clamp to 0.
+        // Reload with only one connection — selection must clamp to 0.
         let new_config = make_app_config(&[("only", vec![])]);
         state.reload_from_config(new_config);
         assert_eq!(state.selected_connection, 0);
@@ -1451,5 +1475,249 @@ mod tests {
         let pending = state.pending_confirm.as_ref().unwrap();
         assert_eq!(pending.message, "Second?");
         assert_eq!(pending.action, ConfirmAction::StopDaemon);
+    }
+
+    // ── Phase 6: Config editing dispatch tests ────────────────────────────────
+
+    #[test]
+    fn enter_config_edit_creates_config_edit_state() {
+        let mut state = two_connection_state();
+        assert!(state.config_edit.is_none());
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        let edit = state.config_edit.as_ref().expect("config_edit must be set");
+        assert_eq!(edit.connection_name, "mia");
+        assert_eq!(edit.focused_section, ConfigSection::Interface);
+        assert_eq!(edit.focused_field_idx, 0);
+        assert!(edit.edit_buffer.is_some());
+        assert_eq!(state.input_mode, InputMode::EditField);
+    }
+
+    #[test]
+    fn enter_config_edit_no_connection_is_noop() {
+        let mut state = AppState::new(AppConfig::default());
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        assert!(state.config_edit.is_none());
+    }
+
+    #[test]
+    fn config_edit_key_char_appends_to_buffer() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('9'));
+        state.dispatch(&Action::ConfigEditKey(key));
+        let buf = state
+            .config_edit
+            .as_ref()
+            .unwrap()
+            .edit_buffer
+            .as_ref()
+            .unwrap();
+        assert!(buf.ends_with('9'));
+    }
+
+    #[test]
+    fn config_edit_key_backspace_removes_last_char() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        // Ensure buffer has content first
+        let key_x = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('x'));
+        state.dispatch(&Action::ConfigEditKey(key_x));
+        let before_len = state
+            .config_edit
+            .as_ref()
+            .unwrap()
+            .edit_buffer
+            .as_ref()
+            .unwrap()
+            .len();
+        let bs = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Backspace);
+        state.dispatch(&Action::ConfigEditKey(bs));
+        let after_len = state
+            .config_edit
+            .as_ref()
+            .unwrap()
+            .edit_buffer
+            .as_ref()
+            .unwrap()
+            .len();
+        assert_eq!(after_len, before_len - 1);
+    }
+
+    #[test]
+    fn config_edit_key_enter_clears_buffer_and_reverts_mode() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        assert_eq!(state.input_mode, InputMode::EditField);
+        let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        state.dispatch(&Action::ConfigEditKey(enter));
+        assert!(state.config_edit.as_ref().unwrap().edit_buffer.is_none());
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn config_edit_key_esc_cancels_buffer() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        let esc = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc);
+        state.dispatch(&Action::ConfigEditKey(esc));
+        assert!(state.config_edit.as_ref().unwrap().edit_buffer.is_none());
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn add_config_peer_pushes_peer_and_sets_edit_mode() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        let initial_len = state.config_edit.as_ref().unwrap().draft.peers.len();
+        state.dispatch(&Action::AddConfigPeer);
+        let edit = state.config_edit.as_ref().unwrap();
+        assert_eq!(edit.draft.peers.len(), initial_len + 1);
+        assert_eq!(edit.focused_section, ConfigSection::Peer(initial_len));
+        assert_eq!(state.input_mode, InputMode::EditField);
+    }
+
+    #[test]
+    fn delete_config_peer_removes_peer() {
+        let mut state = AppState::new(make_app_config(&[(
+            "mia",
+            vec![make_peer("p1"), make_peer("p2")],
+        )]));
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        assert_eq!(state.config_edit.as_ref().unwrap().draft.peers.len(), 2);
+        state.dispatch(&Action::DeleteConfigPeer(0));
+        assert_eq!(state.config_edit.as_ref().unwrap().draft.peers.len(), 1);
+    }
+
+    #[test]
+    fn confirm_yes_with_delete_peer_removes_peer() {
+        let mut state = AppState::new(make_app_config(&[(
+            "mia",
+            vec![make_peer("p1"), make_peer("p2")],
+        )]));
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::RequestConfirm {
+            message: "Delete peer 0?".into(),
+            action: ConfirmAction::DeletePeer(0),
+        });
+        state.dispatch(&Action::ConfirmYes);
+        assert!(state.pending_confirm.is_none());
+        assert_eq!(state.config_edit.as_ref().unwrap().draft.peers.len(), 1);
+    }
+
+    #[test]
+    fn preview_config_sets_diff_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        assert!(state.config_diff_pending.is_none());
+        state.dispatch(&Action::PreviewConfig);
+        assert!(state.config_diff_pending.is_some());
+    }
+
+    #[test]
+    fn preview_config_blocked_when_field_error() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.config_edit.as_mut().unwrap().field_error = Some("bad value".into());
+        state.dispatch(&Action::PreviewConfig);
+        assert!(state.config_diff_pending.is_none());
+    }
+
+    #[test]
+    fn config_diff_scroll_down_increments_offset() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::PreviewConfig);
+        state.dispatch(&Action::ConfigDiffScrollDown);
+        assert_eq!(state.config_diff_pending.as_ref().unwrap().scroll_offset, 1);
+    }
+
+    #[test]
+    fn config_diff_scroll_up_saturates_at_zero() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::PreviewConfig);
+        state.dispatch(&Action::ConfigDiffScrollUp);
+        assert_eq!(state.config_diff_pending.as_ref().unwrap().scroll_offset, 0);
+    }
+
+    #[test]
+    fn save_config_clears_both_edit_and_diff_pending() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::PreviewConfig);
+        assert!(state.config_edit.is_some());
+        assert!(state.config_diff_pending.is_some());
+        state.dispatch(&Action::SaveConfig { reconnect: false });
+        assert!(state.config_edit.is_none());
+        assert!(state.config_diff_pending.is_none());
+    }
+
+    #[test]
+    fn discard_config_edits_clears_state_and_resets_mode() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        assert_eq!(state.input_mode, InputMode::EditField);
+        state.dispatch(&Action::DiscardConfigEdits);
+        assert!(state.config_edit.is_none());
+        assert!(state.config_diff_pending.is_none());
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn next_tab_while_editing_clears_edit_buffer() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        assert_eq!(state.input_mode, InputMode::EditField);
+        state.dispatch(&Action::NextTab);
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(state.config_edit.as_ref().unwrap().edit_buffer.is_none());
     }
 }

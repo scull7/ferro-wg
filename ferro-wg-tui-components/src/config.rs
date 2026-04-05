@@ -1,13 +1,13 @@
 //! Config tab: interface and peer configuration display.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
-use ferro_wg_tui_core::config_edit::{fields_for_section, ConfigSection, EditableField};
+use ferro_wg_tui_core::config_edit::{ConfigSection, EditableField, fields_for_section};
 use ferro_wg_tui_core::{Action, AppState, Component};
 
 /// Interactive display and editor of the active `WireGuard` interface and peer configuration.
@@ -83,9 +83,7 @@ impl Default for ConfigComponent {
 
 impl Component for ConfigComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
-        let Some(conn) = state.active_connection() else {
-            return None;
-        };
+        let conn = state.active_connection()?;
 
         // Only handle keys when Config tab is active and not in edit mode
         if state.active_tab != ferro_wg_tui_core::app::Tab::Config
@@ -104,9 +102,11 @@ impl Component for ConfigComponent {
                 None
             }
             KeyCode::Char('e') => {
-                // Check if the focused field is editable
                 if self.can_edit_current_field(&conn.config) {
-                    Some(Action::EnterConfigEdit)
+                    Some(Action::EnterConfigEdit {
+                        section: self.focused_section,
+                        field_idx: self.focused_field_idx,
+                    })
                 } else {
                     None
                 }
@@ -116,7 +116,7 @@ impl Component for ConfigComponent {
                 if let ConfigSection::Peer(peer_idx) = self.focused_section {
                     if peer_idx < conn.config.peers.len() {
                         Some(Action::RequestConfirm {
-                            message: format!("Delete peer {}?", peer_idx),
+                            message: format!("Delete peer {peer_idx}?"),
                             action: ferro_wg_tui_core::action::ConfirmAction::DeletePeer(peer_idx),
                         })
                     } else {
@@ -152,19 +152,16 @@ impl Component for ConfigComponent {
                     self.focus_prev(&conn.config);
                 }
             }
-            Action::AddConfigPeer => {
-                // Focus will be moved by state.rs when entering edit mode
-            }
             Action::DeleteConfigPeer(peer_idx) => {
                 // Adjust focus if the deleted peer was focused
                 if let ConfigSection::Peer(focused_idx) = self.focused_section {
                     if focused_idx == *peer_idx {
                         // Move focus to interface if this was the last peer
-                        if let Some(conn) = state.active_connection() {
-                            if conn.config.peers.is_empty() {
-                                self.focused_section = ConfigSection::Interface;
-                                self.focused_field_idx = 0;
-                            }
+                        if let Some(conn) = state.active_connection()
+                            && conn.config.peers.is_empty()
+                        {
+                            self.focused_section = ConfigSection::Interface;
+                            self.focused_field_idx = 0;
                         }
                     } else if focused_idx > *peer_idx {
                         // Shift focus up if we deleted a peer before the focused one
@@ -200,7 +197,7 @@ impl Component for ConfigComponent {
         for (peer_idx, _peer) in conn.config.peers.iter().enumerate() {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("[Peer {}]", peer_idx),
+                format!("[Peer {peer_idx}]"),
                 Style::default().fg(theme.accent),
             )));
             self.render_section_fields(
@@ -230,8 +227,7 @@ impl ConfigComponent {
         let is_editing_this_section = state
             .config_edit
             .as_ref()
-            .map(|edit| edit.focused_section == section)
-            .unwrap_or(false);
+            .is_some_and(|edit| edit.focused_section == section);
 
         for (field_idx, &field) in fields.iter().enumerate() {
             let is_focused = section == self.focused_section && field_idx == self.focused_field_idx;
@@ -239,7 +235,8 @@ impl ConfigComponent {
                 && is_focused
                 && state.config_edit.as_ref().unwrap().edit_buffer.is_some();
 
-            let (label, value, is_read_only) = self.get_field_display(field, section, config);
+            let (label, value, is_read_only) =
+                ConfigComponent::get_field_display(field, section, config);
 
             let mut line_spans = Vec::new();
 
@@ -262,7 +259,7 @@ impl ConfigComponent {
 
             // Label
             line_spans.push(Span::styled(
-                format!("{}: ", label),
+                format!("{label}: "),
                 Style::default().fg(theme.accent),
             ));
 
@@ -295,20 +292,17 @@ impl ConfigComponent {
             lines.push(Line::from(line_spans));
 
             // Show field error if this is the focused field being edited
-            if is_editing {
-                if let Some(error) = &state.config_edit.as_ref().unwrap().field_error {
-                    lines.push(Line::from(Span::styled(
-                        format!("  Error: {}", error),
-                        Style::default().fg(theme.error),
-                    )));
-                }
+            if is_editing && let Some(error) = &state.config_edit.as_ref().unwrap().field_error {
+                lines.push(Line::from(Span::styled(
+                    format!("  Error: {error}"),
+                    Style::default().fg(theme.error),
+                )));
             }
         }
     }
 
     /// Get the display label and value for a field.
     fn get_field_display(
-        &self,
         field: EditableField,
         section: ConfigSection,
         config: &ferro_wg_core::config::WgConfig,

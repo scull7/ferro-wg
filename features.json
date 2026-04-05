@@ -90,8 +90,17 @@
       {
         "id": "commit2",
         "title": "Config tab interactive navigation and edit mode",
-        "status": "pending",
-        "features": []
+        "status": "completed",
+        "features": [
+          "interactive_config_navigation",
+          "config_edit_mode_entry",
+          "inline_validation_display",
+          "peer_add_delete_keys",
+          "preview_trigger",
+          "read_only_protection",
+          "status_bar_config_hints",
+          "config_component_tests"
+        ]
       },
       {
         "id": "commit3",

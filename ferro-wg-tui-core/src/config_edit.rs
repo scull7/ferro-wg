@@ -147,17 +147,18 @@ pub enum ConfigEditError {
 /// - Accepts the empty string `""` — mapped to `listen_port = 0` (OS picks a port).
 /// - Accepts `"0"` explicitly for the same reason.
 /// - Accepts any value 1–65535.
-/// - Rejects values > 65535.
-/// - Rejects non-numeric, non-empty strings.
+/// - Rejects values > 65535 with [`ConfigEditError::PortTooHigh`].
+/// - Rejects non-numeric, non-empty strings with [`ConfigEditError::PortNotNumeric`].
 #[allow(clippy::missing_errors_doc)]
 pub fn validate_port(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
     }
-    match s.parse::<u16>() {
-        Ok(_port) => Ok(()),
-        Err(_) => Err(ConfigEditError::PortNotNumeric),
+    let n: u32 = s.parse().map_err(|_| ConfigEditError::PortNotNumeric)?;
+    if n > 65535 {
+        return Err(ConfigEditError::PortTooHigh);
     }
+    Ok(())
 }
 
 /// Validate a comma-separated list of CIDR addresses (e.g. `10.0.0.2/24`).
@@ -244,6 +245,11 @@ pub fn validate_fwmark(s: &str) -> Result<(), ConfigEditError> {
 }
 
 /// Validate a `WireGuard` base64 public key (44 characters, valid base64).
+///
+/// # Errors
+///
+/// Returns `ConfigEditError::PublicKeyLength` if the string is not 44 characters long.
+/// Returns `ConfigEditError::PublicKeyInvalidBase64` if the string is not valid base64 or does not decode to 32 bytes.
 pub fn validate_public_key(s: &str) -> Result<(), ConfigEditError> {
     if s.len() != 44 {
         return Err(ConfigEditError::PublicKeyLength);
@@ -318,9 +324,119 @@ pub fn validate_persistent_keepalive(s: &str) -> Result<(), ConfigEditError> {
     if s.is_empty() {
         return Ok(());
     }
-    match s.parse::<u16>() {
-        Ok(_keepalive) => Ok(()),
-        Err(_) => Err(ConfigEditError::KeepaliveNotNumeric),
+    let n: u32 = s
+        .parse()
+        .map_err(|_| ConfigEditError::KeepaliveNotNumeric)?;
+    if n > 65535 {
+        return Err(ConfigEditError::KeepaliveTooHigh);
+    }
+    Ok(())
+}
+
+/// Return the current value of a config field as an editable string.
+///
+/// Called from `dispatch(EnterConfigEdit)` to pre-populate the edit buffer
+/// with the live value so the user can see and modify it.
+///
+/// Returns an empty string for fields whose current value is zero/empty
+/// (e.g., `listen_port = 0`, `mtu = 0`).
+#[must_use]
+pub fn field_current_value(
+    field: EditableField,
+    section: ConfigSection,
+    config: &WgConfig,
+) -> String {
+    let iface = &config.interface;
+    match field {
+        EditableField::ListenPort => {
+            if iface.listen_port == 0 {
+                String::new()
+            } else {
+                iface.listen_port.to_string()
+            }
+        }
+        EditableField::Addresses => iface.addresses.join(", "),
+        EditableField::Dns => iface
+            .dns
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        EditableField::DnsSearch => iface.dns_search.join(", "),
+        EditableField::Mtu => {
+            if iface.mtu == 0 {
+                String::new()
+            } else {
+                iface.mtu.to_string()
+            }
+        }
+        EditableField::Fwmark => {
+            if iface.fwmark == 0 {
+                String::new()
+            } else {
+                iface.fwmark.to_string()
+            }
+        }
+        EditableField::PreUp => iface.pre_up.join(", "),
+        EditableField::PostUp => iface.post_up.join(", "),
+        EditableField::PreDown => iface.pre_down.join(", "),
+        EditableField::PostDown => iface.post_down.join(", "),
+        EditableField::PeerName => {
+            if let ConfigSection::Peer(idx) = section {
+                config
+                    .peers
+                    .get(idx)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        EditableField::PeerPublicKey => {
+            if let ConfigSection::Peer(idx) = section {
+                config
+                    .peers
+                    .get(idx)
+                    .map(|p| p.public_key.to_base64())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        EditableField::PeerEndpoint => {
+            if let ConfigSection::Peer(idx) = section {
+                config
+                    .peers
+                    .get(idx)
+                    .and_then(|p| p.endpoint.clone())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        EditableField::PeerAllowedIps => {
+            if let ConfigSection::Peer(idx) = section {
+                config
+                    .peers
+                    .get(idx)
+                    .map(|p| p.allowed_ips.join(", "))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        EditableField::PeerPersistentKeepalive => {
+            if let ConfigSection::Peer(idx) = section {
+                config
+                    .peers
+                    .get(idx)
+                    .filter(|p| p.persistent_keepalive != 0)
+                    .map(|p| p.persistent_keepalive.to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
     }
 }
 
@@ -423,9 +539,8 @@ fn is_valid_cidr(cidr: &str) -> bool {
     }
     let ip = parts[0];
     let prefix = parts[1];
-    let ip_addr = match ip.parse::<std::net::IpAddr>() {
-        Ok(addr) => addr,
-        Err(_) => return false,
+    let Ok(ip_addr) = ip.parse::<std::net::IpAddr>() else {
+        return false;
     };
     match prefix.parse::<u8>() {
         Ok(p) => match ip_addr {
@@ -443,8 +558,8 @@ fn is_valid_domain(domain: &str) -> bool {
         && domain
             .chars()
             .all(|c| c.is_alphanumeric() || c == '.' || c == '-')
-        && domain.chars().next().is_some_and(|c| c.is_alphanumeric())
-        && domain.chars().last().is_some_and(|c| c.is_alphanumeric())
+        && domain.chars().next().is_some_and(char::is_alphanumeric)
+        && domain.chars().last().is_some_and(char::is_alphanumeric)
 }
 
 #[cfg(test)]
@@ -459,7 +574,7 @@ mod tests {
         assert!(validate_port("65535").is_ok());
         assert!(matches!(
             validate_port("65536"),
-            Err(ConfigEditError::PortNotNumeric)
+            Err(ConfigEditError::PortTooHigh)
         ));
         assert!(matches!(
             validate_port("abc"),
@@ -593,7 +708,7 @@ mod tests {
         assert!(validate_persistent_keepalive("65535").is_ok());
         assert!(matches!(
             validate_persistent_keepalive("65536"),
-            Err(ConfigEditError::KeepaliveNotNumeric)
+            Err(ConfigEditError::KeepaliveTooHigh)
         ));
         assert!(matches!(
             validate_persistent_keepalive("abc"),
@@ -602,10 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn test_config_diff() {
-        let old = "a\nb\nc";
-        let new = "a\nd\nc";
-        let diff = config_diff(old, new);
+    fn test_config_diff_middle_change() {
+        let diff = config_diff("a\nb\nc", "a\nd\nc");
         assert_eq!(
             diff,
             vec![
@@ -615,10 +728,11 @@ mod tests {
                 DiffLine::Context("c".to_string()),
             ]
         );
+    }
 
-        let old = "a\nb";
-        let new = "a\nb";
-        let diff = config_diff(old, new);
+    #[test]
+    fn test_config_diff_identical() {
+        let diff = config_diff("a\nb", "a\nb");
         assert_eq!(
             diff,
             vec![
@@ -626,15 +740,70 @@ mod tests {
                 DiffLine::Context("b".to_string()),
             ]
         );
+    }
 
-        let old = "a";
-        let new = "b";
-        let diff = config_diff(old, new);
+    #[test]
+    fn test_config_diff_single_line_change() {
+        let diff = config_diff("a", "b");
         assert_eq!(
             diff,
             vec![
                 DiffLine::Removed("a".to_string()),
                 DiffLine::Added("b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_config_diff_new_longer_than_old() {
+        // New has extra lines at the end — trailing Added loop
+        let diff = config_diff("a\nb", "a\nb\nc\nd");
+        assert_eq!(
+            diff,
+            vec![
+                DiffLine::Context("a".to_string()),
+                DiffLine::Context("b".to_string()),
+                DiffLine::Added("c".to_string()),
+                DiffLine::Added("d".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_config_diff_old_longer_than_new() {
+        // Old has extra lines at the end — trailing Removed loop
+        let diff = config_diff("a\nb\nc\nd", "a\nb");
+        assert_eq!(
+            diff,
+            vec![
+                DiffLine::Context("a".to_string()),
+                DiffLine::Context("b".to_string()),
+                DiffLine::Removed("c".to_string()),
+                DiffLine::Removed("d".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_config_diff_empty_old() {
+        let diff = config_diff("", "a\nb");
+        assert_eq!(
+            diff,
+            vec![
+                DiffLine::Added("a".to_string()),
+                DiffLine::Added("b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_config_diff_empty_new() {
+        let diff = config_diff("a\nb", "");
+        assert_eq!(
+            diff,
+            vec![
+                DiffLine::Removed("a".to_string()),
+                DiffLine::Removed("b".to_string()),
             ]
         );
     }
