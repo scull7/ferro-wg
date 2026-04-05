@@ -8,7 +8,7 @@ use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::ipc::{self, DaemonCommand, DaemonResponse, SOCKET_PATH};
+use crate::ipc::{self, DaemonCommand, DaemonResponse, LogEntry, SOCKET_PATH};
 
 /// Errors that can occur when communicating with the daemon.
 ///
@@ -100,19 +100,24 @@ pub async fn send_command_to(
 ///
 /// # Errors
 ///
-/// Returns a [`DaemonClientError`] if the daemon is unreachable or the command cannot be encoded.
-pub async fn stream_logs() -> Result<tokio::sync::mpsc::Receiver<String>, DaemonClientError> {
+/// Returns a [`DaemonClientError`] if the daemon is unreachable or the command
+/// cannot be encoded.
+pub async fn stream_logs() -> Result<tokio::sync::mpsc::Receiver<LogEntry>, DaemonClientError> {
     stream_logs_from(Path::new(SOCKET_PATH)).await
 }
 
-/// Stream daemon logs from a specific socket path.
+/// Stream daemon log entries from a specific socket path.
+///
+/// Sends [`DaemonCommand::StreamLogs`], then forwards each
+/// [`DaemonResponse::LogEntry`] to the returned channel.  The task exits
+/// when the daemon closes the connection or the receiver is dropped.
 ///
 /// # Errors
 ///
 /// Returns a [`DaemonClientError`] describing the failure.
 pub async fn stream_logs_from(
     socket_path: &Path,
-) -> Result<tokio::sync::mpsc::Receiver<String>, DaemonClientError> {
+) -> Result<tokio::sync::mpsc::Receiver<LogEntry>, DaemonClientError> {
     let stream = UnixStream::connect(socket_path)
         .await
         .map_err(|e| match e.kind() {
@@ -128,28 +133,28 @@ pub async fn stream_logs_from(
     let json = ipc::encode_message(&DaemonCommand::StreamLogs)?;
     writer.write_all(json.as_bytes()).await?;
     writer.flush().await?;
-    // Shut down write half.
+    // Shut down write half — daemon streams in one direction only.
     drop(writer);
 
-    // Read log lines.
     let mut reader = BufReader::new(reader);
     let (tx, rx) = tokio::sync::mpsc::channel(100);
 
     tokio::spawn(async move {
+        let mut line = String::new();
         loop {
-            let mut line = String::new();
+            line.clear();
             match reader.read_line(&mut line).await {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    if let Ok(DaemonResponse::LogLine(log)) =
+                    if let Ok(DaemonResponse::LogEntry(entry)) =
                         ipc::decode_message::<DaemonResponse>(&line)
                     {
-                        if tx.send(log).await.is_err() {
+                        if tx.send(entry).await.is_err() {
                             break;
                         }
-                    } else {
-                        break; // unexpected response
                     }
+                    // Non-LogEntry responses are silently ignored so that a
+                    // future protocol extension doesn't break the stream.
                 }
             }
         }

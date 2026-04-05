@@ -2,6 +2,7 @@
 //!
 //! Messages are serialized as newline-delimited JSON over a Unix domain socket.
 
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::error::BackendKind;
@@ -9,6 +10,112 @@ use crate::stats::TunnelStats;
 
 /// Default Unix socket path for the daemon.
 pub const SOCKET_PATH: &str = "/tmp/ferro-wg.sock";
+
+/// Severity level of a daemon log entry.
+///
+/// Variants are declared in ascending severity order so that `PartialOrd`/`Ord`
+/// derived impls satisfy `Trace < Debug < Info < Warn < Error`.  The TUI filter
+/// threshold cycles through `Debug → Info → Warn → Error → Debug` (Trace is
+/// deliberately excluded from the cycle — it always passes the filter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum LogLevel {
+    /// Most verbose; always shown regardless of the filter threshold.
+    Trace,
+    /// Diagnostic detail; the default filter threshold.
+    Debug,
+    /// Informational messages about normal operation.
+    Info,
+    /// Potentially unexpected conditions that do not stop operation.
+    Warn,
+    /// Error conditions.
+    Error,
+}
+
+impl LogLevel {
+    /// Advance to the next stricter filter threshold, wrapping `Error` back to
+    /// `Debug`.  `Trace` is not part of the cycle.
+    ///
+    /// Cycle order: `Debug → Info → Warn → Error → Debug`.
+    #[must_use]
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Trace | Self::Debug => Self::Info,
+            Self::Info => Self::Warn,
+            Self::Warn => Self::Error,
+            Self::Error => Self::Debug,
+        }
+    }
+
+    /// Short label used in the Logs block title, e.g. `"INFO+"`.
+    #[must_use]
+    pub fn title_label(self) -> &'static str {
+        match self {
+            Self::Trace => "TRACE+",
+            Self::Debug => "DEBUG+",
+            Self::Info => "INFO+",
+            Self::Warn => "WARN+",
+            Self::Error => "ERROR",
+        }
+    }
+
+    /// Short badge label used in log line rendering, e.g. `"INFO"`.
+    #[must_use]
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Trace => "TRACE",
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+/// A single structured log event emitted by the daemon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogEntry {
+    /// Milliseconds since the Unix epoch (UTC).
+    ///
+    /// Using `i64` avoids a `chrono` dependency at the serde boundary and keeps
+    /// the wire format simple.  The TUI converts to local time for display.
+    pub timestamp_ms: i64,
+    /// Severity level.
+    pub level: LogLevel,
+    /// Connection this event belongs to, if any.  `None` means a global daemon
+    /// event not tied to a specific tunnel — global events always pass
+    /// connection filters.
+    pub connection_name: Option<String>,
+    /// Formatted log message, typically `"target: text"`.
+    pub message: String,
+}
+
+impl LogEntry {
+    /// Construct a [`LogEntry`] timestamped at the current wall-clock time.
+    #[must_use]
+    pub fn now(level: LogLevel, connection_name: Option<String>, message: String) -> Self {
+        Self {
+            timestamp_ms: Local::now().timestamp_millis(),
+            level,
+            connection_name,
+            message,
+        }
+    }
+
+    /// Format `timestamp_ms` as `"HH:MM:SS"` in the local timezone.
+    ///
+    /// Returns `"??:??:??"` when `timestamp_ms` is outside the range that
+    /// [`chrono`] can represent, rather than panicking.
+    #[must_use]
+    pub fn time_label(&self) -> String {
+        DateTime::from_timestamp_millis(self.timestamp_ms).map_or_else(
+            || "??:??:??".to_owned(),
+            |utc| {
+                let local: DateTime<Local> = utc.with_timezone(&Local);
+                local.format("%H:%M:%S").to_string()
+            },
+        )
+    }
+}
 
 /// Commands sent from the CLI/TUI to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,8 +156,10 @@ pub enum DaemonResponse {
     Error(String),
     /// Current status of all peers.
     Status(Vec<PeerStatus>),
-    /// A single log line from the daemon.
-    LogLine(String),
+    /// A single structured log entry pushed from an active [`StreamLogs`] subscription.
+    ///
+    /// [`StreamLogs`]: DaemonCommand::StreamLogs
+    LogEntry(LogEntry),
 }
 
 /// Runtime status of a single connection, reported by the daemon.
@@ -151,14 +260,70 @@ mod tests {
     }
 
     #[test]
-    fn response_logline_roundtrip() {
-        let resp = DaemonResponse::LogLine(
-            "2024-10-04T12:34:56.789 INFO ferro_wg_daemon::server: Listening on /tmp/ferro-wg.sock"
-                .into(),
-        );
+    fn log_level_ordering() {
+        assert!(LogLevel::Trace < LogLevel::Debug);
+        assert!(LogLevel::Debug < LogLevel::Info);
+        assert!(LogLevel::Info < LogLevel::Warn);
+        assert!(LogLevel::Warn < LogLevel::Error);
+    }
+
+    #[test]
+    fn log_level_cycle_wraps() {
+        assert_eq!(LogLevel::Debug.cycle(), LogLevel::Info);
+        assert_eq!(LogLevel::Info.cycle(), LogLevel::Warn);
+        assert_eq!(LogLevel::Warn.cycle(), LogLevel::Error);
+        assert_eq!(LogLevel::Error.cycle(), LogLevel::Debug);
+        // Trace is not part of the UI cycle — treated same as Debug
+        assert_eq!(LogLevel::Trace.cycle(), LogLevel::Info);
+    }
+
+    #[test]
+    fn logentry_roundtrip_no_connection() {
+        let entry = LogEntry {
+            timestamp_ms: 1_712_231_696_000,
+            level: LogLevel::Info,
+            connection_name: None,
+            message: "ferro_wg_daemon::server: Listening on /tmp/ferro-wg.sock".into(),
+        };
+        let resp = DaemonResponse::LogEntry(entry.clone());
         let encoded = encode_message(&resp).expect("encode");
         let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
-        assert!(matches!(decoded, DaemonResponse::LogLine(ref s) if s.starts_with("2024-10-04")));
+        assert!(matches!(decoded, DaemonResponse::LogEntry(ref e) if *e == entry));
+    }
+
+    #[test]
+    fn logentry_roundtrip_with_connection() {
+        let entry = LogEntry {
+            timestamp_ms: 1_712_231_696_123,
+            level: LogLevel::Warn,
+            connection_name: Some("mia".into()),
+            message: "ferro_wg_core::tunnel: Handshake timeout".into(),
+        };
+        let resp = DaemonResponse::LogEntry(entry.clone());
+        let encoded = encode_message(&resp).expect("encode");
+        let decoded: DaemonResponse = decode_message(&encoded).expect("decode");
+        assert!(matches!(decoded, DaemonResponse::LogEntry(ref e) if *e == entry));
+    }
+
+    #[test]
+    fn logentry_time_label_invalid_timestamp() {
+        // i64::MAX is outside chrono's representable range — should not panic.
+        let entry = LogEntry {
+            timestamp_ms: i64::MAX,
+            level: LogLevel::Debug,
+            connection_name: None,
+            message: "test".into(),
+        };
+        assert_eq!(entry.time_label(), "??:??:??");
+    }
+
+    #[test]
+    fn logentry_now_has_recent_timestamp() {
+        let before = Local::now().timestamp_millis();
+        let entry = LogEntry::now(LogLevel::Info, None, "msg".into());
+        let after = Local::now().timestamp_millis();
+        assert!(entry.timestamp_ms >= before);
+        assert!(entry.timestamp_ms <= after);
     }
 
     #[test]

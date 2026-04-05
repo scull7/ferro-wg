@@ -13,7 +13,6 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use chrono::Local;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -22,46 +21,48 @@ use tracing_subscriber::Layer;
 
 use crate::config::AppConfig;
 use crate::config::toml::load_app_config;
-use crate::ipc::{self, DaemonCommand, DaemonResponse};
+use crate::ipc::{self, DaemonCommand, DaemonResponse, LogEntry, LogLevel};
 use crate::tunnel::TunnelManager;
 
-/// Buffer for daemon logs.
+/// Bounded ring buffer for structured daemon log entries.
+///
+/// Shared between the [`LogLayer`] (writer) and the broadcaster task (reader).
+/// `Clone` produces a second handle to the same underlying buffer.
 #[derive(Clone)]
 pub struct LogBuffer {
-    buffer: Arc<Mutex<VecDeque<String>>>,
+    buffer: Arc<Mutex<VecDeque<LogEntry>>>,
 }
 
 impl LogBuffer {
-    /// Create a new log buffer with maximum capacity.
-    ///
-    /// The buffer will hold up to `max_lines` log entries, evicting oldest on overflow.
+    /// Create a new buffer that holds at most `capacity` entries, evicting the
+    /// oldest when full.
     #[must_use]
-    pub fn new(max_lines: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
-            buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_lines))),
+            buffer: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
         }
     }
 
-    /// Add a log line to the buffer and broadcast it.
-    fn add_line(&self, line: String) {
+    /// Append an entry, evicting the oldest when at capacity.
+    fn add_entry(&self, entry: LogEntry) {
         match self.buffer.lock() {
             Ok(mut buf) => {
                 if buf.len() == buf.capacity() {
                     buf.pop_front();
                 }
-                buf.push_back(line);
+                buf.push_back(entry);
             }
             Err(_) => {
-                warn!("LogBuffer mutex poisoned, skipping log line");
+                warn!("LogBuffer mutex poisoned, skipping log entry");
             }
         }
     }
 
-    /// Get a copy of the current buffer.
+    /// Return a snapshot of all entries currently in the buffer.
     ///
-    /// Returns an empty vector if the mutex is poisoned.
+    /// Returns an empty `Vec` when the mutex is poisoned.
     #[must_use]
-    pub fn get_buffer(&self) -> Vec<String> {
+    pub fn get_buffer(&self) -> Vec<LogEntry> {
         if let Ok(buf) = self.buffer.lock() {
             buf.iter().cloned().collect()
         } else {
@@ -70,11 +71,11 @@ impl LogBuffer {
         }
     }
 
-    /// Drain all current logs from the buffer.
+    /// Drain and return all entries, leaving the buffer empty.
     ///
-    /// Returns the drained logs, or empty vector if poisoned.
+    /// Returns an empty `Vec` when the mutex is poisoned.
     #[must_use]
-    pub fn drain_logs(&self) -> Vec<String> {
+    pub fn drain_logs(&self) -> Vec<LogEntry> {
         if let Ok(mut buf) = self.buffer.lock() {
             buf.drain(..).collect()
         } else {
@@ -84,7 +85,8 @@ impl LogBuffer {
     }
 }
 
-/// Tracing layer that writes formatted events into a [`LogBuffer`].
+/// Tracing layer that routes log events into a [`LogBuffer`] as structured
+/// [`LogEntry`] values.
 ///
 /// This is the sole edge between the tracing subsystem (calculation) and the
 /// log buffer (data). All I/O — broadcasting, streaming — happens elsewhere
@@ -101,27 +103,45 @@ impl LogLayer {
     }
 }
 
-/// Visitor that extracts the `message` field from a tracing event.
+/// Visitor that extracts `message` and optional `connection` fields from a
+/// tracing event.
 ///
 /// `record_str` is the primary path: tracing macros pass literal string
-/// messages as `&str`, so the value arrives here without any Debug
-/// formatting overhead.  `record_debug` is the fallback for callers that
-/// supply a value implementing only `Debug`; the Debug representation is
-/// used verbatim — no quote-stripping heuristics that would corrupt
-/// non-string types (integers, structs, etc.).
-struct LogVisitor(String);
+/// messages as `&str`, arriving here without any Debug overhead.
+/// `record_debug` is the fallback for values that implement only `Debug`;
+/// the representation is used verbatim.
+#[derive(Default)]
+struct LogVisitor {
+    message: String,
+    connection: Option<String>,
+}
 
 impl tracing::field::Visit for LogVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            value.clone_into(&mut self.0);
+        match field.name() {
+            "message" => value.clone_into(&mut self.message),
+            "connection" => self.connection = Some(value.to_owned()),
+            _ => {}
         }
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.0 = format!("{value:?}");
+        match field.name() {
+            "message" => self.message = format!("{value:?}"),
+            "connection" => self.connection = Some(format!("{value:?}")),
+            _ => {}
         }
+    }
+}
+
+/// Map a [`tracing::Level`] to the IPC [`LogLevel`] enum.
+fn map_tracing_level(level: tracing::Level) -> LogLevel {
+    match level {
+        tracing::Level::TRACE => LogLevel::Trace,
+        tracing::Level::DEBUG => LogLevel::Debug,
+        tracing::Level::INFO => LogLevel::Info,
+        tracing::Level::WARN => LogLevel::Warn,
+        tracing::Level::ERROR => LogLevel::Error,
     }
 }
 
@@ -134,17 +154,12 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = LogVisitor(String::new());
+        let mut visitor = LogVisitor::default();
         event.record(&mut visitor);
-        let timestamp = Local::now().format("%H:%M:%S");
-        let line = format!(
-            "{} {} {}: {}",
-            timestamp,
-            event.metadata().level(),
-            event.metadata().target(),
-            visitor.0
-        );
-        self.buffer.add_line(line);
+        let level = map_tracing_level(*event.metadata().level());
+        let message = format!("{}: {}", event.metadata().target(), visitor.message);
+        let entry = LogEntry::now(level, visitor.connection, message);
+        self.buffer.add_entry(entry);
     }
 }
 
@@ -180,12 +195,12 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
     Ok(listener)
 }
 
-/// Handle a `StreamLogs` connection by sending buffered logs then streaming new ones.
+/// Handle a `StreamLogs` connection: replay history, then stream live entries.
 ///
-/// The live-stream channel is a bounded `mpsc`: the sender blocks under backpressure
-/// rather than skipping the slow receiver, so no `Lagged` drop can occur in this leg.
-/// Note that the upstream ring buffer ([`LogBuffer`]) can still evict old entries under
-/// sustained high-throughput load before they reach the channel.
+/// The live-stream channel is bounded `mpsc` so the sender blocks under
+/// backpressure rather than dropping messages.  The upstream ring buffer
+/// ([`LogBuffer`]) can still evict old entries under sustained load before
+/// they reach the channel.
 ///
 /// # Errors
 ///
@@ -194,21 +209,21 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
 async fn handle_stream_logs(
     mut writer: tokio::net::unix::OwnedWriteHalf,
     log_buffer: &LogBuffer,
-    log_rx: &mut mpsc::Receiver<String>,
+    log_rx: &mut mpsc::Receiver<LogEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Replay historical buffer first so the client sees context on connect.
-    for line in log_buffer.get_buffer() {
-        let resp = DaemonResponse::LogLine(line);
+    for entry in log_buffer.get_buffer() {
+        let resp = DaemonResponse::LogEntry(entry);
         if let Err(e) = send_response(&mut writer, &resp).await {
-            warn!("Failed to send buffered log line: {e}");
+            warn!("Failed to send buffered log entry: {e}");
             return Ok(());
         }
     }
-    // Stream live log lines until the channel closes or the client disconnects.
-    while let Some(line) = log_rx.recv().await {
-        let resp = DaemonResponse::LogLine(line);
+    // Stream live entries until the channel closes or the client disconnects.
+    while let Some(entry) = log_rx.recv().await {
+        let resp = DaemonResponse::LogEntry(entry);
         if let Err(e) = send_response(&mut writer, &resp).await {
-            warn!("Failed to send streamed log line: {e}");
+            warn!("Failed to send streamed log entry: {e}");
             break;
         }
     }
@@ -306,7 +321,7 @@ async fn handle_connection(
     manager: &mut TunnelManager,
     config_path: &Path,
     log_buffer: &LogBuffer,
-    log_rx: &mut mpsc::Receiver<String>,
+    log_rx: &mut mpsc::Receiver<LogEntry>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let Some((mut writer, command)) = accept_command(listener).await? else {
         return Ok(false);
@@ -335,7 +350,7 @@ pub async fn run(
     config_path: &Path,
     socket_path: &Path,
     log_buffer: LogBuffer,
-    mut log_rx: mpsc::Receiver<String>,
+    mut log_rx: mpsc::Receiver<LogEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = setup_listener(socket_path)?;
     set_socket_permissions(socket_path)?;
@@ -386,6 +401,7 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             backend,
         } => {
             let result = if let Some(name) = connection_name {
+                info!(connection = %name, "bringing up tunnel");
                 manager.up(name, backend).await
             } else {
                 manager.up_all(backend).await
@@ -399,6 +415,7 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             ref connection_name,
         } => {
             if let Some(name) = connection_name {
+                info!(connection = %name, "tearing down tunnel");
                 manager.down(name).map_or_else(
                     |e| DaemonResponse::Error(e.to_string()),
                     |()| DaemonResponse::Ok,
@@ -414,8 +431,9 @@ async fn handle_command(manager: &mut TunnelManager, command: &DaemonCommand) ->
             backend,
         } => {
             if let Err(e) = manager.down(connection_name) {
-                warn!("Down before switch: {e}");
+                warn!(connection = %connection_name, "down before backend switch failed: {e}");
             }
+            info!(connection = %connection_name, "switching backend to {backend:?}");
             manager.up(connection_name, backend).await.map_or_else(
                 |e| DaemonResponse::Error(e.to_string()),
                 |()| DaemonResponse::Ok,
@@ -449,18 +467,41 @@ mod tests {
 
     use super::*;
 
+    /// Build a test [`LogEntry`] with the given message and `Debug` level.
+    fn make_entry(msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 0,
+            level: LogLevel::Debug,
+            connection_name: None,
+            message: msg.to_owned(),
+        }
+    }
+
+    fn make_entry_for(connection: &str, msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 0,
+            level: LogLevel::Info,
+            connection_name: Some(connection.to_owned()),
+            message: msg.to_owned(),
+        }
+    }
+
     #[test]
     fn log_buffer_capacity() {
         let buffer = LogBuffer::new(3);
 
-        buffer.add_line("line1".to_string());
-        buffer.add_line("line2".to_string());
-        buffer.add_line("line3".to_string());
-        assert_eq!(buffer.get_buffer(), vec!["line1", "line2", "line3"]);
+        buffer.add_entry(make_entry("line1"));
+        buffer.add_entry(make_entry("line2"));
+        buffer.add_entry(make_entry("line3"));
+        let snapshot = buffer.get_buffer();
+        let msgs: Vec<&str> = snapshot.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(msgs, vec!["line1", "line2", "line3"]);
 
-        // Overflow: should evict oldest
-        buffer.add_line("line4".to_string());
-        assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
+        // Overflow: should evict oldest.
+        buffer.add_entry(make_entry("line4"));
+        let snapshot = buffer.get_buffer();
+        let msgs: Vec<&str> = snapshot.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(msgs, vec!["line2", "line3", "line4"]);
 
         assert_eq!(buffer.buffer.lock().unwrap().capacity(), 3);
     }
@@ -468,52 +509,44 @@ mod tests {
     #[test]
     fn log_buffer_overflow_eviction() {
         let buffer = LogBuffer::new(3);
-
         for i in 0..5 {
-            buffer.add_line(format!("line{i}"));
+            buffer.add_entry(make_entry(&format!("line{i}")));
         }
-
-        assert_eq!(buffer.get_buffer(), vec!["line2", "line3", "line4"]);
+        let msgs: Vec<String> = buffer.get_buffer().into_iter().map(|e| e.message).collect();
+        assert_eq!(msgs, vec!["line2", "line3", "line4"]);
     }
 
     #[test]
     fn log_buffer_duplicates_are_stored() {
         let buffer = LogBuffer::new(5);
-
-        buffer.add_line("dup".to_string());
-        buffer.add_line("dup".to_string());
-        buffer.add_line("dup".to_string());
-
-        assert_eq!(buffer.get_buffer(), vec!["dup", "dup", "dup"]);
+        for _ in 0..3 {
+            buffer.add_entry(make_entry("dup"));
+        }
+        assert_eq!(buffer.get_buffer().len(), 3);
+        assert!(buffer.get_buffer().iter().all(|e| e.message == "dup"));
     }
 
     #[test]
     fn log_buffer_drain_clears_buffer() {
         let buffer = LogBuffer::new(5);
-
         for i in 0..4 {
-            buffer.add_line(format!("line{i}"));
+            buffer.add_entry(make_entry(&format!("line{i}")));
         }
-
         let drained = buffer.drain_logs();
-        assert_eq!(drained, vec!["line0", "line1", "line2", "line3"]);
+        assert_eq!(drained.len(), 4);
         assert!(buffer.get_buffer().is_empty());
     }
 
     #[test]
     fn log_buffer_large_overflow_keeps_last_n() {
         let buffer = LogBuffer::new(5);
-
         for i in 0..20 {
-            buffer.add_line(format!("line{i}"));
+            buffer.add_entry(make_entry(&format!("line{i}")));
         }
-
         let contents = buffer.get_buffer();
         assert_eq!(contents.len(), 5);
-        assert_eq!(
-            contents,
-            vec!["line15", "line16", "line17", "line18", "line19"]
-        );
+        let msgs: Vec<String> = contents.into_iter().map(|e| e.message).collect();
+        assert_eq!(msgs, vec!["line15", "line16", "line17", "line18", "line19"]);
     }
 
     /// Poison the mutex by panicking while holding the lock, then verify that
@@ -531,7 +564,7 @@ mod tests {
         .join();
 
         // All methods must be safe to call on a poisoned buffer.
-        buffer.add_line("after poison".to_string());
+        buffer.add_entry(make_entry("after poison"));
         assert!(buffer.get_buffer().is_empty());
         assert!(buffer.drain_logs().is_empty());
     }
@@ -545,7 +578,7 @@ mod tests {
             let b = Arc::clone(&buffer);
             handles.push(thread::spawn(move || {
                 for j in 0..20 {
-                    b.add_line(format!("thread{i}-line{j}"));
+                    b.add_entry(make_entry(&format!("thread{i}-line{j}")));
                 }
             }));
         }
@@ -554,7 +587,7 @@ mod tests {
             h.join().expect("thread panicked");
         }
 
-        // 10 threads × 20 lines = 200 total additions, but capacity is 100.
+        // 10 threads × 20 = 200 total additions, but capacity is 100.
         assert_eq!(buffer.get_buffer().len(), 100);
     }
 
@@ -568,7 +601,7 @@ mod tests {
             let b = Arc::clone(&buffer);
             handles.push(thread::spawn(move || {
                 for j in 0..25 {
-                    b.add_line(format!("t{i}-{j}"));
+                    b.add_entry(make_entry(&format!("t{i}-{j}")));
                 }
             }));
         }
@@ -588,12 +621,31 @@ mod tests {
         // No assertion on final count — the goal is no deadlock / panic.
     }
 
+    #[test]
+    fn log_buffer_entries_carry_connection_name() {
+        let buffer = LogBuffer::new(5);
+        buffer.add_entry(make_entry("global"));
+        buffer.add_entry(make_entry_for("mia", "conn-specific"));
+        let entries = buffer.get_buffer();
+        assert_eq!(entries[0].connection_name, None);
+        assert_eq!(entries[1].connection_name.as_deref(), Some("mia"));
+    }
+
+    #[test]
+    fn map_tracing_level_covers_all_variants() {
+        assert_eq!(map_tracing_level(tracing::Level::TRACE), LogLevel::Trace);
+        assert_eq!(map_tracing_level(tracing::Level::DEBUG), LogLevel::Debug);
+        assert_eq!(map_tracing_level(tracing::Level::INFO), LogLevel::Info);
+        assert_eq!(map_tracing_level(tracing::Level::WARN), LogLevel::Warn);
+        assert_eq!(map_tracing_level(tracing::Level::ERROR), LogLevel::Error);
+    }
+
     /// `handle_stream_logs` must return `Ok(())` when the writer half is
     /// closed before any data is sent (historical replay path).
     #[tokio::test]
     async fn handle_stream_logs_writer_closed_before_replay() {
         let buffer = LogBuffer::new(5);
-        buffer.add_line("old line".to_string());
+        buffer.add_entry(make_entry("old entry"));
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let (_server_read, server_write) = server.into_split();
@@ -601,13 +653,13 @@ mod tests {
         // Drop the client immediately so writes to server_write fail.
         drop(client);
 
-        let (_tx, mut rx) = mpsc::channel::<String>(1);
+        let (_tx, mut rx) = mpsc::channel::<LogEntry>(1);
         let result = handle_stream_logs(server_write, &buffer, &mut rx).await;
         assert!(result.is_ok());
     }
 
     /// `handle_stream_logs` must return `Ok(())` when the writer fails
-    /// mid-stream while forwarding live log lines.
+    /// mid-stream while forwarding live log entries.
     #[tokio::test]
     async fn handle_stream_logs_writer_closed_during_live_stream() {
         let buffer = LogBuffer::new(5);
@@ -618,28 +670,28 @@ mod tests {
         // Drop the client so the next write into server_write will fail.
         drop(client);
 
-        let (tx, mut rx) = mpsc::channel::<String>(4);
-        tx.send("live line".to_string()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<LogEntry>(4);
+        tx.send(make_entry("live entry")).await.unwrap();
 
         let result = handle_stream_logs(server_write, &buffer, &mut rx).await;
         assert!(result.is_ok());
     }
 
-    /// `handle_stream_logs` replays historical buffer then streams live lines.
+    /// `handle_stream_logs` replays the historical buffer then streams live entries.
     #[tokio::test]
     async fn handle_stream_logs_replays_then_streams() {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let buffer = LogBuffer::new(5);
-        buffer.add_line("hist1".to_string());
-        buffer.add_line("hist2".to_string());
+        buffer.add_entry(make_entry("hist1"));
+        buffer.add_entry(make_entry("hist2"));
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let (client_read, _client_write) = client.into_split();
         let (_server_read, server_write) = server.into_split();
 
-        let (tx, mut rx) = mpsc::channel::<String>(4);
-        tx.send("live1".to_string()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<LogEntry>(4);
+        tx.send(make_entry("live1")).await.unwrap();
         // Close the sender so handle_stream_logs terminates after draining.
         drop(tx);
 
