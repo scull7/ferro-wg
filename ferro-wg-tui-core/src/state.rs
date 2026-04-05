@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use ferro_wg_core::config::{AppConfig, LogDisplayConfig, WgConfig};
 use ferro_wg_core::error::BackendKind;
+use ferro_wg_core::ipc::LogEntry;
 use ferro_wg_core::stats::TunnelStats;
 use tracing::warn;
 
@@ -122,8 +123,8 @@ pub struct AppState {
     /// Index into `connections` for the currently focused connection.
     /// Always 0 when `connections` is empty.
     pub selected_connection: usize,
-    /// Log lines for the Logs tab.
-    pub log_lines: Arc<Mutex<VecDeque<String>>>,
+    /// Structured log entries for the Logs tab.
+    pub log_entries: Arc<Mutex<VecDeque<LogEntry>>>,
     /// Active color theme.
     pub theme: Theme,
     /// Whether the daemon is currently reachable.
@@ -161,7 +162,7 @@ impl AppState {
             search_query: String::new(),
             connections,
             selected_connection: 0,
-            log_lines: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            log_entries: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             theme: Theme::mocha(),
             daemon_connected: false,
             feedback: None,
@@ -177,14 +178,14 @@ impl AppState {
         self.connections.get(self.selected_connection)
     }
 
-    /// Append a log line to the log buffer, maintaining bounded size.
-    pub fn append_log(&self, line: String) {
-        match self.log_lines.lock() {
+    /// Append a structured log entry to the buffer, evicting the oldest when full.
+    pub fn append_log(&self, entry: LogEntry) {
+        match self.log_entries.lock() {
             Ok(mut buf) => {
                 if buf.len() == buf.capacity() {
                     buf.pop_front();
                 }
-                buf.push_back(line);
+                buf.push_back(entry);
             }
             Err(_) => {
                 warn!("Log buffer mutex poisoned, skipping log append");
@@ -734,5 +735,41 @@ mod tests {
         assert!(!state.daemon_connected);
         state.dispatch(&Action::UpdatePeers(vec![make_peer_status("mia", true)]));
         assert!(state.daemon_connected);
+    }
+
+    // ── Log entry tests ───────────────────────────────────────────────────────
+
+    fn make_log_entry(msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 0,
+            level: ferro_wg_core::ipc::LogLevel::Info,
+            connection_name: None,
+            message: msg.to_owned(),
+        }
+    }
+
+    #[test]
+    fn append_log_grows_buffer() {
+        let state = two_connection_state();
+        assert_eq!(state.log_entries.lock().unwrap().len(), 0);
+        state.append_log(make_log_entry("hello"));
+        state.append_log(make_log_entry("world"));
+        assert_eq!(state.log_entries.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn append_log_evicts_oldest_at_capacity() {
+        let state = two_connection_state();
+        // Fill the buffer to capacity.
+        for i in 0..1000 {
+            state.append_log(make_log_entry(&format!("line{i}")));
+        }
+        assert_eq!(state.log_entries.lock().unwrap().len(), 1000);
+        // One more: oldest should be evicted.
+        state.append_log(make_log_entry("overflow"));
+        let buf = state.log_entries.lock().unwrap();
+        assert_eq!(buf.len(), 1000);
+        assert_eq!(buf.back().unwrap().message, "overflow");
+        assert_eq!(buf.front().unwrap().message, "line1");
     }
 }

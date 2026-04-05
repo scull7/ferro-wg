@@ -7,10 +7,9 @@
 
 mod event;
 
-use std::collections::VecDeque;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -189,8 +188,9 @@ fn compute_layout(
     (chunks, show_bar)
 }
 
-/// Spawn a background task that streams log lines from the daemon into the log buffer.
-fn spawn_log_stream(tasks: &mut JoinSet<()>, log_lines: Arc<Mutex<VecDeque<String>>>) {
+/// Spawn a background task that streams structured log entries from the daemon.
+fn spawn_log_stream(tasks: &mut JoinSet<()>, state_ref: &AppState) {
+    let log_entries = Arc::clone(&state_ref.log_entries);
     tasks.spawn(async move {
         let mut rx = match client::stream_logs().await {
             Ok(rx) => rx,
@@ -199,15 +199,15 @@ fn spawn_log_stream(tasks: &mut JoinSet<()>, log_lines: Arc<Mutex<VecDeque<Strin
                 return;
             }
         };
-        while let Some(line) = rx.recv().await {
-            let Ok(mut buf) = log_lines.lock() else {
+        while let Some(entry) = rx.recv().await {
+            let Ok(mut buf) = log_entries.lock() else {
                 warn!("Log buffer mutex poisoned, skipping log append");
                 continue;
             };
             if buf.len() == buf.capacity() {
                 buf.pop_front();
             }
-            buf.push_back(line);
+            buf.push_back(entry);
         }
     });
 }
@@ -271,7 +271,7 @@ async fn event_loop(
     let poll_in_flight = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
 
-    spawn_log_stream(&mut tasks, Arc::clone(&state.log_lines));
+    spawn_log_stream(&mut tasks, &state);
 
     while state.running {
         handle_daemon_messages(&mut daemon_rx, &mut state, &mut bundle);
@@ -423,8 +423,8 @@ fn maybe_spawn_command(
         let msg = match client::send_command(&cmd).await {
             Ok(DaemonResponse::Ok) => DaemonMessage::CommandOk(description),
             Ok(DaemonResponse::Error(e)) => DaemonMessage::CommandError(e),
-            Ok(DaemonResponse::LogLine(_)) => {
-                warn!("Received unexpected LogLine response for command");
+            Ok(DaemonResponse::LogEntry(_)) => {
+                warn!("Received unexpected LogEntry response for command");
                 return;
             }
             Err(e) => error_to_message(&e),
