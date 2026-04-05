@@ -8,7 +8,7 @@
 mod event;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -158,6 +158,7 @@ fn handle_key_event(
     bundle: &mut ComponentBundle,
     daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
+    config_path: &Path,
 ) {
     let action = if state.pending_confirm.is_some() {
         // Confirmation dialog captures all keys; no other handler runs.
@@ -184,11 +185,11 @@ fn handle_key_event(
     };
 
     dispatch_all(state, action, bundle);
-    maybe_spawn_command(action, daemon_tx, tasks);
+    maybe_spawn_command(action, daemon_tx, tasks, config_path);
 
     if let Some(ref follow) = follow_up {
         dispatch_all(state, follow, bundle);
-        maybe_spawn_command(follow, daemon_tx, tasks);
+        maybe_spawn_command(follow, daemon_tx, tasks, config_path);
     }
 }
 
@@ -293,7 +294,7 @@ pub async fn run(
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app_config: AppConfig,
-    _config_path: PathBuf,
+    config_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new(app_config);
     let mut bundle = ComponentBundle::new();
@@ -315,7 +316,14 @@ async fn event_loop(
 
         match events.next().await {
             Some(AppEvent::Key(key)) => {
-                handle_key_event(key, &mut state, &mut bundle, &daemon_tx, &mut tasks);
+                handle_key_event(
+                    key,
+                    &mut state,
+                    &mut bundle,
+                    &daemon_tx,
+                    &mut tasks,
+                    &config_path,
+                );
             }
             Some(AppEvent::Tick) => spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks),
             None => break,
@@ -432,11 +440,79 @@ fn spawn_status_poll(
     });
 }
 
-/// If the action is a peer command, spawn a background daemon task.
+/// Attempt to start the daemon as a background subprocess.
+///
+/// Flow:
+/// 1. If the socket is already reachable, send `CommandError("Daemon is already running")`.
+/// 2. Spawn `sudo <exe> daemon --daemonize -c <config_path>` detached.
+/// 3. Poll the socket up to 6 × 500 ms. On first success send `CommandOk`.
+///    On timeout send `CommandError("not yet reachable")`.
+fn spawn_daemon_start(
+    config_path: &Path,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let config_path = config_path.to_path_buf();
+    let tx = tx.clone();
+
+    tasks.spawn(async move {
+        // Pre-spawn guard: abort if daemon is already reachable.
+        if client::send_command(&DaemonCommand::Status).await.is_ok() {
+            let _ = tx.send(DaemonMessage::CommandError(
+                "Daemon is already running".into(),
+            ));
+            return;
+        }
+
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = tx.send(DaemonMessage::CommandError(format!(
+                    "Could not start daemon: run 'sudo ferro-wg daemon --daemonize' ({e})"
+                )));
+                return;
+            }
+        };
+
+        let spawn_result = tokio::process::Command::new("sudo")
+            .arg(&exe)
+            .arg("daemon")
+            .arg("--daemonize")
+            .arg("-c")
+            .arg(&config_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        if let Err(e) = spawn_result {
+            let _ = tx.send(DaemonMessage::CommandError(format!(
+                "Could not start daemon: run 'sudo ferro-wg daemon --daemonize' ({e})"
+            )));
+            return;
+        }
+
+        // Post-spawn poll: wait up to 3 s for the socket to become available.
+        for _ in 0_u8..6 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if client::send_command(&DaemonCommand::Status).await.is_ok() {
+                let _ = tx.send(DaemonMessage::CommandOk("Daemon started".into()));
+                return;
+            }
+        }
+
+        let _ = tx.send(DaemonMessage::CommandError(
+            "Daemon started but not yet reachable — try again in a moment".into(),
+        ));
+    });
+}
+
+/// If the action is a peer command or daemon lifecycle command, spawn a background task.
 fn maybe_spawn_command(
     action: &Action,
     tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
+    config_path: &Path,
 ) {
     let (cmd, description) = match action {
         Action::ConnectPeer(name) => (
@@ -472,6 +548,11 @@ fn maybe_spawn_command(
             },
             "All connections down".to_owned(),
         ),
+        Action::StopDaemon => (DaemonCommand::Shutdown, "Daemon stopped".to_owned()),
+        Action::StartDaemon => {
+            spawn_daemon_start(config_path, tx, tasks);
+            return;
+        }
         _ => return,
     };
 

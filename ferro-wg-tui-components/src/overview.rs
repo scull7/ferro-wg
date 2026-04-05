@@ -76,6 +76,12 @@ impl Component for OverviewComponent {
                 message: "Tear down all connections?".to_owned(),
                 action: ConfirmAction::DisconnectAll,
             }),
+            // Daemon lifecycle: s starts (only when disconnected), S stops (only when connected).
+            KeyCode::Char('s') if !state.daemon_connected => Some(Action::StartDaemon),
+            KeyCode::Char('S') if state.daemon_connected => Some(Action::RequestConfirm {
+                message: "Stop the running daemon?".to_owned(),
+                action: ConfirmAction::StopDaemon,
+            }),
             _ => None,
         }
     }
@@ -504,6 +510,61 @@ mod tests {
         assert_eq!(
             comp.handle_key(KeyEvent::from(KeyCode::Char('u')), &state),
             Some(Action::ConnectAll),
+        );
+    }
+
+    // ── Commit 3: daemon lifecycle keybindings ────────────────────────────────
+
+    #[test]
+    fn overview_s_emits_start_daemon_when_disconnected() {
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = false;
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('s')), &state),
+            Some(Action::StartDaemon),
+        );
+    }
+
+    #[test]
+    fn overview_s_ignored_when_connected() {
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = true;
+        // lowercase 's' should not produce StartDaemon when already connected
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('s')), &state),
+            None,
+        );
+    }
+
+    #[test]
+    fn overview_shift_s_emits_request_confirm_stop_daemon_when_connected() {
+        use ferro_wg_tui_core::ConfirmAction;
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = true;
+        let action = comp.handle_key(KeyEvent::from(KeyCode::Char('S')), &state);
+        assert!(
+            matches!(
+                action,
+                Some(Action::RequestConfirm {
+                    action: ConfirmAction::StopDaemon,
+                    ..
+                })
+            ),
+            "expected RequestConfirm(StopDaemon), got {action:?}"
+        );
+    }
+
+    #[test]
+    fn overview_shift_s_ignored_when_disconnected() {
+        let mut comp = OverviewComponent::new();
+        let mut state = three_connection_state();
+        state.daemon_connected = false;
+        assert_eq!(
+            comp.handle_key(KeyEvent::from(KeyCode::Char('S')), &state),
+            None,
         );
     }
 }
