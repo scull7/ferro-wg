@@ -6,6 +6,7 @@
 //! implementations from [`ferro_wg_tui_components`].
 
 mod event;
+mod history;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -159,25 +160,39 @@ fn handle_daemon_messages(
     daemon_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
     state: &mut AppState,
     bundle: &mut ComponentBundle,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+    benchmarks_path: &Path,
 ) {
     while let Ok(msg) = daemon_rx.try_recv() {
         let actions: Vec<Action> = match msg {
-            DaemonMessage::ReloadConfig(config, ok_msg) => {
-                state.reload_from_config(config);
-                vec![Action::DaemonOk(ok_msg)]
+            DaemonMessage::ReloadConfig(ref config, ref ok_msg) => {
+                state.reload_from_config(config.clone());
+                vec![Action::DaemonOk(ok_msg.clone())]
             }
-            DaemonMessage::StatusUpdate(peers) => vec![Action::UpdatePeers(peers)],
-            DaemonMessage::CommandOk(msg) => vec![Action::DaemonOk(msg)],
-            DaemonMessage::CommandError(err) => vec![Action::DaemonError(err.to_string())],
+            DaemonMessage::StatusUpdate(ref peers) => vec![Action::UpdatePeers(peers.clone())],
+            DaemonMessage::CommandOk(ref msg) => vec![Action::DaemonOk(msg.clone())],
+            DaemonMessage::CommandError(ref err) => vec![Action::DaemonError(err.to_string())],
             DaemonMessage::Unreachable => vec![
                 Action::DaemonConnectivityChanged(false),
                 Action::DaemonError("daemon is not running".into()),
             ],
-            DaemonMessage::BenchmarkProgress(p) => vec![Action::BenchmarkProgressUpdate(p)],
-            DaemonMessage::BenchmarkComplete(r) => vec![Action::BenchmarkComplete(r)],
+            DaemonMessage::BenchmarkProgress(ref p) => {
+                vec![Action::BenchmarkProgressUpdate(p.clone())]
+            }
+            DaemonMessage::BenchmarkComplete(ref r) => vec![Action::BenchmarkComplete(r.clone())],
         };
         for action in &actions {
             dispatch_all(state, action, bundle);
+        }
+        // After dispatching BenchmarkComplete, persist the updated history.
+        if matches!(msg, DaemonMessage::BenchmarkComplete(_)) {
+            spawn_save_history_task(
+                benchmarks_path,
+                state.benchmark_history.clone(),
+                daemon_tx,
+                tasks,
+            );
         }
     }
 }
@@ -211,6 +226,7 @@ fn handle_key_event(
     daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
     config_path: &Path,
+    benchmarks_path: &Path,
 ) {
     let action = if state.pending_confirm.is_some() {
         // Confirmation dialog captures all keys; no other handler runs.
@@ -249,11 +265,25 @@ fn handle_key_event(
     };
 
     dispatch_all(state, action, bundle);
-    maybe_spawn_command(action, state, daemon_tx, tasks, config_path);
+    maybe_spawn_command(
+        action,
+        state,
+        daemon_tx,
+        tasks,
+        config_path,
+        benchmarks_path,
+    );
 
     if let Some(ref follow) = follow_up {
         dispatch_all(state, follow, bundle);
-        maybe_spawn_command(follow, state, daemon_tx, tasks, config_path);
+        maybe_spawn_command(
+            follow,
+            state,
+            daemon_tx,
+            tasks,
+            config_path,
+            benchmarks_path,
+        );
     }
 
     if let Some(path) = import_path {
@@ -339,6 +369,7 @@ fn error_to_message(err: client::DaemonClientError) -> DaemonMessage {
 pub async fn run(
     app_config: AppConfig,
     config_path: PathBuf,
+    benchmarks_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
@@ -349,7 +380,7 @@ pub async fn run(
     terminal.clear()?;
 
     // Run the event loop, then restore terminal regardless of outcome.
-    let result = event_loop(&mut terminal, app_config, config_path).await;
+    let result = event_loop(&mut terminal, app_config, config_path, benchmarks_path).await;
 
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
@@ -363,6 +394,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app_config: AppConfig,
     config_path: PathBuf,
+    benchmarks_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new(app_config);
     let mut bundle = ComponentBundle::new();
@@ -371,10 +403,23 @@ async fn event_loop(
     let poll_in_flight = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
 
+    // Load benchmark history at startup.
+    match history::load_benchmark_history(&benchmarks_path).await {
+        Ok(history) => state.benchmark_history = history,
+        Err(e) => warn!("failed to load benchmark history: {e}"),
+    }
+
     spawn_log_stream(&mut tasks, &state);
 
     while state.running {
-        handle_daemon_messages(&mut daemon_rx, &mut state, &mut bundle);
+        handle_daemon_messages(
+            &mut daemon_rx,
+            &mut state,
+            &mut bundle,
+            &daemon_tx,
+            &mut tasks,
+            &benchmarks_path,
+        );
         state.clear_expired_feedback();
 
         let size = terminal.size()?;
@@ -391,6 +436,7 @@ async fn event_loop(
                     &daemon_tx,
                     &mut tasks,
                     &config_path,
+                    &benchmarks_path,
                 );
             }
             Some(AppEvent::Tick) => spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks),
@@ -733,6 +779,26 @@ fn spawn_switch_backend_task(
     });
 }
 
+/// Spawn an async task that saves the benchmark history to disk.
+fn spawn_save_history_task(
+    benchmarks_path: &Path,
+    runs: Vec<ferro_wg_tui_core::benchmark::BenchmarkRun>,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let path = benchmarks_path.to_path_buf();
+    let daemon_tx = daemon_tx.clone();
+    tasks.spawn(async move {
+        let result: Result<(), ferro_wg_tui_core::benchmark::BenchmarkError> =
+            history::save_benchmark_history(&path, runs).await;
+        if let Err(e) = result {
+            let _ = daemon_tx.send(DaemonMessage::CommandError(TuiError::Generic(format!(
+                "failed to save benchmark history: {e}"
+            ))));
+        }
+    });
+}
+
 /// If the action is a peer command or daemon lifecycle command, spawn a background task.
 fn maybe_spawn_command(
     action: &Action,
@@ -740,6 +806,7 @@ fn maybe_spawn_command(
     tx: &mpsc::UnboundedSender<DaemonMessage>,
     tasks: &mut JoinSet<()>,
     config_path: &Path,
+    _benchmarks_path: &Path,
 ) {
     if matches!(
         action,
@@ -833,6 +900,7 @@ mod tests {
     #[tokio::test]
     async fn test_maybe_spawn_command_switch_backend_unknown() {
         let config_path = PathBuf::from("/tmp/config.toml");
+        let benchmarks_path = PathBuf::from("/tmp/benchmarks.json");
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut tasks = JoinSet::new();
         let state = AppState::new(AppConfig::default());
@@ -843,6 +911,7 @@ mod tests {
             &tx,
             &mut tasks,
             &config_path,
+            &benchmarks_path,
         );
 
         let msg = rx.recv().await.unwrap();
@@ -855,6 +924,7 @@ mod tests {
     #[tokio::test]
     async fn test_maybe_spawn_command_switch_backend_no_active_connection() {
         let config_path = PathBuf::from("/tmp/config.toml");
+        let benchmarks_path = PathBuf::from("/tmp/benchmarks.json");
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut tasks = JoinSet::new();
         let state = AppState::new(AppConfig::default());
@@ -866,6 +936,7 @@ mod tests {
             &tx,
             &mut tasks,
             &config_path,
+            &benchmarks_path,
         );
 
         let msg = rx.recv().await.unwrap();

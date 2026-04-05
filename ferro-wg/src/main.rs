@@ -85,8 +85,16 @@ fn run_tui(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "tui")]
     {
         let app_config = load_app_config(config_path)?;
+        let benchmarks_path = config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("benchmarks.json");
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(ferro_wg_tui::run(app_config, config_path.to_path_buf()))?;
+        rt.block_on(ferro_wg_tui::run(
+            app_config,
+            config_path.to_path_buf(),
+            benchmarks_path,
+        ))?;
         Ok(())
     }
     #[cfg(not(feature = "tui"))]

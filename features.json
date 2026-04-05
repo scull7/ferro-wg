@@ -45,8 +45,13 @@
       {
         "id": "commit4",
         "title": "Historical storage",
-        "status": "pending",
-        "features": []
+        "status": "completed",
+        "features": [
+          "history_persistence",
+          "benchmarks_json_loading",
+          "history_capping",
+          "benchmark_run_storage"
+        ]
       },
       {
         "id": "commit5",

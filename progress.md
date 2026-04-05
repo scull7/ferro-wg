@@ -22,16 +22,24 @@
 - All tests pass, clippy clean, no warnings
 
 ### Commit 3: Background benchmark task (COMPLETED)
-- Added DaemonMessage::BenchmarkProgress and DaemonMessage::BenchmarkComplete variants
-- Extended handle_daemon_messages to dispatch BenchmarkProgressUpdate and BenchmarkComplete
-- Implemented spawn_benchmark_task and spawn_switch_backend_task
-- Extended maybe_spawn_command with arms for StartBenchmark / StartBenchmarkForBackend / SwitchBenchmarkBackend
-- Added TuiError enum with thiserror for proper error handling
+- Added DaemonMessage::BenchmarkProgress/BenchmarkComplete variants
+- Extended handle_daemon_messages for benchmark dispatching
+- Implemented spawn_benchmark_task with streaming IPC
+- Add spawn_switch_backend_task for backend switching
+- Introduced TuiError enum with thiserror for proper error handling
+- Extended maybe_spawn_command with benchmark action arms
+- All tests pass, clippy clean, no warnings
+
+### Commit 4: Historical storage (COMPLETED)
+- New ferro-wg-tui/src/history.rs module with load/save functions
+- Thread benchmarks_path through TUI startup and event loop
+- Load history at startup, save after BenchmarkComplete
+- Cap history at 50 runs, graceful error handling
 - All tests pass, clippy clean, no warnings
 
 ## Pending Phases
 
-### Commit 4: Historical storage
+### Commit 5: Export functionality
 ### Commit 5: Export functionality
 
 ## Verification Status
