@@ -68,7 +68,7 @@
     ]
   },
   "phase6": {
-    "status": "in_progress",
+    "status": "verified",
     "commits": [
       {
         "id": "commit1",
@@ -105,20 +105,43 @@
       {
         "id": "commit3",
         "title": "DiffPreviewComponent overlay",
-        "status": "pending",
-        "features": []
+        "status": "completed",
+        "features": [
+          "diff_preview_component",
+          "centered_rect_utility",
+          "color_coded_diff_lines",
+          "scrollable_overlay",
+          "diff_preview_key_bindings",
+          "diff_preview_tests"
+        ]
       },
       {
         "id": "commit4",
         "title": "Background save task and backup",
-        "status": "pending",
-        "features": []
+        "status": "completed",
+        "features": [
+          "spawn_save_config_task",
+          "backup_before_write",
+          "atomic_config_save",
+          "optional_reconnect_after_save",
+          "reload_config_after_save"
+        ]
       },
       {
         "id": "commit5",
-        "title": "Peer editing and add/delete flows",
-        "status": "pending",
-        "features": []
+        "title": "Adversary review fixes",
+        "status": "completed",
+        "features": [
+          "enter_config_edit_struct_variant",
+          "validate_field_on_enter",
+          "real_config_diff_in_preview",
+          "save_config_io_wired",
+          "config_focus_prev_wrap_fix",
+          "delete_peer_clamp_fix",
+          "render_no_unwrap",
+          "status_bar_refactor",
+          "clippy_pedantic_clean"
+        ]
       }
     ]
   }
