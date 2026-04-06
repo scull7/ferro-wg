@@ -207,6 +207,7 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
 /// Returns an error if sending responses fails.
 #[tracing::instrument(skip(writer, log_buffer))]
 async fn handle_stream_logs(
+    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     mut writer: tokio::net::unix::OwnedWriteHalf,
     log_buffer: &LogBuffer,
     log_rx: &mut mpsc::Receiver<LogEntry>,
@@ -219,12 +220,26 @@ async fn handle_stream_logs(
             return Ok(());
         }
     }
-    // Stream live entries until the channel closes or the client disconnects.
-    while let Some(entry) = log_rx.recv().await {
-        let resp = DaemonResponse::LogEntry(entry);
-        if let Err(e) = send_response(&mut writer, &resp).await {
-            warn!("Failed to send streamed log entry: {e}");
-            break;
+
+    // Stream live entries, breaking immediately when the client disconnects
+    // (EOF on the read half) so the daemon event loop is not blocked waiting
+    // for the next log entry.
+    let mut discard = String::new();
+    loop {
+        discard.clear();
+        tokio::select! {
+            entry = log_rx.recv() => match entry {
+                Some(entry) => {
+                    let resp = DaemonResponse::LogEntry(entry);
+                    if let Err(e) = send_response(&mut writer, &resp).await {
+                        warn!("Failed to send streamed log entry: {e}");
+                        break;
+                    }
+                }
+                None => break,
+            },
+            // EOF (Ok(0)) or error both signal the client has disconnected.
+            _ = reader.read_line(&mut discard) => break,
         }
     }
     Ok(())
@@ -291,13 +306,23 @@ async fn process_command(
 /// Accept the next connection from the listener and decode its command.
 ///
 /// Returns `None` if the connection closed before a valid command was received.
+/// The read half is returned alongside the write half so callers that stream
+/// responses back (e.g. `handle_stream_logs`) can detect client disconnect via
+/// EOF on the read side.
 ///
 /// # Errors
 ///
 /// Returns an error on socket I/O or protocol decode failure.
 async fn accept_command(
     listener: &UnixListener,
-) -> Result<Option<(tokio::net::unix::OwnedWriteHalf, DaemonCommand)>, Box<dyn std::error::Error>> {
+) -> Result<
+    Option<(
+        BufReader<tokio::net::unix::OwnedReadHalf>,
+        tokio::net::unix::OwnedWriteHalf,
+        DaemonCommand,
+    )>,
+    Box<dyn std::error::Error>,
+> {
     let (stream, _addr) = listener.accept().await?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -305,7 +330,7 @@ async fn accept_command(
         return Ok(None);
     };
     info!("Received command: {command:?}");
-    Ok(Some((writer, command)))
+    Ok(Some((reader, writer, command)))
 }
 
 /// Route a decoded command to its handler.
@@ -323,12 +348,12 @@ async fn handle_connection(
     log_buffer: &LogBuffer,
     log_rx: &mut mpsc::Receiver<LogEntry>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let Some((mut writer, command)) = accept_command(listener).await? else {
+    let Some((reader, mut writer, command)) = accept_command(listener).await? else {
         return Ok(false);
     };
     match command {
         DaemonCommand::StreamLogs => {
-            handle_stream_logs(writer, log_buffer, log_rx).await?;
+            handle_stream_logs(reader, writer, log_buffer, log_rx).await?;
             Ok(false)
         }
         cmd => process_command(&cmd, manager, config_path, &mut writer).await,
@@ -652,13 +677,14 @@ mod tests {
         buffer.add_entry(make_entry("old entry"));
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let (_server_read, server_write) = server.into_split();
+        let (server_read, server_write) = server.into_split();
+        let server_read = BufReader::new(server_read);
 
         // Drop the client immediately so writes to server_write fail.
         drop(client);
 
         let (_tx, mut rx) = mpsc::channel::<LogEntry>(1);
-        let result = handle_stream_logs(server_write, &buffer, &mut rx).await;
+        let result = handle_stream_logs(server_read, server_write, &buffer, &mut rx).await;
         assert!(result.is_ok());
     }
 
@@ -669,7 +695,8 @@ mod tests {
         let buffer = LogBuffer::new(5);
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let (_server_read, server_write) = server.into_split();
+        let (server_read, server_write) = server.into_split();
+        let server_read = BufReader::new(server_read);
 
         // Drop the client so the next write into server_write will fail.
         drop(client);
@@ -677,7 +704,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<LogEntry>(4);
         tx.send(make_entry("live entry")).await.unwrap();
 
-        let result = handle_stream_logs(server_write, &buffer, &mut rx).await;
+        let result = handle_stream_logs(server_read, server_write, &buffer, &mut rx).await;
         assert!(result.is_ok());
     }
 
@@ -692,14 +719,15 @@ mod tests {
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let (client_read, _client_write) = client.into_split();
-        let (_server_read, server_write) = server.into_split();
+        let (server_read, server_write) = server.into_split();
+        let server_read = BufReader::new(server_read);
 
         let (tx, mut rx) = mpsc::channel::<LogEntry>(4);
         tx.send(make_entry("live1")).await.unwrap();
         // Close the sender so handle_stream_logs terminates after draining.
         drop(tx);
 
-        handle_stream_logs(server_write, &buffer, &mut rx)
+        handle_stream_logs(server_read, server_write, &buffer, &mut rx)
             .await
             .unwrap();
 

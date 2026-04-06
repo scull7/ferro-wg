@@ -9,6 +9,8 @@ use std::process;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use cli::{Cli, Command};
 use ferro_wg_core::config;
@@ -26,9 +28,22 @@ fn main() {
         2 => "debug",
         _ => "trace",
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .init();
+
+    // The daemon foreground path wires LogLayer into its own layered subscriber
+    // (created after LogBuffer) so tracing events land in the ring buffer.
+    // All other commands use the plain fmt subscriber initialised here.
+    let is_daemon_foreground = matches!(
+        &cli.command,
+        Some(Command::Daemon {
+            daemonize: false,
+            stop: false
+        })
+    );
+    if !is_daemon_foreground {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(filter))
+            .init();
+    }
 
     let config_path = cli.config.unwrap_or_else(default_config_path);
 
@@ -38,7 +53,9 @@ fn main() {
         Some(Command::Down { peer }) => cmd_down(peer.as_deref()),
         Some(Command::Status) => cmd_status(&config_path),
         Some(Command::Routes) => cmd_routes(),
-        Some(Command::Daemon { daemonize, stop }) => cmd_daemon(&config_path, daemonize, stop),
+        Some(Command::Daemon { daemonize, stop }) => {
+            cmd_daemon(&config_path, daemonize, stop, filter, cli.verbose)
+        }
         Some(Command::Import { path }) => cmd_import(&path, &config_path),
         Some(Command::Genkey) => {
             cmd_genkey();
@@ -275,16 +292,28 @@ fn cmd_daemon(
     config_path: &Path,
     daemonize: bool,
     stop: bool,
+    log_level: &str,
+    verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if stop {
         return cmd_daemon_stop();
     }
 
     if daemonize {
-        return cmd_daemon_background(config_path);
+        return cmd_daemon_background(config_path, verbose);
     }
 
-    // Foreground mode.
+    // Foreground mode — create LogBuffer first so LogLayer can be wired into
+    // the tracing subscriber before any events are emitted.
+    let log_buffer = ferro_wg_core::daemon::LogBuffer::new(1000);
+    let log_layer = ferro_wg_core::daemon::LogLayer::new(log_buffer.clone());
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::new(log_level))
+        .with(tracing_subscriber::fmt::layer())
+        .with(log_layer)
+        .init();
+
     let app_config = load_app_config(config_path)?;
     let socket_path = PathBuf::from(SOCKET_PATH);
 
@@ -297,7 +326,6 @@ fn cmd_daemon(
 
     // Bounded channel: sender blocks under backpressure instead of dropping messages.
     let (log_tx, log_rx) = tokio::sync::mpsc::channel::<ferro_wg_core::ipc::LogEntry>(4096);
-    let log_buffer = ferro_wg_core::daemon::LogBuffer::new(1000);
     let log_buffer_for_broadcast = log_buffer.clone();
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -338,11 +366,21 @@ fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Spawn the daemon as a detached background process.
-fn cmd_daemon_background(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// The `verbose` count is forwarded to the subprocess so the daemon captures
+/// the same log level that was requested on the command line.
+fn cmd_daemon_background(
+    config_path: &Path,
+    verbose: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
+
+    // Build verbosity flags ("-v", "-vv", "-vvv", …) for the subprocess.
+    let verbose_arg = format!("-{}", "v".repeat(verbose.max(1) as usize));
 
     let child = std::process::Command::new("sudo")
         .arg(&exe)
+        .arg(&verbose_arg)
         .arg("daemon")
         .arg("-c")
         .arg(config_path)
