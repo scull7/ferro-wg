@@ -671,7 +671,7 @@ impl AppState {
                 let timestamp_ms = i64::try_from(
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_millis(),
                 )
                 .expect("timestamp fits in i64");

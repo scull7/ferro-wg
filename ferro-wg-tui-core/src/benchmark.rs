@@ -129,11 +129,10 @@ pub fn throughput_sparkline_data(progress: &[BenchmarkProgress]) -> Vec<u64> {
 /// Returns `None` when `results` is empty or all backends have
 /// `throughput_bps == 0.0`.
 #[must_use]
-#[allow(clippy::missing_panics_doc)]
 pub fn best_backend(results: &BenchmarkResultMap) -> Option<&str> {
     results
         .iter()
-        .max_by(|a, b| a.1.throughput_bps.partial_cmp(&b.1.throughput_bps).unwrap())
+        .max_by(|a, b| a.1.throughput_bps.total_cmp(&b.1.throughput_bps))
         .filter(|(_, r)| r.throughput_bps > 0.0)
         .map(|(k, _)| k.as_str())
 }
