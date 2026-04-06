@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use ferro_wg_core::config::WgConfig;
 use thiserror::Error;
 
@@ -22,8 +24,8 @@ pub enum ConfigSection {
 /// arrays based on `(section_variant, is_new_peer)`.
 ///
 /// - `Interface` → always the same 10 fields
-/// - `Peer(…, is_new_peer=false)` → 5 fields excluding `PeerPublicKey`
-/// - `Peer(…, is_new_peer=true)` → 6 fields with `PeerPublicKey` first
+/// - `Peer(…, is_new_peer=false)` → 4 fields excluding `PeerPublicKey`
+/// - `Peer(…, is_new_peer=true)` → 5 fields with `PeerPublicKey` first
 ///
 /// This makes `&'static [EditableField]` achievable without allocation.
 ///
@@ -265,10 +267,11 @@ pub fn validate_public_key(s: &str) -> Result<(), ConfigEditError> {
     if s.len() != 44 {
         return Err(ConfigEditError::PublicKeyLength);
     }
-    #[allow(deprecated)]
-    let decoded = base64::decode(s).map_err(|_| ConfigEditError::PublicKeyInvalidBase64)?; // TODO: migrate to base64::Engine
+    let decoded = BASE64
+        .decode(s)
+        .map_err(|_| ConfigEditError::PublicKeyInvalidBase64)?;
     if decoded.len() != 32 {
-        return Err(ConfigEditError::PublicKeyInvalidBase64); // or a new error variant?
+        return Err(ConfigEditError::PublicKeyInvalidBase64);
     }
     Ok(())
 }
@@ -592,6 +595,112 @@ pub fn fields_for_section(section: ConfigSection, is_new_peer: bool) -> &'static
     }
 }
 
+/// Apply a validated field value to the appropriate field in `draft`.
+///
+/// Called from `dispatch(ConfigEditKey(Enter))` after [`validate_field`] succeeds.
+/// The `value` string is guaranteed to be syntactically valid for `field`; all
+/// `parse().unwrap_or(0)` calls below are therefore safe — they can only be
+/// reached when [`validate_field`] has already confirmed the string is parseable.
+///
+/// `section` is required to locate the target peer when `field` is a peer field.
+///
+/// # Panics
+///
+/// Never panics in practice: all `.unwrap_or(0)` fallbacks are unreachable
+/// because `validate_field` verifies parseability before this function is called.
+pub fn apply_field(
+    field: EditableField,
+    value: &str,
+    draft: &mut WgConfig,
+    section: ConfigSection,
+) {
+    match field {
+        EditableField::ListenPort => {
+            draft.interface.listen_port = value.parse().unwrap_or(0);
+        }
+        EditableField::Addresses => {
+            draft.interface.addresses = parse_comma_list(value);
+        }
+        EditableField::Dns => {
+            // `dns` is `Vec<IpAddr>`, not `Vec<String>` — parse each token as an IP address.
+            // Tokens that fail to parse are dropped; `validate_field` guarantees all tokens
+            // are valid before `apply_field` is called.
+            draft.interface.dns = value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse().ok())
+                .collect();
+        }
+        EditableField::DnsSearch => {
+            draft.interface.dns_search = parse_comma_list(value);
+        }
+        EditableField::Mtu => {
+            draft.interface.mtu = value.parse().unwrap_or(0);
+        }
+        EditableField::Fwmark => {
+            draft.interface.fwmark = value.parse().unwrap_or(0);
+        }
+        EditableField::PreUp => {
+            draft.interface.pre_up = parse_comma_list(value);
+        }
+        EditableField::PostUp => {
+            draft.interface.post_up = parse_comma_list(value);
+        }
+        EditableField::PreDown => {
+            draft.interface.pre_down = parse_comma_list(value);
+        }
+        EditableField::PostDown => {
+            draft.interface.post_down = parse_comma_list(value);
+        }
+        EditableField::PeerName => {
+            if let ConfigSection::Peer(idx) = section
+                && let Some(peer) = draft.peers.get_mut(idx)
+            {
+                peer.name = value.to_string();
+            }
+        }
+        EditableField::PeerPublicKey => {
+            // Handled separately in dispatch — write-back + new_peer_indices lifecycle.
+            // apply_field must not be called for this variant.
+        }
+        EditableField::PeerEndpoint => {
+            if let ConfigSection::Peer(idx) = section
+                && let Some(peer) = draft.peers.get_mut(idx)
+            {
+                peer.endpoint = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+            }
+        }
+        EditableField::PeerAllowedIps => {
+            if let ConfigSection::Peer(idx) = section
+                && let Some(peer) = draft.peers.get_mut(idx)
+            {
+                peer.allowed_ips = parse_comma_list(value);
+            }
+        }
+        EditableField::PeerPersistentKeepalive => {
+            if let ConfigSection::Peer(idx) = section
+                && let Some(peer) = draft.peers.get_mut(idx)
+            {
+                peer.persistent_keepalive = value.parse().unwrap_or(0);
+            }
+        }
+    }
+}
+
+/// Split a comma-separated string into a trimmed, non-empty `Vec<String>`.
+fn parse_comma_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Check if a string is a valid CIDR notation.
 fn is_valid_cidr(cidr: &str) -> bool {
     let parts: Vec<&str> = cidr.split('/').collect();
@@ -869,6 +978,142 @@ mod tests {
         );
     }
 
+    // ── apply_field unit tests ────────────────────────────────────────────────
+
+    fn make_draft() -> WgConfig {
+        use ferro_wg_core::config::{InterfaceConfig, PeerConfig};
+        use ferro_wg_core::key::PrivateKey;
+        WgConfig {
+            interface: InterfaceConfig {
+                private_key: PrivateKey::generate(),
+                listen_port: 0,
+                addresses: Vec::new(),
+                dns: Vec::new(),
+                dns_search: Vec::new(),
+                mtu: 0,
+                fwmark: 0,
+                pre_up: Vec::new(),
+                post_up: Vec::new(),
+                pre_down: Vec::new(),
+                post_down: Vec::new(),
+            },
+            peers: vec![PeerConfig {
+                name: String::new(),
+                public_key: PrivateKey::generate().public_key(),
+                preshared_key: None,
+                endpoint: Some("198.51.100.1:51820".to_string()),
+                allowed_ips: vec!["10.0.0.0/8".to_string()],
+                persistent_keepalive: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn apply_field_listen_port() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::ListenPort,
+            "51820",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(
+            draft.interface.listen_port, 51820,
+            "listen_port must be written to draft"
+        );
+    }
+
+    #[test]
+    fn apply_field_empty_port_sets_zero() {
+        // Arrange
+        let mut draft = make_draft();
+        draft.interface.listen_port = 12345;
+
+        // Act
+        apply_field(
+            EditableField::ListenPort,
+            "",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(
+            draft.interface.listen_port, 0,
+            "empty string must set listen_port to 0 (OS-assigned)"
+        );
+    }
+
+    #[test]
+    fn apply_field_addresses_comma_list() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::Addresses,
+            "10.0.0.1/24, 192.168.1.0/32",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(
+            draft.interface.addresses,
+            vec!["10.0.0.1/24", "192.168.1.0/32"],
+            "addresses must be split on commas with whitespace trimmed"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_allowed_ips() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::PeerAllowedIps,
+            "0.0.0.0/0, ::/0",
+            &mut draft,
+            ConfigSection::Peer(0),
+        );
+
+        // Assert
+        assert_eq!(
+            draft.peers[0].allowed_ips,
+            vec!["0.0.0.0/0", "::/0"],
+            "allowed_ips must be written to the correct peer"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_public_key_is_no_op() {
+        // Arrange
+        let mut draft = make_draft();
+        let original_key = draft.peers[0].public_key.to_base64();
+        let some_key = "/yt5f1nclaUwO75kn6KosqO2ZD6kJ4Ld4SrYuG1csZg=";
+
+        // Act: calling apply_field for PeerPublicKey must be a no-op
+        apply_field(
+            EditableField::PeerPublicKey,
+            some_key,
+            &mut draft,
+            ConfigSection::Peer(0),
+        );
+
+        // Assert: key is unchanged
+        assert_eq!(
+            draft.peers[0].public_key.to_base64(),
+            original_key,
+            "apply_field(PeerPublicKey) must not modify the draft (it is a no-op)"
+        );
+    }
+
     #[test]
     fn test_fields_for_section() {
         assert_eq!(
@@ -894,5 +1139,268 @@ mod tests {
         assert!(!is_valid_domain("exa mple.com"));
         assert!(!is_valid_domain("-example.com"));
         assert!(!is_valid_domain("example.com-"));
+    }
+
+    // ── apply_field — DNS / numeric / hook fields ────────────────────────────
+
+    #[test]
+    fn apply_field_dns_parses_ip_list() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::Dns,
+            "8.8.8.8, 1.1.1.1",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        let expected: Vec<std::net::IpAddr> = vec![
+            "8.8.8.8".parse().expect("parse 8.8.8.8"),
+            "1.1.1.1".parse().expect("parse 1.1.1.1"),
+        ];
+        assert_eq!(
+            draft.interface.dns, expected,
+            "dns must contain both parsed IpAddr values"
+        );
+    }
+
+    #[test]
+    fn apply_field_dns_empty_clears_list() {
+        // Arrange
+        let mut draft = make_draft();
+        draft.interface.dns = vec!["8.8.8.8".parse().expect("parse ip")];
+
+        // Act
+        apply_field(EditableField::Dns, "", &mut draft, ConfigSection::Interface);
+
+        // Assert
+        assert!(
+            draft.interface.dns.is_empty(),
+            "empty input must clear the dns list"
+        );
+    }
+
+    #[test]
+    fn apply_field_dns_search_comma_list() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::DnsSearch,
+            "example.com, sub.example.com",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(
+            draft.interface.dns_search,
+            vec!["example.com", "sub.example.com"],
+            "dns_search must be split and trimmed from the comma-separated input"
+        );
+    }
+
+    #[test]
+    fn apply_field_mtu_writes_to_draft() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::Mtu,
+            "1420",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(draft.interface.mtu, 1420, "mtu must be written to draft");
+    }
+
+    #[test]
+    fn apply_field_mtu_empty_sets_zero() {
+        // Arrange
+        let mut draft = make_draft();
+        draft.interface.mtu = 1500;
+
+        // Act
+        apply_field(EditableField::Mtu, "", &mut draft, ConfigSection::Interface);
+
+        // Assert
+        assert_eq!(
+            draft.interface.mtu, 0,
+            "empty string must set mtu to 0 (auto)"
+        );
+    }
+
+    #[test]
+    fn apply_field_fwmark_writes_to_draft() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::Fwmark,
+            "100",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(
+            draft.interface.fwmark, 100,
+            "fwmark must be written to draft"
+        );
+    }
+
+    #[test]
+    fn apply_field_fwmark_empty_sets_zero() {
+        // Arrange
+        let mut draft = make_draft();
+        draft.interface.fwmark = 42;
+
+        // Act
+        apply_field(
+            EditableField::Fwmark,
+            "",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(
+            draft.interface.fwmark, 0,
+            "empty string must set fwmark to 0"
+        );
+    }
+
+    #[test]
+    fn apply_field_pre_up_comma_list() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::PreUp,
+            "iptables -A, ip route add",
+            &mut draft,
+            ConfigSection::Interface,
+        );
+
+        // Assert
+        assert_eq!(
+            draft.interface.pre_up,
+            vec!["iptables -A", "ip route add"],
+            "pre_up must be split on commas with whitespace trimmed"
+        );
+    }
+
+    // ── apply_field — peer fields ────────────────────────────────────────────
+
+    #[test]
+    fn apply_field_peer_name_writes_to_draft() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::PeerName,
+            "office-vpn",
+            &mut draft,
+            ConfigSection::Peer(0),
+        );
+
+        // Assert
+        assert_eq!(
+            draft.peers[0].name, "office-vpn",
+            "peer name must be written to the correct peer"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_endpoint_writes_to_draft() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::PeerEndpoint,
+            "198.51.100.1:51820",
+            &mut draft,
+            ConfigSection::Peer(0),
+        );
+
+        // Assert
+        assert_eq!(
+            draft.peers[0].endpoint.as_deref(),
+            Some("198.51.100.1:51820"),
+            "peer endpoint must be written to the correct peer"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_endpoint_empty_clears_endpoint() {
+        // Arrange
+        let mut draft = make_draft();
+        // make_draft already sets endpoint to Some("198.51.100.1:51820")
+
+        // Act
+        apply_field(
+            EditableField::PeerEndpoint,
+            "",
+            &mut draft,
+            ConfigSection::Peer(0),
+        );
+
+        // Assert
+        assert_eq!(
+            draft.peers[0].endpoint, None,
+            "empty endpoint string must set peer.endpoint to None"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_persistent_keepalive() {
+        // Arrange
+        let mut draft = make_draft();
+
+        // Act
+        apply_field(
+            EditableField::PeerPersistentKeepalive,
+            "25",
+            &mut draft,
+            ConfigSection::Peer(0),
+        );
+
+        // Assert
+        assert_eq!(
+            draft.peers[0].persistent_keepalive, 25,
+            "persistent_keepalive must be written to the correct peer"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_out_of_bounds_is_no_op() {
+        // Arrange: draft has no peers
+        let mut draft = make_draft();
+        draft.peers.clear();
+
+        // Act: targeting a non-existent peer index must not panic or mutate
+        apply_field(
+            EditableField::PeerName,
+            "ghost",
+            &mut draft,
+            ConfigSection::Peer(99),
+        );
+
+        // Assert
+        assert!(
+            draft.peers.is_empty(),
+            "out-of-bounds peer index must be a no-op — peers must remain empty"
+        );
     }
 }

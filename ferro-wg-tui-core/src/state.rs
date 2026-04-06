@@ -26,7 +26,7 @@ use crate::benchmark::{
     cap_history,
 };
 use crate::config_edit::{
-    ConfigDiffPending, ConfigEditState, ConfigSection, EditableField, config_diff,
+    ConfigDiffPending, ConfigEditState, ConfigSection, EditableField, apply_field, config_diff,
     field_current_value, fields_for_section, validate_field,
 };
 use crate::theme::{Theme, ThemeKind};
@@ -795,21 +795,26 @@ impl AppState {
                                 let section = edit.focused_section;
                                 match validate_field(field, &value, &edit.draft, section) {
                                     Ok(()) => {
-                                        // Write PeerPublicKey back to draft before clearing the buffer.
-                                        // Also removes from new_peer_indices — this is the only field
-                                        // that tracks the "new peer" lifecycle.
-                                        if field == EditableField::PeerPublicKey
-                                            && let ConfigSection::Peer(idx) = edit.focused_section
-                                        {
-                                            if let Ok(key) = PublicKey::from_base64(&value)
-                                                && let Some(peer) = edit.draft.peers.get_mut(idx)
-                                            {
-                                                peer.public_key = key;
+                                        if field == EditableField::PeerPublicKey {
+                                            // Write PeerPublicKey back to draft before clearing
+                                            // the buffer. Also removes from new_peer_indices —
+                                            // this is the only field that tracks the "new peer"
+                                            // lifecycle.
+                                            if let ConfigSection::Peer(idx) = edit.focused_section {
+                                                if let Ok(key) = PublicKey::from_base64(&value)
+                                                    && let Some(peer) =
+                                                        edit.draft.peers.get_mut(idx)
+                                                {
+                                                    peer.public_key = key;
+                                                }
+                                                edit.new_peer_indices.remove(&idx);
+                                                if edit.new_peer_indices.is_empty() {
+                                                    edit.session_error = None;
+                                                }
                                             }
-                                            edit.new_peer_indices.remove(&idx);
-                                            if edit.new_peer_indices.is_empty() {
-                                                edit.session_error = None;
-                                            }
+                                        } else {
+                                            // Write all other fields back to draft.
+                                            apply_field(field, &value, &mut edit.draft, section);
                                         }
                                         edit.edit_buffer = None;
                                         edit.field_error = None;
@@ -2433,6 +2438,330 @@ mod tests {
         assert_eq!(
             actual_key, VALID_KEY,
             "public_key in draft must match the confirmed key"
+        );
+    }
+
+    // ── Phase 3 review remediation: apply_field write-back tests ─────────────
+
+    #[test]
+    fn apply_field_listen_port_writes_to_draft() {
+        // Arrange
+        let mut state = two_connection_state();
+        // ListenPort is field index 0 in the interface section.
+        // Arrange: open a fresh edit session before each field edit.
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+
+        // Clear the pre-populated value ("51820" from make_interface).
+        let buf_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .edit_buffer
+            .as_ref()
+            .expect("edit_buffer must be Some")
+            .len();
+        for _ in 0..buf_len {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Backspace,
+            )));
+        }
+
+        // Act: type a new port and press Enter.
+        type_and_enter(&mut state, "51820");
+
+        // Assert
+        let port = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present after commit")
+            .draft
+            .interface
+            .listen_port;
+        assert_eq!(port, 51820, "listen_port must be written back to draft");
+    }
+
+    #[test]
+    fn apply_field_addresses_writes_to_draft() {
+        // Arrange: use a fresh state with a known address list.
+        let mut state = AppState::new(make_app_config(&[("mia", vec![make_peer("p1")])]));
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 1, // Addresses
+        });
+
+        // Clear pre-populated buffer ("10.0.0.2/24" from make_interface).
+        let buf_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .edit_buffer
+            .as_ref()
+            .expect("edit_buffer must be Some")
+            .len();
+        for _ in 0..buf_len {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Backspace,
+            )));
+        }
+
+        // Act
+        type_and_enter(&mut state, "10.0.0.1/24");
+
+        // Assert
+        let addresses = &state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present")
+            .draft
+            .interface
+            .addresses;
+        assert_eq!(
+            addresses,
+            &["10.0.0.1/24"],
+            "addresses must be written back to draft"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_name_writes_to_draft() {
+        // Arrange: two_connection_state has "mia" with one peer named "mia-dc".
+        // Existing peer fields (no PeerPublicKey): [PeerName=0, PeerEndpoint=1,
+        // PeerAllowedIps=2, PeerPersistentKeepalive=3].
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        // Switch focus to existing peer 0, field 0 (PeerName).
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Peer(0),
+            field_idx: 0,
+        });
+
+        // Clear pre-populated buffer ("mia-dc").
+        let buf_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .edit_buffer
+            .as_ref()
+            .expect("edit_buffer must be Some")
+            .len();
+        for _ in 0..buf_len {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Backspace,
+            )));
+        }
+
+        // Act
+        type_and_enter(&mut state, "new-peer-name");
+
+        // Assert
+        let name = &state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present")
+            .draft
+            .peers[0]
+            .name;
+        assert_eq!(
+            name, "new-peer-name",
+            "peer name must be written back to draft"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_endpoint_writes_to_draft() {
+        // Arrange: existing peer has endpoint "198.51.100.1:51820".
+        // PeerEndpoint is field index 1 in the existing-peer field list.
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Peer(0),
+            field_idx: 1, // PeerEndpoint
+        });
+
+        // Clear pre-populated buffer.
+        let buf_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .edit_buffer
+            .as_ref()
+            .expect("edit_buffer must be Some")
+            .len();
+        for _ in 0..buf_len {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Backspace,
+            )));
+        }
+
+        // Act
+        type_and_enter(&mut state, "198.51.100.1:51820");
+
+        // Assert
+        let endpoint = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present")
+            .draft
+            .peers[0]
+            .endpoint
+            .as_deref();
+        assert_eq!(
+            endpoint,
+            Some("198.51.100.1:51820"),
+            "peer endpoint must be written back to draft"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_endpoint_empty_clears_endpoint() {
+        // Arrange: existing peer has endpoint "198.51.100.1:51820".
+        // PeerEndpoint is field index 1 in the existing-peer field list.
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Peer(0),
+            field_idx: 1, // PeerEndpoint
+        });
+
+        // Clear pre-populated buffer entirely (resulting in empty string).
+        let buf_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .edit_buffer
+            .as_ref()
+            .expect("edit_buffer must be Some")
+            .len();
+        for _ in 0..buf_len {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Backspace,
+            )));
+        }
+
+        // Act: commit an empty endpoint value.
+        state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        )));
+
+        // Assert
+        let endpoint = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present")
+            .draft
+            .peers[0]
+            .endpoint
+            .as_deref();
+        assert_eq!(
+            endpoint, None,
+            "empty endpoint string must set peer.endpoint to None"
+        );
+    }
+
+    // ── dispatch-path integration tests (Phase 3 review remediation) ─────────
+
+    #[test]
+    fn apply_field_peer_allowed_ips_writes_to_draft() {
+        // Arrange: open config edit on "mia" (Peer 0 = "mia-dc"), focus
+        // PeerAllowedIps (index 2 in PEER_FIELDS_EXISTING).
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Peer(0),
+            field_idx: 2, // PeerAllowedIps
+        });
+
+        // Clear the pre-populated allowed-IPs buffer ("10.100.0.0/16").
+        let buf_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .edit_buffer
+            .as_ref()
+            .expect("edit_buffer must be Some")
+            .len();
+        for _ in 0..buf_len {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Backspace,
+            )));
+        }
+
+        // Act: type the new value and commit with Enter.
+        type_and_enter(&mut state, "10.0.0.0/8");
+
+        // Assert
+        let allowed_ips = &state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present")
+            .draft
+            .peers[0]
+            .allowed_ips;
+        assert_eq!(
+            allowed_ips,
+            &["10.0.0.0/8"],
+            "allowed_ips must be written back to the draft peer"
+        );
+    }
+
+    #[test]
+    fn apply_field_peer_persistent_keepalive_writes_to_draft() {
+        // Arrange: open config edit on "mia" (Peer 0 = "mia-dc"), focus
+        // PeerPersistentKeepalive (index 3 in PEER_FIELDS_EXISTING).
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Peer(0),
+            field_idx: 3, // PeerPersistentKeepalive
+        });
+
+        // Clear pre-populated buffer ("25" from make_peer).
+        let buf_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .edit_buffer
+            .as_ref()
+            .expect("edit_buffer must be Some")
+            .len();
+        for _ in 0..buf_len {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Backspace,
+            )));
+        }
+
+        // Act: type "25" and commit with Enter.
+        type_and_enter(&mut state, "25");
+
+        // Assert
+        let keepalive = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present")
+            .draft
+            .peers[0]
+            .persistent_keepalive;
+        assert_eq!(
+            keepalive, 25,
+            "persistent_keepalive must be written back to the draft peer"
         );
     }
 }
