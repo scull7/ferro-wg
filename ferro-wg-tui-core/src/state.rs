@@ -185,7 +185,7 @@ impl Toast {
 ///
 /// All shared data lives here. Components never own or duplicate this
 /// data — they receive `&AppState` for read-only access during rendering.
-/// #[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     /// Whether the app is still running.
     pub running: bool,
@@ -376,7 +376,7 @@ impl AppState {
             | Action::BenchmarkComplete(_) => self.handle_benchmark_actions(action),
             Action::ToggleCompareView => self.handle_compare_actions(action),
             Action::ToggleTheme => self.handle_theme_action(action),
-            Action::ShowHelp | Action::HideHelp => self.handle_help_action(action),
+             Action::ShowHelp | Action::HideHelp | Action::ShowConnectionFilter | Action::HideConnectionFilter | Action::ToggleConnectionVisibility(_) | Action::SetConnectionFilterSearch(_) => self.handle_help_action(action),
             Action::EnterExport
             | Action::ExportKey(_)
             | Action::SubmitImport
@@ -1007,14 +1007,14 @@ impl AppState {
                 self.connection_filter_search.clear();
             }
             Action::ToggleConnectionVisibility(name) => {
-                if self.visible_connections.contains(name) {
-                    self.visible_connections.remove(name);
+                if self.visible_connections.contains(name.as_str()) {
+                    self.visible_connections.remove(name.as_str());
                 } else {
                     self.visible_connections.insert(name.clone());
                 }
             }
             Action::SetConnectionFilterSearch(query) => {
-                self.connection_filter_search = query.clone();
+                self.connection_filter_search.clone_from(query);
             }
             _ => {}
         }
@@ -1269,6 +1269,31 @@ mod tests {
         assert_eq!(state.toasts.len(), 5);
         assert_eq!(state.toasts.front().unwrap().message, "msg1");
         assert_eq!(state.toasts.back().unwrap().message, "msg5");
+    }
+
+    #[test]
+    fn dispatch_show_connection_filter() {
+        let mut state = two_connection_state();
+        assert!(!state.show_connection_filter);
+        state.dispatch(&Action::ShowConnectionFilter);
+        assert!(state.show_connection_filter);
+    }
+
+    #[test]
+    fn dispatch_set_connection_filter_search() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::SetConnectionFilterSearch("test".to_string()));
+        assert_eq!(state.connection_filter_search, "test");
+    }
+
+    #[test]
+    fn dispatch_toggle_connection_visibility() {
+        let mut state = two_connection_state();
+        assert!(state.visible_connections.contains("mia"));
+        state.dispatch(&Action::ToggleConnectionVisibility("mia".to_string()));
+        assert!(!state.visible_connections.contains("mia"));
+        state.dispatch(&Action::ToggleConnectionVisibility("mia".to_string()));
+        assert!(state.visible_connections.contains("mia"));
     }
 
     #[test]
