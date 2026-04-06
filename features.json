@@ -319,7 +319,7 @@
     ]
   },
   "cli_logs_implementation": {
-    "status": "in_progress",
+    "status": "completed",
     "commits": [
       {
         "id": "phase1",
@@ -364,6 +364,31 @@
           "full_message_text",
           "example_output_format",
           "format_entry_unit_test"
+        ]
+      },
+      {
+        "id": "phase5",
+        "title": "Error handling and edge cases",
+        "status": "completed",
+        "features": [
+          "daemon_not_running_handled",
+          "empty_log_buffer_handled",
+          "invalid_filter_values_clap",
+          "graceful_ctrl_c_shutdown",
+          "memory_bounds_vecdeque_cap",
+          "error_handling_integration_tests"
+        ]
+      },
+      {
+        "id": "phase6",
+        "title": "Testing and validation",
+        "status": "completed",
+        "features": [
+          "filter_functions_unit_tests_phase3",
+          "integration_tests_mock_entries",
+          "cli_parsing_tests_phase1",
+          "manual_smoke_test_non_ci",
+          "cargo_test_workspace_pass"
         ]
       },
       {
