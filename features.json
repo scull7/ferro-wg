@@ -275,6 +275,31 @@
         ]
       },
       {
+        "id": "phase3",
+        "title": "apply_field write-back for all config edit fields + base64 Engine migration",
+        "status": "completed",
+        "features": [
+          "apply_field_pure_function",
+          "parse_comma_list_helper",
+          "field_writeback_all_14_non_key_fields",
+          "validate_public_key_base64_engine_migration",
+          "editable_field_doc_fix",
+          "dns_arm_comment",
+          "apply_field_13_unit_tests",
+          "apply_field_7_dispatch_integration_tests"
+        ]
+      },
+      {
+        "id": "phase4",
+        "title": "Eliminate production unwrap() panics",
+        "status": "completed",
+        "features": [
+          "daemon_runtime_new_expect",
+          "duration_since_unwrap_or_default",
+          "benchmark_total_cmp_nan_safe"
+        ]
+      },
+      {
         "id": "phase2",
         "title": "New peer key lifecycle in TUI layer, not domain",
         "status": "completed",

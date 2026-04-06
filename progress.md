@@ -93,6 +93,20 @@ Phase 7 UX Polish is fully verified and committed. Summary of all fixes and addi
 - `PreviewConfig` blocked via `session_error` when `new_peer_indices` non-empty
 - 11 new/updated tests; 145 total pass; all adversaries blessed
 
+### Phase 3: apply_field write-back for all config edit fields (COMPLETED)
+- Added pure `apply_field(field, value, &mut WgConfig, ConfigSection)` to config_edit.rs
+- Exhaustive match over all 15 EditableField variants; PeerPublicKey is documented no-op
+- Added private `parse_comma_list` helper; Dns arm uses per-token IpAddr parsing
+- Wired `apply_field` into `ConfigEditKey(Enter)` Ok(()) branch in state.rs
+- Migrated `validate_public_key` from deprecated `base64::decode()` to Engine API
+- Fixed stale EditableField doc comment (4/5 fields, not 5/6)
+- 13 unit tests + 7 dispatch integration tests; 530 total; all adversaries blessed
+
+### Phase 4: Eliminate production unwrap() panics (COMPLETED)
+- `daemon/main.rs`: `Runtime::new().unwrap()` → `.expect()` with clear message
+- `state.rs`: `duration_since(UNIX_EPOCH).unwrap()` → `.unwrap_or_default()`
+- `benchmark.rs`: `partial_cmp().unwrap()` → `total_cmp()` (NaN-safe, removed #[allow] attr)
+
 ## Verification Status
 - Tooling checks: PASSED (fmt, test, clippy, build)
 - Adversary reviews: PASSED (reviewer, tester, architect)
