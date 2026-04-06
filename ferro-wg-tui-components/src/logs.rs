@@ -10,16 +10,9 @@ use tracing::warn;
 
 use ferro_wg_core::config::LogDisplayConfig;
 use ferro_wg_core::ipc::{LogEntry, LogLevel};
+use ferro_wg_core::logs as log_filter;
+use ferro_wg_core::logs::ConnectionFilter;
 use ferro_wg_tui_core::{Action, AppState, Component, Theme};
-
-/// Return `true` when `query` appears anywhere in `line` (case-insensitive).
-///
-/// `query` **must already be ASCII-lowercased** by the caller (once per render
-/// frame) to avoid re-lowercasing on every line.  Returns `true` for an empty
-/// query so this predicate composes cleanly with other filters.
-fn line_matches_search(line: &str, query: &str) -> bool {
-    query.is_empty() || line.to_ascii_lowercase().contains(query)
-}
 
 /// Split `text` into alternating un-highlighted / highlighted [`Span`]s.
 ///
@@ -80,28 +73,6 @@ fn apply_search_highlights<'a>(
 
 /// Number of rows consumed by the panel block's top and bottom borders.
 const BLOCK_BORDER_HEIGHT: u16 = 2;
-
-/// Whether the logs view is filtered to a specific connection or shows all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ConnectionFilter {
-    /// Show entries from every connection (and global daemon events).
-    #[default]
-    All,
-    /// Show only entries for the currently selected connection plus global
-    /// daemon events (`connection_name: None`).
-    Active,
-}
-
-impl ConnectionFilter {
-    /// Flip between [`All`](Self::All) and [`Active`](Self::Active).
-    #[must_use]
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::All => Self::Active,
-            Self::Active => Self::All,
-        }
-    }
-}
 
 /// Logs tab: scrollable log viewer with level filtering, connection filtering,
 /// and in-viewer search.
@@ -196,52 +167,25 @@ impl LogsComponent {
         spans
     }
 
-    /// Return `true` when `entry` should be visible under both the current
-    /// level filter and the connection filter.
-    ///
-    /// - `Trace` entries always pass the level filter (fail-open).
-    /// - Entries with `connection_name: None` (global daemon events) always
-    ///   pass the connection filter.
-    fn entry_passes_filter(&self, entry: &LogEntry, active_connection: Option<&str>) -> bool {
-        let level_ok = entry.level == LogLevel::Trace || entry.level >= self.min_level;
-        let conn_ok = match self.connection_filter {
-            ConnectionFilter::All => true,
-            ConnectionFilter::Active => {
-                // Global events always pass; connection events must match the selection.
-                entry.connection_name.is_none()
-                    || active_connection
-                        .is_some_and(|name| entry.connection_name.as_deref() == Some(name))
-            }
-        };
-        level_ok && conn_ok
-    }
-
     /// Return references to all entries in `buf` that pass both the current
     /// level/connection filter and the search predicate.
     ///
     /// `search` must be ASCII-lowercased by the caller (done once per render
     /// frame, not repeated per entry).  When all filters are inactive the fast
     /// path returns every entry without per-entry parsing.
-    fn filtered_lines<'a>(
+    fn get_filtered_entries<'a>(
         &self,
         buf: &'a VecDeque<LogEntry>,
         search: &str,
         active_connection: Option<&str>,
     ) -> Vec<&'a LogEntry> {
-        // Fast path: no filtering at all.
-        if self.min_level == LogLevel::Debug
-            && search.is_empty()
-            && self.connection_filter == ConnectionFilter::All
-        {
-            return buf.iter().collect();
-        }
-
-        buf.iter()
-            .filter(|e| {
-                self.entry_passes_filter(e, active_connection)
-                    && line_matches_search(&e.message, search)
-            })
-            .collect()
+        log_filter::filtered_lines(
+            buf,
+            search,
+            self.min_level,
+            self.connection_filter,
+            active_connection,
+        )
     }
 
     /// Lock `log_entries` and return the number of entries that pass all active
@@ -256,7 +200,7 @@ impl LogsComponent {
         let search = state.search_query.to_ascii_lowercase();
         let active_connection = state.active_connection().map(|c| c.name.as_str());
         Some(
-            self.filtered_lines(&entries, &search, active_connection)
+            self.get_filtered_entries(&entries, &search, active_connection)
                 .len(),
         )
     }
@@ -393,7 +337,7 @@ impl Component for LogsComponent {
 
         // Build the filtered view. Pre-lowercase once so per-entry matching is cheap.
         let search = state.search_query.to_ascii_lowercase();
-        let filtered = self.filtered_lines(&log_entries, &search, active_connection);
+        let filtered = self.get_filtered_entries(&log_entries, &search, active_connection);
         let total_filtered = filtered.len();
 
         // Cache view_height so handle_key can compute valid scroll bounds.
@@ -508,7 +452,7 @@ mod tests {
             make_entry(LogLevel::Info, Some("ord"), "msg b"),
             make_entry(LogLevel::Info, None, "global msg"),
         ]);
-        let result = component.filtered_lines(&buf, "", Some("mia"));
+        let result = component.get_filtered_entries(&buf, "", Some("mia"));
         assert_eq!(result.len(), 3);
     }
 
@@ -521,7 +465,7 @@ mod tests {
             make_entry(LogLevel::Info, Some("ord"), "ord entry"),
         ]);
         // active connection = "mia"; "ord" entry should be hidden.
-        let result = component.filtered_lines(&buf, "", Some("mia"));
+        let result = component.get_filtered_entries(&buf, "", Some("mia"));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].connection_name.as_deref(), Some("mia"));
     }
@@ -534,7 +478,7 @@ mod tests {
             make_entry(LogLevel::Info, None, "global startup"),
             make_entry(LogLevel::Info, Some("ord"), "ord entry"),
         ]);
-        let result = component.filtered_lines(&buf, "", Some("mia"));
+        let result = component.get_filtered_entries(&buf, "", Some("mia"));
         assert_eq!(result.len(), 1);
         assert!(
             result[0].connection_name.is_none(),
@@ -551,7 +495,7 @@ mod tests {
             make_entry(LogLevel::Info, Some("mia"), "mia entry"),
         ]);
         // No active connection → only global events pass.
-        let result = component.filtered_lines(&buf, "", None);
+        let result = component.get_filtered_entries(&buf, "", None);
         assert_eq!(result.len(), 1);
         assert!(result[0].connection_name.is_none());
     }
@@ -572,56 +516,72 @@ mod tests {
 
     #[test]
     fn entry_passes_filter_trace_always_passes_level() {
-        let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Error;
         let trace_entry = make_entry(LogLevel::Trace, None, "trace");
-        assert!(component.entry_passes_filter(&trace_entry, None));
+        assert!(log_filter::entry_passes_filter(
+            &trace_entry,
+            LogLevel::Error,
+            ConnectionFilter::All,
+            None
+        ));
     }
 
     #[test]
     fn entry_passes_filter_level_and_connection_compose() {
-        let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Warn;
-        component.connection_filter = ConnectionFilter::Active;
-
         // DEBUG + wrong connection → both filters reject.
         let debug_ord = make_entry(LogLevel::Debug, Some("ord"), "debug ord");
-        assert!(!component.entry_passes_filter(&debug_ord, Some("mia")));
+        assert!(!log_filter::entry_passes_filter(
+            &debug_ord,
+            LogLevel::Warn,
+            ConnectionFilter::Active,
+            Some("mia")
+        ));
 
         // WARN + correct connection → passes.
         let warn_mia = make_entry(LogLevel::Warn, Some("mia"), "warn mia");
-        assert!(component.entry_passes_filter(&warn_mia, Some("mia")));
+        assert!(log_filter::entry_passes_filter(
+            &warn_mia,
+            LogLevel::Warn,
+            ConnectionFilter::Active,
+            Some("mia")
+        ));
 
         // WARN + wrong connection → level passes but connection rejects.
         let warn_ord = make_entry(LogLevel::Warn, Some("ord"), "warn ord");
-        assert!(!component.entry_passes_filter(&warn_ord, Some("mia")));
+        assert!(!log_filter::entry_passes_filter(
+            &warn_ord,
+            LogLevel::Warn,
+            ConnectionFilter::Active,
+            Some("mia")
+        ));
     }
 
     // ── filtered_lines ────────────────────────────────────────────────────────
 
     #[test]
     fn filtered_lines_debug_fast_path_returns_all() {
-        let component = LogsComponent::new(); // min_level = Debug, All
         let buf = make_buf(&[
             debug_entry("a"),
             info_entry("b"),
             make_entry(LogLevel::Warn, None, "c"),
             make_entry(LogLevel::Error, None, "d"),
         ]);
-        assert_eq!(component.filtered_lines(&buf, "", None).len(), 4);
+        assert_eq!(
+            log_filter::filtered_lines(&buf, "", LogLevel::Debug, ConnectionFilter::All, None)
+                .len(),
+            4
+        );
     }
 
     #[test]
     fn filtered_lines_filters_below_threshold() {
-        let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Warn;
         let buf = make_buf(&[
             debug_entry("debug"),
             info_entry("info"),
             make_entry(LogLevel::Warn, None, "warn"),
             make_entry(LogLevel::Error, None, "error"),
         ]);
-        let result = component.filtered_lines(&buf, "", None);
+        let result =
+            log_filter::filtered_lines(&buf, "", LogLevel::Warn, ConnectionFilter::All, None);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].level, LogLevel::Warn);
         assert_eq!(result[1].level, LogLevel::Error);
@@ -629,28 +589,37 @@ mod tests {
 
     #[test]
     fn filtered_lines_search_hides_non_matching() {
-        let component = LogsComponent::new();
         let buf = make_buf(&[
             info_entry("tunnel connected"),
             info_entry("peer timeout"),
             make_entry(LogLevel::Error, None, "connection refused"),
         ]);
-        let result = component.filtered_lines(&buf, "refused", None);
+        let result = log_filter::filtered_lines(
+            &buf,
+            "refused",
+            LogLevel::Debug,
+            ConnectionFilter::All,
+            None,
+        );
         assert_eq!(result.len(), 1);
         assert!(result[0].message.contains("refused"));
     }
 
     #[test]
     fn filtered_lines_search_and_level_compose() {
-        let mut component = LogsComponent::new();
-        component.min_level = LogLevel::Warn;
         let buf = make_buf(&[
             debug_entry("noise debug"),
             make_entry(LogLevel::Warn, None, "peer timeout"),
             make_entry(LogLevel::Error, None, "connection refused"),
         ]);
         // Level filter hides DEBUG; search hides WARN → only ERROR passes.
-        let result = component.filtered_lines(&buf, "refused", None);
+        let result = log_filter::filtered_lines(
+            &buf,
+            "refused",
+            LogLevel::Warn,
+            ConnectionFilter::All,
+            None,
+        );
         assert_eq!(result.len(), 1);
         assert!(result[0].message.contains("refused"));
     }
@@ -664,7 +633,7 @@ mod tests {
             make_entry(LogLevel::Debug, Some("ord"), "ord"),
         ]);
         // Fast path is skipped because connection_filter != All.
-        let result = component.filtered_lines(&buf, "", Some("mia"));
+        let result = component.get_filtered_entries(&buf, "", Some("mia"));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].connection_name.as_deref(), Some("mia"));
     }
@@ -771,18 +740,21 @@ mod tests {
 
     #[test]
     fn line_matches_search_empty_query_always_passes() {
-        assert!(line_matches_search("anything", ""));
+        assert!(log_filter::line_matches_search("anything", ""));
     }
 
     #[test]
     fn line_matches_search_case_insensitive() {
-        assert!(line_matches_search("Connection Lost", "connection"));
-        assert!(line_matches_search("Connection Lost", "lost"));
+        assert!(log_filter::line_matches_search(
+            "Connection Lost",
+            "connection"
+        ));
+        assert!(log_filter::line_matches_search("Connection Lost", "lost"));
     }
 
     #[test]
     fn line_matches_search_no_match_returns_false() {
-        assert!(!line_matches_search("tunnel up", "error"));
+        assert!(!log_filter::line_matches_search("tunnel up", "error"));
     }
 
     // ── highlight_matches ─────────────────────────────────────────────────────
