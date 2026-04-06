@@ -269,7 +269,7 @@ fn handle_mouse_event(
     {
         None
     } else {
-        ferro_wg_tui_core::ux::resolve_mouse_action(&mouse, chunks[0])
+        ferro_wg_tui_components::tab_bar::resolve_mouse_action(&mouse, chunks[0])
             .or_else(|| bundle.tabs[state.active_tab.index()].handle_mouse(mouse, state))
     };
 

@@ -30,7 +30,7 @@ impl Tab {
 
     /// Tab display title.
     #[must_use]
-    pub fn title(self) -> &'static str {
+    pub const fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Status => "Status",
