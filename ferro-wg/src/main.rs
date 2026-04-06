@@ -51,8 +51,9 @@ fn main() {
             lines,
             watch,
         }) => {
-            cmd::logs::cmd_logs(level, connection, search, lines, watch);
-            Ok(())
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(cmd::logs::cmd_logs(level, connection, search, lines, watch))
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
     };
 

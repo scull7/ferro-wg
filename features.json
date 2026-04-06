@@ -322,6 +322,23 @@
     "status": "in_progress",
     "commits": [
       {
+        "id": "phase1",
+        "title": "CLI logs command definition and stub handler",
+        "status": "completed",
+        "features": [
+          "logs_command_enum_variant",
+          "level_log_level_default_debug",
+          "connection_option_string",
+          "search_string_default_empty",
+          "lines_option_usize_default_50",
+          "watch_bool_flag",
+          "command_logs_arm_main_rs",
+          "src_cmd_logs_rs_module",
+          "cmd_logs_stub_function",
+          "cli_parsing_unit_tests"
+        ]
+      },
+      {
         "id": "phase3",
         "title": "Extract filter logic to ferro-wg-core::logs + clap::ValueEnum for LogLevel",
         "status": "completed",
