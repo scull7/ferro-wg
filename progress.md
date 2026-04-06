@@ -82,6 +82,17 @@ Phase 7 UX Polish is fully verified and committed. Summary of all fixes and addi
 - 15 tests: all 6 tabs, scroll, boundaries, rect x-offset, out-of-range
 - All adversaries blessed: reviewer, tester, architect
 
+### Phase 2: New peer key lifecycle in TUI layer (COMPLETED)
+- Removed `.unwrap()` dummy base64 key from `AddConfigPeer`
+- Added `new_peer_indices: HashSet<usize>` to `ConfigEditState` to track new peers without confirmed keys
+- Added `session_error: Option<String>` for session-level errors (separate from per-field `field_error`)
+- `AddConfigPeer` uses `PublicKey::from_bytes([0u8; 32])` (plain domain API, no sentinel constructor)
+- `ConfigEditKey(Enter)` on `PeerPublicKey` writes validated key back to `draft.peers[idx].public_key`
+- `DeleteConfigPeer` removes/shifts `new_peer_indices` and clamps `focused_section` after removal
+- `ConfigFocusNext`/`Prev` correctly derive `is_new` from `new_peer_indices` (fixes latent bug: new peers had 4-field form instead of 5)
+- `PreviewConfig` blocked via `session_error` when `new_peer_indices` non-empty
+- 11 new/updated tests; 145 total pass; all adversaries blessed
+
 ## Verification Status
 - Tooling checks: PASSED (fmt, test, clippy, build)
 - Adversary reviews: PASSED (reviewer, tester, architect)

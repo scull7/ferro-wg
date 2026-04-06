@@ -273,6 +273,23 @@
           "tab_bar_boundary_tests",
           "tab_bar_offset_tests"
         ]
+      },
+      {
+        "id": "phase2",
+        "title": "New peer key lifecycle in TUI layer, not domain",
+        "status": "completed",
+        "features": [
+          "new_peer_indices_hashset",
+          "session_error_field",
+          "add_config_peer_uses_from_bytes",
+          "peer_public_key_writeback_to_draft",
+          "new_peer_indices_remove_on_confirm",
+          "new_peer_indices_shift_on_delete",
+          "focused_section_clamp_on_delete",
+          "preview_config_blocked_by_session_error",
+          "fields_for_section_is_new_correct",
+          "new_peer_lifecycle_tests_11"
+        ]
       }
     ]
   }
