@@ -69,6 +69,17 @@ pub struct ConfigEditState {
     pub edit_buffer: Option<String>,
     /// Inline validation error for the current buffer, if any.
     pub field_error: Option<String>,
+    /// Indices into `draft.peers` that were created during this editing session
+    /// and whose public key has not yet been confirmed by the user.
+    ///
+    /// A peer is inserted here by `AddConfigPeer` and removed once
+    /// `PeerPublicKey` is committed via `ConfigEditKey(Enter)`. Peers present
+    /// in this set block `PreviewConfig` from proceeding.
+    pub new_peer_indices: HashSet<usize>,
+    /// A session-level error that spans the entire config edit session,
+    /// not tied to a specific field. Shown in the status line of the config
+    /// editor. Set by `PreviewConfig` when new peers have unconfirmed keys.
+    pub session_error: Option<String>,
 }
 
 /// A single line in a config diff.

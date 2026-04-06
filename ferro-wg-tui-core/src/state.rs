@@ -5,7 +5,7 @@
 //! receive `&AppState` for read-only access during rendering and key
 //! handling.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -762,6 +762,8 @@ impl AppState {
                         focused_field_idx: *field_idx,
                         edit_buffer: Some(initial_value),
                         field_error: None,
+                        new_peer_indices: HashSet::new(),
+                        session_error: None,
                     });
                     self.input_mode = InputMode::EditField;
                 }
@@ -784,7 +786,8 @@ impl AppState {
                         KeyCode::Enter => {
                             if let Some(ref buf) = edit.edit_buffer {
                                 let value = buf.clone();
-                                let fields = fields_for_section(edit.focused_section, false);
+                                let is_new = matches!(edit.focused_section, ConfigSection::Peer(i) if edit.new_peer_indices.contains(&i));
+                                let fields = fields_for_section(edit.focused_section, is_new);
                                 let field = fields
                                     .get(edit.focused_field_idx)
                                     .copied()
@@ -792,6 +795,22 @@ impl AppState {
                                 let section = edit.focused_section;
                                 match validate_field(field, &value, &edit.draft, section) {
                                     Ok(()) => {
+                                        // Write PeerPublicKey back to draft before clearing the buffer.
+                                        // Also removes from new_peer_indices — this is the only field
+                                        // that tracks the "new peer" lifecycle.
+                                        if field == EditableField::PeerPublicKey
+                                            && let ConfigSection::Peer(idx) = edit.focused_section
+                                        {
+                                            if let Ok(key) = PublicKey::from_base64(&value)
+                                                && let Some(peer) = edit.draft.peers.get_mut(idx)
+                                            {
+                                                peer.public_key = key;
+                                            }
+                                            edit.new_peer_indices.remove(&idx);
+                                            if edit.new_peer_indices.is_empty() {
+                                                edit.session_error = None;
+                                            }
+                                        }
                                         edit.edit_buffer = None;
                                         edit.field_error = None;
                                         self.input_mode = InputMode::Normal;
@@ -816,13 +835,15 @@ impl AppState {
 
             Action::ConfigFocusNext => {
                 if let Some(edit) = self.config_edit.as_mut() {
-                    let fields = fields_for_section(edit.focused_section, false); // Assume not new peer
+                    let is_new = matches!(edit.focused_section, ConfigSection::Peer(i) if edit.new_peer_indices.contains(&i));
+                    let fields = fields_for_section(edit.focused_section, is_new);
                     edit.focused_field_idx = (edit.focused_field_idx + 1) % fields.len();
                 }
             }
             Action::ConfigFocusPrev => {
                 if let Some(edit) = self.config_edit.as_mut() {
-                    let fields = fields_for_section(edit.focused_section, false);
+                    let is_new = matches!(edit.focused_section, ConfigSection::Peer(i) if edit.new_peer_indices.contains(&i));
+                    let fields = fields_for_section(edit.focused_section, is_new);
                     edit.focused_field_idx = if edit.focused_field_idx == 0 {
                         fields.len().saturating_sub(1)
                     } else {
@@ -844,12 +865,11 @@ impl AppState {
             }
             Action::AddConfigPeer => {
                 if let Some(edit) = self.config_edit.as_mut() {
-                    let dummy_key =
-                        PublicKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-                            .unwrap();
                     let new_peer = PeerConfig {
                         name: String::new(),
-                        public_key: dummy_key,
+                        // Placeholder bytes — tracked by `new_peer_indices` until
+                        // the user confirms a real key via `PeerPublicKey` Enter.
+                        public_key: PublicKey::from_bytes([0u8; 32]),
                         endpoint: None,
                         allowed_ips: vec![],
                         persistent_keepalive: 0,
@@ -857,8 +877,13 @@ impl AppState {
                     };
                     edit.draft.peers.push(new_peer);
                     let idx = edit.draft.peers.len() - 1;
+                    edit.new_peer_indices.insert(idx);
                     edit.focused_section = ConfigSection::Peer(idx);
                     edit.focused_field_idx = 0;
+                    // Open the edit buffer immediately so the first field
+                    // (PeerPublicKey for new peers) is ready to receive input.
+                    edit.edit_buffer = Some(String::new());
+                    edit.field_error = None;
                     self.input_mode = InputMode::EditField;
                 }
             }
@@ -867,13 +892,27 @@ impl AppState {
                     && *i < edit.draft.peers.len()
                 {
                     edit.draft.peers.remove(*i);
+                    // Remove the deleted index and shift down all indices > i.
+                    let shifted: HashSet<usize> = edit
+                        .new_peer_indices
+                        .iter()
+                        .filter(|&&idx| idx != *i)
+                        .map(|&idx| if idx > *i { idx - 1 } else { idx })
+                        .collect();
+                    edit.new_peer_indices = shifted;
                     // Reset focus: if no peers remain, move to interface;
-                    // otherwise clamp field index within the surviving section's field count.
+                    // otherwise clamp focused_section to a valid peer index and
+                    // clamp the field index within the surviving section's field count.
                     if edit.draft.peers.is_empty() {
                         edit.focused_section = ConfigSection::Interface;
                         edit.focused_field_idx = 0;
                     } else {
-                        let max_field = fields_for_section(edit.focused_section, false)
+                        if let ConfigSection::Peer(j) = edit.focused_section {
+                            let clamped = j.min(edit.draft.peers.len() - 1);
+                            edit.focused_section = ConfigSection::Peer(clamped);
+                        }
+                        let is_new = matches!(edit.focused_section, ConfigSection::Peer(j) if edit.new_peer_indices.contains(&j));
+                        let max_field = fields_for_section(edit.focused_section, is_new)
                             .len()
                             .saturating_sub(1);
                         edit.focused_field_idx = edit.focused_field_idx.min(max_field);
@@ -881,6 +920,14 @@ impl AppState {
                 }
             }
             Action::PreviewConfig => {
+                // Block preview if any newly added peer still has an unconfirmed public key.
+                if let Some(edit) = self.config_edit.as_mut()
+                    && !edit.new_peer_indices.is_empty()
+                {
+                    edit.session_error =
+                        Some("All new peers must have a public key before saving".to_string());
+                    return;
+                }
                 if let Some(edit) = self.config_edit.as_ref()
                     && edit.field_error.is_none()
                 {
@@ -1886,12 +1933,158 @@ mod tests {
             section: ConfigSection::Interface,
             field_idx: 0,
         });
-        let initial_len = state.config_edit.as_ref().unwrap().draft.peers.len();
+        let initial_len = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .draft
+            .peers
+            .len();
         state.dispatch(&Action::AddConfigPeer);
-        let edit = state.config_edit.as_ref().unwrap();
+        let edit = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must still be set after AddConfigPeer");
         assert_eq!(edit.draft.peers.len(), initial_len + 1);
         assert_eq!(edit.focused_section, ConfigSection::Peer(initial_len));
+        assert!(
+            edit.new_peer_indices.contains(&initial_len),
+            "new peer index must be tracked in new_peer_indices"
+        );
         assert_eq!(state.input_mode, InputMode::EditField);
+    }
+
+    #[test]
+    fn add_config_peer_without_active_edit_is_a_no_op() {
+        // Arrange: no config_edit session started
+        let mut state = two_connection_state();
+        assert!(
+            state.config_edit.is_none(),
+            "config_edit must be None before the action"
+        );
+
+        // Act
+        state.dispatch(&Action::AddConfigPeer);
+
+        // Assert: state is unchanged
+        assert!(
+            state.config_edit.is_none(),
+            "AddConfigPeer without an active edit session must be a no-op"
+        );
+    }
+
+    #[test]
+    fn confirm_public_key_removes_from_new_peer_indices() {
+        // Arrange: open edit, add a new peer (which lands in new_peer_indices)
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::AddConfigPeer);
+        let peer_idx = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .draft
+            .peers
+            .len()
+            - 1;
+        assert!(
+            state
+                .config_edit
+                .as_ref()
+                .expect("config_edit must be set")
+                .new_peer_indices
+                .contains(&peer_idx),
+            "peer must be in new_peer_indices before key confirmation"
+        );
+
+        // Act: type a valid 44-char base64 key and press Enter
+        let valid_key = "/yt5f1nclaUwO75kn6KosqO2ZD6kJ4Ld4SrYuG1csZg=";
+        for ch in valid_key.chars() {
+            let key_event = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char(ch));
+            state.dispatch(&Action::ConfigEditKey(key_event));
+        }
+        let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        state.dispatch(&Action::ConfigEditKey(enter));
+
+        // Assert: index removed from new_peer_indices
+        let edit = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must still be present after key confirmation");
+        assert!(
+            !edit.new_peer_indices.contains(&peer_idx),
+            "peer index must be removed from new_peer_indices after public key is confirmed"
+        );
+    }
+
+    #[test]
+    fn delete_new_peer_removes_from_new_peer_indices() {
+        // Arrange: open edit, add a new peer
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::AddConfigPeer);
+        let peer_idx = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set")
+            .draft
+            .peers
+            .len()
+            - 1;
+
+        // Act: delete the newly added peer
+        state.dispatch(&Action::DeleteConfigPeer(peer_idx));
+
+        // Assert: new_peer_indices is now empty
+        let edit = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must still be present after delete");
+        assert!(
+            edit.new_peer_indices.is_empty(),
+            "new_peer_indices must be empty after deleting the new peer"
+        );
+    }
+
+    #[test]
+    fn preview_config_blocked_when_new_peer_key_unconfirmed() {
+        // Arrange: open edit, add a new peer (key not yet confirmed)
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        state.dispatch(&Action::AddConfigPeer);
+        assert!(
+            state.config_diff_pending.is_none(),
+            "no pending diff before PreviewConfig"
+        );
+
+        // Act: attempt to preview before confirming the public key
+        state.dispatch(&Action::PreviewConfig);
+
+        // Assert: preview is blocked and a session_error is set
+        assert!(
+            state.config_diff_pending.is_none(),
+            "PreviewConfig must be blocked when new peer has no confirmed public key"
+        );
+        let error = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must still be present")
+            .session_error
+            .as_deref()
+            .expect("session_error must be set when preview is blocked");
+        assert!(
+            error.contains("public key"),
+            "session_error must mention the public key requirement, got: {error}"
+        );
     }
 
     #[test]
@@ -2016,5 +2209,230 @@ mod tests {
         state.dispatch(&Action::NextTab);
         assert_eq!(state.input_mode, InputMode::Normal);
         assert!(state.config_edit.as_ref().unwrap().edit_buffer.is_none());
+    }
+
+    // ── Phase 2 review remediation tests ─────────────────────────────────────
+
+    const VALID_KEY: &str = "/yt5f1nclaUwO75kn6KosqO2ZD6kJ4Ld4SrYuG1csZg=";
+
+    /// Helper: open config edit on `two_connection_state`, add N new peers, and
+    /// return the state plus the indices of those new peers.
+    fn open_edit_and_add_peers(n: usize) -> (AppState, Vec<usize>) {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        let mut indices = Vec::with_capacity(n);
+        for _ in 0..n {
+            state.dispatch(&Action::AddConfigPeer);
+            let idx = state
+                .config_edit
+                .as_ref()
+                .expect("config_edit must be set")
+                .draft
+                .peers
+                .len()
+                - 1;
+            indices.push(idx);
+        }
+        (state, indices)
+    }
+
+    /// Helper: type a string into the current edit buffer and press Enter.
+    fn type_and_enter(state: &mut AppState, s: &str) {
+        for ch in s.chars() {
+            state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char(ch),
+            )));
+        }
+        state.dispatch(&Action::ConfigEditKey(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        )));
+    }
+
+    // Test A
+    #[test]
+    fn two_new_peers_second_still_unconfirmed_after_first_confirmed() {
+        // Arrange: use a connection with NO existing peers so new peers land at
+        // indices 0 and 1 with no offset confusion.
+        let mut state = AppState::new(make_app_config(&[("mia", vec![])]));
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Interface,
+            field_idx: 0,
+        });
+        // Add two new peers: after each AddConfigPeer the edit buffer is open on
+        // that peer's PeerPublicKey field.
+        state.dispatch(&Action::AddConfigPeer); // peer 0 — buffer open on it
+        state.dispatch(&Action::AddConfigPeer); // peer 1 — focus + buffer moves here
+
+        // Confirm the key for the SECOND new peer (peer 1) only.
+        // The buffer is already open on peer 1 from the second AddConfigPeer.
+        type_and_enter(&mut state, VALID_KEY);
+
+        // Act: attempt preview — peer 0 still has no confirmed key.
+        state.dispatch(&Action::PreviewConfig);
+
+        // Assert: peer 1 was confirmed (removed from set); peer 0 remains; preview blocked.
+        let edit = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present");
+        assert!(
+            !edit.new_peer_indices.contains(&1),
+            "peer 1 must be removed from new_peer_indices after key confirmation"
+        );
+        assert!(
+            edit.new_peer_indices.contains(&0),
+            "peer 0 must still be in new_peer_indices (key not confirmed)"
+        );
+        assert!(
+            state.config_diff_pending.is_none(),
+            "PreviewConfig must be blocked while peer 0 has no confirmed key"
+        );
+        assert!(
+            state.config_edit.as_ref().unwrap().session_error.is_some(),
+            "session_error must be set while unconfirmed peers remain"
+        );
+    }
+
+    // Test B
+    #[test]
+    fn config_focus_next_wraps_at_5_fields_for_new_peer() {
+        // Arrange: open edit, add a new peer (5 fields: PeerPublicKey first).
+        let (mut state, indices) = open_edit_and_add_peers(1);
+        let peer_idx = indices[0];
+
+        // Verify we are focused on the new peer.
+        let edit = state.config_edit.as_ref().expect("config_edit must be set");
+        assert_eq!(edit.focused_section, ConfigSection::Peer(peer_idx));
+        assert_eq!(edit.focused_field_idx, 0);
+
+        // Act: ConfigFocusNext × 5 (one full cycle through 5 fields).
+        for _ in 0..5 {
+            state.dispatch(&Action::ConfigFocusNext);
+        }
+
+        // Assert: wrapped back to 0.
+        let edit = state.config_edit.as_ref().expect("config_edit must be set");
+        assert_eq!(
+            edit.focused_field_idx, 0,
+            "focused_field_idx must wrap back to 0 after 5 increments on a 5-field new peer"
+        );
+    }
+
+    // Test C
+    #[test]
+    fn config_focus_prev_wraps_at_4_fields_for_existing_peer() {
+        // Arrange: open edit on the existing peer at index 0 (4 fields).
+        let mut state = two_connection_state();
+        state.dispatch(&Action::EnterConfigEdit {
+            section: ConfigSection::Peer(0),
+            field_idx: 0,
+        });
+        let edit = state.config_edit.as_ref().expect("config_edit must be set");
+        assert_eq!(edit.focused_field_idx, 0);
+
+        // Act: ConfigFocusPrev from index 0 — must wrap to last field (index 3).
+        state.dispatch(&Action::ConfigFocusPrev);
+
+        // Assert: wrapped to 3 (4 fields, 0-indexed).
+        let edit = state.config_edit.as_ref().expect("config_edit must be set");
+        assert_eq!(
+            edit.focused_field_idx, 3,
+            "ConfigFocusPrev at idx 0 on a 4-field existing peer must wrap to 3"
+        );
+    }
+
+    // Test D
+    #[test]
+    fn delete_first_of_two_new_peers_shifts_second_index_down() {
+        // Arrange: open edit, add two new peers.
+        let (mut state, indices) = open_edit_and_add_peers(2);
+        let first_idx = indices[0];
+        let second_idx = indices[1];
+        assert_eq!(
+            second_idx,
+            first_idx + 1,
+            "second new peer must be at first_idx + 1"
+        );
+
+        // Act: delete the first new peer.
+        state.dispatch(&Action::DeleteConfigPeer(first_idx));
+
+        // Assert: new_peer_indices contains the shifted index (second peer moved down).
+        let edit = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be present after DeleteConfigPeer");
+        assert!(
+            edit.new_peer_indices.contains(&first_idx),
+            "shifted second peer must now appear at index {first_idx}"
+        );
+        assert!(
+            !edit.new_peer_indices.contains(&second_idx),
+            "old unshifted index {second_idx} must not remain in new_peer_indices"
+        );
+    }
+
+    // Test E
+    #[test]
+    fn preview_config_proceeds_after_new_peer_key_confirmed() {
+        // Arrange: open edit, add a new peer, confirm its key.
+        let (mut state, _indices) = open_edit_and_add_peers(1);
+        // The edit buffer is open on the new peer's PeerPublicKey field.
+        type_and_enter(&mut state, VALID_KEY);
+
+        // Verify new_peer_indices is empty.
+        let edit = state.config_edit.as_ref().expect("config_edit must be set");
+        assert!(
+            edit.new_peer_indices.is_empty(),
+            "new_peer_indices must be empty after key confirmation"
+        );
+        assert!(
+            edit.session_error.is_none(),
+            "session_error must be None after all keys confirmed"
+        );
+
+        // Act: preview should now proceed.
+        state.dispatch(&Action::PreviewConfig);
+
+        // Assert.
+        assert!(
+            state.config_diff_pending.is_some(),
+            "config_diff_pending must be Some after successful PreviewConfig"
+        );
+        assert!(
+            state.config_edit.as_ref().unwrap().session_error.is_none(),
+            "session_error must remain None after successful preview"
+        );
+    }
+
+    // Test F
+    #[test]
+    fn confirm_public_key_writes_key_to_draft() {
+        // Arrange: open edit, add a new peer.
+        let (mut state, indices) = open_edit_and_add_peers(1);
+        let peer_idx = indices[0];
+
+        // Act: type a valid 44-char key and press Enter.
+        type_and_enter(&mut state, VALID_KEY);
+
+        // Assert: the key was written back to the draft.
+        let edit = state
+            .config_edit
+            .as_ref()
+            .expect("config_edit must be set after key confirmation");
+        let actual_key = edit
+            .draft
+            .peers
+            .get(peer_idx)
+            .expect("peer must exist in draft")
+            .public_key
+            .to_base64();
+        assert_eq!(
+            actual_key, VALID_KEY,
+            "public_key in draft must match the confirmed key"
+        );
     }
 }
