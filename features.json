@@ -339,6 +339,34 @@
         ]
       },
       {
+        "id": "phase2",
+        "title": "Core logs logic with tail/watch modes and filtering",
+        "status": "completed",
+        "features": [
+          "cmd_logs_async_implementation",
+          "tail_mode_timeout_drain_200ms",
+          "watch_mode_tokio_select_ctrl_c",
+          "parse_cli_args_to_filters",
+          "apply_core_logs_filters",
+          "format_and_print_entries",
+          "chrono_dependency_for_time",
+          "cmd_logs_unit_test_format_entry"
+        ]
+      },
+      {
+        "id": "phase4",
+        "title": "Plain-text output formatting diverging from TUI",
+        "status": "completed",
+        "features": [
+          "plain_text_formatter_hh_mm_ss",
+          "level_padded_badge",
+          "connection_name_or_global",
+          "full_message_text",
+          "example_output_format",
+          "format_entry_unit_test"
+        ]
+      },
+      {
         "id": "phase3",
         "title": "Extract filter logic to ferro-wg-core::logs + clap::ValueEnum for LogLevel",
         "status": "completed",
