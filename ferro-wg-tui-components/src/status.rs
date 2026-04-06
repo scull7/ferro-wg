@@ -164,6 +164,7 @@ impl Component for StatusComponent {
             KeyCode::Char('b') => {
                 Self::selected_connection_name(state, selected_row).map(Action::CyclePeerBackend)
             }
+            KeyCode::Char('f') => Some(Action::ShowConnectionFilter),
             _ => None,
         }
     }

@@ -36,8 +36,9 @@ use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
 use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, ConfirmDialogComponent, ConnectionBarComponent,
-    DiffPreviewComponent, HelpOverlayComponent, LogsComponent, OverviewComponent, PeersComponent,
-    StatusBarComponent, StatusComponent, TabBarComponent, ToastComponent,
+    ConnectionFilterOverlayComponent, DiffPreviewComponent, HelpOverlayComponent, LogsComponent,
+    OverviewComponent, PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
+    ToastComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
 use futures::StreamExt;
@@ -148,6 +149,8 @@ struct ComponentBundle {
     diff_preview: DiffPreviewComponent,
     /// Modal overlay: help overlay (topmost).
     help_overlay: HelpOverlayComponent,
+    /// Modal overlay: connection filter overlay.
+    connection_filter_overlay: ConnectionFilterOverlayComponent,
     /// Toast notifications in bottom-right corner.
     toast: ToastComponent,
 }
@@ -169,6 +172,7 @@ impl ComponentBundle {
             confirm_dialog: ConfirmDialogComponent::new(),
             diff_preview: DiffPreviewComponent::new(),
             help_overlay: HelpOverlayComponent::new(),
+            connection_filter_overlay: ConnectionFilterOverlayComponent::new(),
             toast: ToastComponent::new(),
         }
     }
@@ -246,6 +250,7 @@ fn render_ui<B: ratatui::backend::Backend>(
         bundle.confirm_dialog.render(frame, chunks[2], false, state);
         bundle.diff_preview.render(frame, chunks[2], false, state); // topmost
         bundle.help_overlay.render(frame, chunks[2], false, state); // topmost
+        bundle.connection_filter_overlay.render(frame, chunks[2], false, state); // topmost
         bundle.toast.render(frame, area, false, state);
     })?;
     Ok(())
@@ -264,6 +269,7 @@ fn handle_mouse_event(
     chunks: &[ratatui::layout::Rect],
 ) {
     let action = if state.show_help
+        || state.show_connection_filter
         || state.pending_confirm.is_some()
         || state.config_diff_pending.is_some()
     {
@@ -299,6 +305,9 @@ fn handle_key_event(
     let action = if state.show_help {
         // Help overlay captures all keys while open.
         bundle.help_overlay.handle_key(key, state)
+    } else if state.show_connection_filter {
+        // Connection filter overlay captures all keys while open.
+        bundle.connection_filter_overlay.handle_key(key, state)
     } else if state.config_diff_pending.is_some() {
         // Diff preview captures all keys while open.
         bundle.diff_preview.handle_key(key, state)
@@ -625,6 +634,7 @@ fn dispatch_all(state: &mut AppState, action: &Action, bundle: &mut ComponentBun
     bundle.status_bar.update(action, state);
     bundle.confirm_dialog.update(action, state);
     bundle.help_overlay.update(action, state);
+    bundle.connection_filter_overlay.update(action, state);
 }
 
 /// Map a [`ConfirmAction`] to the [`Action`] that should execute after confirmation.

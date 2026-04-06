@@ -211,6 +211,10 @@ pub struct AppState {
     pub theme: Theme,
     /// Whether the help overlay is shown.
     pub show_help: bool,
+    /// Whether the connection filter overlay is shown.
+    pub show_connection_filter: bool,
+    /// Search query for the connection filter overlay.
+    pub connection_filter_search: String,
     /// Whether the daemon is currently reachable.
     pub daemon_connected: bool,
     /// Transient toast messages (success or error) with expiry.
@@ -297,6 +301,8 @@ impl AppState {
             theme_kind,
             theme: theme_kind.into_theme(),
             show_help: false,
+            show_connection_filter: false,
+            connection_filter_search: String::new(),
             daemon_connected: false,
             toasts: VecDeque::new(),
             log_display: app_config.log_display,
@@ -995,6 +1001,21 @@ impl AppState {
         match action {
             Action::ShowHelp => self.show_help = true,
             Action::HideHelp => self.show_help = false,
+            Action::ShowConnectionFilter => self.show_connection_filter = true,
+            Action::HideConnectionFilter => {
+                self.show_connection_filter = false;
+                self.connection_filter_search.clear();
+            }
+            Action::ToggleConnectionVisibility(name) => {
+                if self.visible_connections.contains(name) {
+                    self.visible_connections.remove(name);
+                } else {
+                    self.visible_connections.insert(name.clone());
+                }
+            }
+            Action::SetConnectionFilterSearch(query) => {
+                self.connection_filter_search = query.clone();
+            }
             _ => {}
         }
     }
