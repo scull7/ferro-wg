@@ -185,7 +185,7 @@ impl Toast {
 ///
 /// All shared data lives here. Components never own or duplicate this
 /// data — they receive `&AppState` for read-only access during rendering.
-#[allow(clippy::struct_excessive_bools)]
+/// #[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     /// Whether the app is still running.
     pub running: bool,
@@ -200,6 +200,9 @@ pub struct AppState {
     /// Index into `connections` for the currently focused connection.
     /// Always 0 when `connections` is empty.
     pub selected_connection: usize,
+    /// Set of connection names that are visible in multi-connection views.
+    /// Defaults to all connections from config.
+    pub visible_connections: HashSet<String>,
     /// Structured log entries for the Logs tab.
     pub log_entries: Arc<Mutex<VecDeque<LogEntry>>>,
     /// Current theme kind (Mocha or Latte).
@@ -269,7 +272,7 @@ impl AppState {
     #[must_use]
     pub fn new(app_config: AppConfig) -> Self {
         // BTreeMap is already sorted by key, so iteration order is alphabetical.
-        let connections = app_config
+        let connections: Vec<ConnectionView> = app_config
             .connections
             .into_iter()
             .map(|(name, config)| ConnectionView {
@@ -281,6 +284,7 @@ impl AppState {
             .collect();
 
         let theme_kind = ThemeKind::default();
+        let visible_connections: HashSet<String> = connections.iter().map(|c| c.name.clone()).collect();
         Self {
             running: true,
             active_tab: Tab::Overview,
@@ -288,6 +292,7 @@ impl AppState {
             search_query: String::new(),
             connections,
             selected_connection: 0,
+            visible_connections,
             log_entries: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             theme_kind,
             theme: theme_kind.into_theme(),
@@ -507,6 +512,7 @@ impl AppState {
             })
             .collect();
         self.log_display = log_display;
+        self.visible_connections = self.connections.iter().map(|c| c.name.clone()).collect();
         self.selected_connection = self
             .selected_connection
             .min(self.connections.len().saturating_sub(1));
