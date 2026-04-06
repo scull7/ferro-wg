@@ -17,7 +17,9 @@ pub const SOCKET_PATH: &str = "/tmp/ferro-wg.sock";
 /// derived impls satisfy `Trace < Debug < Info < Warn < Error`.  The TUI filter
 /// threshold cycles through `Debug → Info → Warn → Error → Debug` (Trace is
 /// deliberately excluded from the cycle — it always passes the filter).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
 pub enum LogLevel {
     /// Most verbose; always shown regardless of the filter threshold.
     Trace,

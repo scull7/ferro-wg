@@ -19,5 +19,6 @@ pub mod daemon;
 pub mod error;
 pub mod ipc;
 pub mod key;
+pub mod logs;
 pub mod stats;
 pub mod tunnel;

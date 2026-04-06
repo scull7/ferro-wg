@@ -255,7 +255,7 @@
     ]
   },
   "review_remediation": {
-    "status": "in_progress",
+    "status": "completed",
     "commits": [
       {
         "id": "phase1",
@@ -314,6 +314,97 @@
           "preview_config_blocked_by_session_error",
           "fields_for_section_is_new_correct",
           "new_peer_lifecycle_tests_11"
+        ]
+      }
+    ]
+  },
+  "cli_logs_implementation": {
+    "status": "completed",
+    "commits": [
+      {
+        "id": "phase1",
+        "title": "CLI logs command definition and stub handler",
+        "status": "completed",
+        "features": [
+          "logs_command_enum_variant",
+          "level_log_level_default_debug",
+          "connection_option_string",
+          "search_string_default_empty",
+          "lines_option_usize_default_50",
+          "watch_bool_flag",
+          "command_logs_arm_main_rs",
+          "src_cmd_logs_rs_module",
+          "cmd_logs_stub_function",
+          "cli_parsing_unit_tests"
+        ]
+      },
+      {
+        "id": "phase2",
+        "title": "Core logs logic with tail/watch modes and filtering",
+        "status": "completed",
+        "features": [
+          "cmd_logs_async_implementation",
+          "tail_mode_timeout_drain_200ms",
+          "watch_mode_tokio_select_ctrl_c",
+          "parse_cli_args_to_filters",
+          "apply_core_logs_filters",
+          "format_and_print_entries",
+          "chrono_dependency_for_time",
+          "cmd_logs_unit_test_format_entry"
+        ]
+      },
+      {
+        "id": "phase4",
+        "title": "Plain-text output formatting diverging from TUI",
+        "status": "completed",
+        "features": [
+          "plain_text_formatter_hh_mm_ss",
+          "level_padded_badge",
+          "connection_name_or_global",
+          "full_message_text",
+          "example_output_format",
+          "format_entry_unit_test"
+        ]
+      },
+      {
+        "id": "phase5",
+        "title": "Error handling and edge cases",
+        "status": "completed",
+        "features": [
+          "daemon_not_running_handled",
+          "empty_log_buffer_handled",
+          "invalid_filter_values_clap",
+          "graceful_ctrl_c_shutdown",
+          "memory_bounds_vecdeque_cap",
+          "error_handling_integration_tests"
+        ]
+      },
+      {
+        "id": "phase6",
+        "title": "Testing and validation",
+        "status": "completed",
+        "features": [
+          "filter_functions_unit_tests_phase3",
+          "integration_tests_mock_entries",
+          "cli_parsing_tests_phase1",
+          "manual_smoke_test_non_ci",
+          "cargo_test_workspace_pass"
+        ]
+      },
+      {
+        "id": "phase3",
+        "title": "Extract filter logic to ferro-wg-core::logs + clap::ValueEnum for LogLevel",
+        "status": "completed",
+        "features": [
+          "clap_value_enum_log_level",
+          "ferro_wg_core_logs_module",
+          "connection_filter_enum_in_core",
+          "line_matches_search_function",
+          "entry_passes_filter_function",
+          "filtered_lines_function",
+          "logs_filter_unit_tests",
+          "tui_imports_from_core_logs",
+          "tui_local_filter_definitions_removed"
         ]
       }
     ]
