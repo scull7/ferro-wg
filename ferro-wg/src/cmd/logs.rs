@@ -136,7 +136,7 @@ mod tests {
             tx.send(e).await.unwrap();
         }
         drop(tx);
-        let result = collect_filtered_logs(rx, LogLevel::Warn, None, "".to_string(), None).await;
+        let result = collect_filtered_logs(rx, LogLevel::Warn, None, String::new(), None).await;
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].message, "warn conn1");
         assert_eq!(result[1].message, "error global");
