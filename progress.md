@@ -71,6 +71,17 @@ Phase 7 UX Polish is fully verified and committed. Summary of all fixes and addi
 - Mouse support: tab clicks navigate, scroll wheel moves rows, with modal guards
 - Responsive layout enforces 80×24 minimum, graceful degradation with too-small message
 
+## Code Review Remediation
+
+### Phase 1: WIDTHS DRY + mouse geometry layer fix (COMPLETED)
+- Promoted Tab::title() to const fn
+- Extracted TAB_WIDTHS const in tab_bar.rs, derived from actual label format at compile time
+- Moved resolve_mouse_action, tab_hit_test, tab_label_start from core::ux to components::tab_bar
+- Stripped ux.rs to KEYBINDINGS only; updated call site in ferro-wg-tui
+- Purged all stream-of-consciousness comments
+- 15 tests: all 6 tabs, scroll, boundaries, rect x-offset, out-of-range
+- All adversaries blessed: reviewer, tester, architect
+
 ## Verification Status
 - Tooling checks: PASSED (fmt, test, clippy, build)
 - Adversary reviews: PASSED (reviewer, tester, architect)

@@ -253,7 +253,27 @@
         ]
       }
     ]
-  }
+  },
+  "review_remediation": {
+    "status": "in_progress",
+    "commits": [
+      {
+        "id": "phase1",
+        "title": "WIDTHS DRY fix + mouse geometry moved to components layer",
+        "status": "completed",
+        "features": [
+          "tab_title_const_fn",
+          "tab_widths_module_const",
+          "tab_widths_derived_from_titles",
+          "resolve_mouse_action_in_components",
+          "tab_hit_test_in_components",
+          "tab_label_start_in_components",
+          "ux_stripped_to_keybindings",
+          "exploratory_comments_removed",
+          "tab_bar_boundary_tests",
+          "tab_bar_offset_tests"
+        ]
+      }
     ]
   }
 }
