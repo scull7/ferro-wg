@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 use tracing_subscriber::Layer;
 
@@ -197,52 +197,49 @@ fn setup_listener(socket_path: &Path) -> Result<UnixListener, Box<dyn std::error
 
 /// Handle a `StreamLogs` connection: replay history, then stream live entries.
 ///
-/// The live-stream channel is bounded `mpsc` so the sender blocks under
-/// backpressure rather than dropping messages.  The upstream ring buffer
-/// ([`LogBuffer`]) can still evict old entries under sustained load before
-/// they reach the channel.
+/// Runs in its own spawned task so the daemon event loop is never blocked
+/// waiting for new log entries or a client to disconnect.  Each caller
+/// subscribes to the broadcast channel independently, allowing multiple
+/// concurrent streaming clients.
 ///
-/// # Errors
-///
-/// Returns an error if sending responses fails.
+/// Client disconnect is detected via a failed write, which is the only
+/// reliable cross-platform mechanism on Unix domain sockets (the client
+/// intentionally closes its write half after sending the command, so the
+/// server read half always shows EOF immediately).
 #[tracing::instrument(skip(writer, log_buffer))]
 async fn handle_stream_logs(
-    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     mut writer: tokio::net::unix::OwnedWriteHalf,
     log_buffer: &LogBuffer,
-    log_rx: &mut mpsc::Receiver<LogEntry>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    mut log_rx: broadcast::Receiver<LogEntry>,
+) {
     // Replay historical buffer first so the client sees context on connect.
     for entry in log_buffer.get_buffer() {
-        let resp = DaemonResponse::LogEntry(entry);
-        if let Err(e) = send_response(&mut writer, &resp).await {
-            warn!("Failed to send buffered log entry: {e}");
-            return Ok(());
+        if send_response(&mut writer, &DaemonResponse::LogEntry(entry))
+            .await
+            .is_err()
+        {
+            return;
         }
     }
 
-    // Stream live entries, breaking immediately when the client disconnects
-    // (EOF on the read half) so the daemon event loop is not blocked waiting
-    // for the next log entry.
-    let mut discard = String::new();
+    // Stream live entries until the client disconnects (write error) or the
+    // broadcast channel closes.  Lagged receivers log a warning and continue.
     loop {
-        discard.clear();
-        tokio::select! {
-            entry = log_rx.recv() => match entry {
-                Some(entry) => {
-                    let resp = DaemonResponse::LogEntry(entry);
-                    if let Err(e) = send_response(&mut writer, &resp).await {
-                        warn!("Failed to send streamed log entry: {e}");
-                        break;
-                    }
+        match log_rx.recv().await {
+            Ok(entry) => {
+                if send_response(&mut writer, &DaemonResponse::LogEntry(entry))
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
-                None => break,
-            },
-            // EOF (Ok(0)) or error both signal the client has disconnected.
-            _ = reader.read_line(&mut discard) => break,
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("Log stream lagged, dropped {n} entries");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
-    Ok(())
 }
 
 /// Read and decode a command from the client stream.
@@ -306,23 +303,13 @@ async fn process_command(
 /// Accept the next connection from the listener and decode its command.
 ///
 /// Returns `None` if the connection closed before a valid command was received.
-/// The read half is returned alongside the write half so callers that stream
-/// responses back (e.g. `handle_stream_logs`) can detect client disconnect via
-/// EOF on the read side.
 ///
 /// # Errors
 ///
 /// Returns an error on socket I/O or protocol decode failure.
 async fn accept_command(
     listener: &UnixListener,
-) -> Result<
-    Option<(
-        BufReader<tokio::net::unix::OwnedReadHalf>,
-        tokio::net::unix::OwnedWriteHalf,
-        DaemonCommand,
-    )>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<Option<(tokio::net::unix::OwnedWriteHalf, DaemonCommand)>, Box<dyn std::error::Error>> {
     let (stream, _addr) = listener.accept().await?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -330,7 +317,7 @@ async fn accept_command(
         return Ok(None);
     };
     info!("Received command: {command:?}");
-    Ok(Some((reader, writer, command)))
+    Ok(Some((writer, command)))
 }
 
 /// Route a decoded command to its handler.
@@ -346,14 +333,20 @@ async fn handle_connection(
     manager: &mut TunnelManager,
     config_path: &Path,
     log_buffer: &LogBuffer,
-    log_rx: &mut mpsc::Receiver<LogEntry>,
+    log_tx: &broadcast::Sender<LogEntry>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let Some((reader, mut writer, command)) = accept_command(listener).await? else {
+    let Some((mut writer, command)) = accept_command(listener).await? else {
         return Ok(false);
     };
     match command {
         DaemonCommand::StreamLogs => {
-            handle_stream_logs(reader, writer, log_buffer, log_rx).await?;
+            // Spawn a task so the event loop immediately returns to accept the
+            // next connection rather than blocking on the stream.
+            let log_rx = log_tx.subscribe();
+            let buffer = log_buffer.clone();
+            tokio::spawn(async move {
+                handle_stream_logs(writer, &buffer, log_rx).await;
+            });
             Ok(false)
         }
         cmd => process_command(&cmd, manager, config_path, &mut writer).await,
@@ -375,7 +368,7 @@ pub async fn run(
     config_path: &Path,
     socket_path: &Path,
     log_buffer: LogBuffer,
-    mut log_rx: mpsc::Receiver<LogEntry>,
+    log_tx: broadcast::Sender<LogEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = setup_listener(socket_path)?;
     set_socket_permissions(socket_path)?;
@@ -386,15 +379,7 @@ pub async fn run(
     let config_path = config_path.to_owned();
 
     loop {
-        if handle_connection(
-            &listener,
-            &mut manager,
-            &config_path,
-            &log_buffer,
-            &mut log_rx,
-        )
-        .await?
-        {
+        if handle_connection(&listener, &mut manager, &config_path, &log_buffer, &log_tx).await? {
             break; // Shutdown
         }
     }
@@ -491,8 +476,6 @@ async fn send_response(
 mod tests {
     use std::sync::Arc;
     use std::thread;
-
-    use tokio::sync::mpsc;
 
     use super::*;
 
@@ -669,43 +652,39 @@ mod tests {
         assert_eq!(map_tracing_level(tracing::Level::ERROR), LogLevel::Error);
     }
 
-    /// `handle_stream_logs` must return `Ok(())` when the writer half is
-    /// closed before any data is sent (historical replay path).
+    /// `handle_stream_logs` exits cleanly when the writer half is closed
+    /// before any data is sent (historical replay path).
     #[tokio::test]
     async fn handle_stream_logs_writer_closed_before_replay() {
         let buffer = LogBuffer::new(5);
         buffer.add_entry(make_entry("old entry"));
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let server_read = BufReader::new(server_read);
+        let (_server_read, server_write) = server.into_split();
 
         // Drop the client immediately so writes to server_write fail.
         drop(client);
 
-        let (_tx, mut rx) = mpsc::channel::<LogEntry>(1);
-        let result = handle_stream_logs(server_read, server_write, &buffer, &mut rx).await;
-        assert!(result.is_ok());
+        let (tx, rx) = broadcast::channel::<LogEntry>(4);
+        drop(tx); // close sender so the stream terminates
+        handle_stream_logs(server_write, &buffer, rx).await;
     }
 
-    /// `handle_stream_logs` must return `Ok(())` when the writer fails
-    /// mid-stream while forwarding live log entries.
+    /// `handle_stream_logs` exits cleanly when the writer fails mid-stream.
     #[tokio::test]
     async fn handle_stream_logs_writer_closed_during_live_stream() {
         let buffer = LogBuffer::new(5);
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let server_read = BufReader::new(server_read);
+        let (_server_read, server_write) = server.into_split();
 
         // Drop the client so the next write into server_write will fail.
         drop(client);
 
-        let (tx, mut rx) = mpsc::channel::<LogEntry>(4);
-        tx.send(make_entry("live entry")).await.unwrap();
+        let (tx, rx) = broadcast::channel::<LogEntry>(4);
+        tx.send(make_entry("live entry")).unwrap();
 
-        let result = handle_stream_logs(server_read, server_write, &buffer, &mut rx).await;
-        assert!(result.is_ok());
+        handle_stream_logs(server_write, &buffer, rx).await;
     }
 
     /// `handle_stream_logs` replays the historical buffer then streams live entries.
@@ -719,17 +698,14 @@ mod tests {
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let (client_read, _client_write) = client.into_split();
-        let (server_read, server_write) = server.into_split();
-        let server_read = BufReader::new(server_read);
+        let (_server_read, server_write) = server.into_split();
 
-        let (tx, mut rx) = mpsc::channel::<LogEntry>(4);
-        tx.send(make_entry("live1")).await.unwrap();
+        let (tx, rx) = broadcast::channel::<LogEntry>(4);
+        tx.send(make_entry("live1")).unwrap();
         // Close the sender so handle_stream_logs terminates after draining.
         drop(tx);
 
-        handle_stream_logs(server_read, server_write, &buffer, &mut rx)
-            .await
-            .unwrap();
+        handle_stream_logs(server_write, &buffer, rx).await;
 
         // Read all JSON lines the server wrote to the client.
         let mut reader = BufReader::new(client_read);
