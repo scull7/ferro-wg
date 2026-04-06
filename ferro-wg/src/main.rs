@@ -2,6 +2,7 @@
 
 mod cli;
 mod client;
+mod cmd;
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -41,6 +42,16 @@ fn main() {
         Some(Command::Import { path }) => cmd_import(&path, &config_path),
         Some(Command::Genkey) => {
             cmd_genkey();
+            Ok(())
+        }
+        Some(Command::Logs {
+            level,
+            connection,
+            search,
+            lines,
+            watch,
+        }) => {
+            cmd::logs::cmd_logs(level, connection, search, lines, watch);
             Ok(())
         }
     };

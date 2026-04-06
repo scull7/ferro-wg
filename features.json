@@ -255,7 +255,7 @@
     ]
   },
   "review_remediation": {
-    "status": "in_progress",
+    "status": "completed",
     "commits": [
       {
         "id": "phase1",
@@ -314,6 +314,27 @@
           "preview_config_blocked_by_session_error",
           "fields_for_section_is_new_correct",
           "new_peer_lifecycle_tests_11"
+        ]
+      }
+    ]
+  },
+  "cli_logs_implementation": {
+    "status": "in_progress",
+    "commits": [
+      {
+        "id": "phase3",
+        "title": "Extract filter logic to ferro-wg-core::logs + clap::ValueEnum for LogLevel",
+        "status": "completed",
+        "features": [
+          "clap_value_enum_log_level",
+          "ferro_wg_core_logs_module",
+          "connection_filter_enum_in_core",
+          "line_matches_search_function",
+          "entry_passes_filter_function",
+          "filtered_lines_function",
+          "logs_filter_unit_tests",
+          "tui_imports_from_core_logs",
+          "tui_local_filter_definitions_removed"
         ]
       }
     ]
