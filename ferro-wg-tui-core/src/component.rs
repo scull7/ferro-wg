@@ -6,7 +6,7 @@
 //! [`AppState`](crate::state::AppState), then notifies all components
 //! via `update()`.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -18,15 +18,26 @@ use crate::state::AppState;
 /// Components follow a unidirectional data flow:
 ///
 /// 1. `handle_key()` — convert input into an [`Action`] (or `None`)
-/// 2. `dispatch()` on [`AppState`] — mutate shared state
-/// 3. `update()` — react to the dispatched action
-/// 4. `render()` — draw the current state to the terminal
+/// 2. `handle_mouse()` — convert mouse input into an [`Action`] (or `None`)
+/// 3. `dispatch()` on [`AppState`] — mutate shared state
+/// 4. `update()` — react to the dispatched action
+/// 5. `render()` — draw the current state to the terminal
 pub trait Component {
     /// Handle a key event, optionally producing an [`Action`].
     ///
     /// Return `Some(action)` to trigger a state change, or `None`
     /// if the key is not handled by this component.
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action>;
+
+    /// Handle a mouse event, optionally producing an [`Action`].
+    ///
+    /// Return `Some(action)` to trigger a state change, or `None`
+    /// if the mouse event is not handled by this component.
+    fn handle_mouse(&mut self, mouse: MouseEvent, state: &AppState) -> Option<Action> {
+        let _ = mouse;
+        let _ = state;
+        None
+    }
 
     /// React to a dispatched action.
     ///

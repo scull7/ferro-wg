@@ -209,6 +209,9 @@ impl Component for StatusComponent {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
+        if area.height == 0 || area.width < 20 {
+            return;
+        }
         let theme = &state.theme;
 
         let Some(conn) = state.active_connection() else {

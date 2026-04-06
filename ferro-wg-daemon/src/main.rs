@@ -49,7 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn broadcaster task to isolate async I/O from the tracing layer.
     let log_buffer_for_broadcast = log_buffer.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new()
+            .expect("failed to create Tokio runtime for log broadcaster");
         rt.block_on(async {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

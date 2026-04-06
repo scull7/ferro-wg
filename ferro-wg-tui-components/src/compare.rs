@@ -114,6 +114,9 @@ impl Component for CompareComponent {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, focused: bool, state: &AppState) {
+        if area.height == 0 || area.width < 20 {
+            return;
+        }
         match state.compare_view {
             CompareView::Live => self.render_live(frame, area, focused, state),
             CompareView::Historical => self.render_historical(frame, area, state),

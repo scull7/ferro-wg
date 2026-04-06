@@ -1,6 +1,6 @@
 {
   "phase5": {
-    "status": "in_progress",
+    "status": "completed",
     "commits": [
       {
         "id": "commit1",
@@ -58,11 +58,262 @@
         "title": "Export functionality",
         "status": "completed",
         "features": [
-          "spawn_export_task",
+          "benchmark_export_task",
           "csv_export",
           "json_export",
           "export_io_error_handling",
           "export_tests"
+        ]
+      }
+    ]
+  },
+  "phase6": {
+    "status": "verified",
+    "commits": [
+      {
+        "id": "commit1",
+        "title": "Core edit types + validators",
+        "status": "completed",
+        "features": [
+          "config_edit_types",
+          "pure_validation_functions",
+          "config_diff_function",
+          "fields_for_section",
+          "config_edit_actions",
+          "input_mode_edit_field",
+          "appstate_config_edit_fields",
+          "config_edit_state_dispatch",
+          "confirmed_action_delete_peer",
+          "comprehensive_unit_tests"
+        ]
+      },
+      {
+        "id": "commit2",
+        "title": "Config tab interactive navigation and edit mode",
+        "status": "completed",
+        "features": [
+          "interactive_config_navigation",
+          "config_edit_mode_entry",
+          "inline_validation_display",
+          "peer_add_delete_keys",
+          "preview_trigger",
+          "read_only_protection",
+          "status_bar_config_hints",
+          "config_component_tests"
+        ]
+      },
+      {
+        "id": "commit3",
+        "title": "DiffPreviewComponent overlay",
+        "status": "completed",
+        "features": [
+          "diff_preview_component",
+          "centered_rect_utility",
+          "color_coded_diff_lines",
+          "scrollable_overlay",
+          "diff_preview_key_bindings",
+          "diff_preview_tests"
+        ]
+      },
+      {
+        "id": "commit4",
+        "title": "Background save task and backup",
+        "status": "completed",
+        "features": [
+          "spawn_save_config_task",
+          "backup_before_write",
+          "atomic_config_save",
+          "optional_reconnect_after_save",
+          "reload_config_after_save"
+        ]
+      },
+      {
+        "id": "commit5",
+        "title": "Adversary review fixes",
+        "status": "completed",
+        "features": [
+          "enter_config_edit_struct_variant",
+          "validate_field_on_enter",
+          "real_config_diff_in_preview",
+          "save_config_io_wired",
+          "config_focus_prev_wrap_fix",
+          "delete_peer_clamp_fix",
+          "render_no_unwrap",
+          "status_bar_refactor",
+          "clippy_pedantic_clean"
+        ]
+      }
+    ]
+  },
+  "phase7": {
+    "status": "in_progress",
+    "commits": [
+      {
+        "id": "commit1",
+        "title": "Catppuccin color palette + ThemeKind + theme toggle",
+        "status": "completed",
+        "features": [
+          "theme_kind_enum",
+          "catppuccin_rgb_values",
+          "toggle_theme_action",
+          "show_help_action",
+          "hide_help_action",
+          "theme_kind_state_field",
+          "show_help_state_field",
+          "theme_toggle_keybinding",
+          "help_show_keybinding",
+          "insta_dev_dependency",
+          "theme_toggle_tests",
+          "theme_color_tests",
+          "dispatch_action_tests",
+          "theme_snapshot_tests",
+          "dispatch_refactor_no_clippy_allows"
+        ]
+      },
+      {
+        "id": "commit2",
+        "title": "Toast queue (replaces single-slot Feedback)",
+        "status": "completed",
+        "features": [
+          "toast_struct",
+          "toast_success_error_constructors",
+          "toast_is_expired",
+          "toast_duration_constant",
+          "max_visible_toasts_constant",
+          "push_toast_eviction",
+          "clear_expired_toasts",
+          "dispatch_daemon_ok_toast",
+          "dispatch_daemon_error_toast",
+          "toast_component",
+          "toast_render_bottom_right",
+          "toast_clear_underlay",
+          "toast_component_bundle",
+          "toast_render_ui_integration",
+          "status_bar_feedback_removal",
+          "toast_lifecycle_tests",
+          "toast_eviction_tests",
+          "toast_expiration_tests",
+          "toast_dispatch_tests",
+          "toast_snapshot_tests"
+        ]
+      },
+      {
+        "id": "commit3",
+        "title": "Help overlay component",
+        "status": "completed",
+        "features": [
+          "keybindings_constant",
+          "centered_rect_extraction",
+          "help_overlay_component",
+          "help_overlay_handle_key",
+          "help_overlay_render",
+          "help_overlay_clear_underlay",
+          "help_overlay_component_bundle",
+          "help_overlay_key_guard",
+          "help_overlay_render_topmost",
+          "help_overlay_dispatch_all",
+          "help_overlay_handle_key_tests",
+          "keybindings_validation_tests",
+          "help_overlay_snapshot_tests"
+        ]
+      },
+      {
+        "id": "commit4",
+        "title": "Mouse support",
+        "status": "completed",
+        "features": [
+          "app_event_mouse",
+          "event_mouse_forwarding",
+          "enable_mouse_capture",
+          "resolve_mouse_action",
+          "tab_hit_test",
+          "tab_label_at_column",
+          "handle_mouse_default",
+          "layout_before_mouse",
+          "mouse_guards",
+          "mouse_scroll_tests",
+          "tab_click_tests",
+          "guard_tests"
+        ]
+      },
+      {
+        "id": "commit5",
+        "title": "Responsive layout (80×24 minimum)",
+        "status": "completed",
+        "features": [
+          "min_terminal_constants",
+          "render_too_small",
+          "size_guard_render_ui",
+          "early_return_guards",
+          "constraint_min_zero",
+          "compute_layout_tests",
+          "render_ui_tests",
+          "component_render_tests",
+          "panic_free_80x24"
+        ]
+      }
+    ]
+  },
+  "review_remediation": {
+    "status": "in_progress",
+    "commits": [
+      {
+        "id": "phase1",
+        "title": "WIDTHS DRY fix + mouse geometry moved to components layer",
+        "status": "completed",
+        "features": [
+          "tab_title_const_fn",
+          "tab_widths_module_const",
+          "tab_widths_derived_from_titles",
+          "resolve_mouse_action_in_components",
+          "tab_hit_test_in_components",
+          "tab_label_start_in_components",
+          "ux_stripped_to_keybindings",
+          "exploratory_comments_removed",
+          "tab_bar_boundary_tests",
+          "tab_bar_offset_tests"
+        ]
+      },
+      {
+        "id": "phase3",
+        "title": "apply_field write-back for all config edit fields + base64 Engine migration",
+        "status": "completed",
+        "features": [
+          "apply_field_pure_function",
+          "parse_comma_list_helper",
+          "field_writeback_all_14_non_key_fields",
+          "validate_public_key_base64_engine_migration",
+          "editable_field_doc_fix",
+          "dns_arm_comment",
+          "apply_field_13_unit_tests",
+          "apply_field_7_dispatch_integration_tests"
+        ]
+      },
+      {
+        "id": "phase4",
+        "title": "Eliminate production unwrap() panics",
+        "status": "completed",
+        "features": [
+          "daemon_runtime_new_expect",
+          "duration_since_unwrap_or_default",
+          "benchmark_total_cmp_nan_safe"
+        ]
+      },
+      {
+        "id": "phase2",
+        "title": "New peer key lifecycle in TUI layer, not domain",
+        "status": "completed",
+        "features": [
+          "new_peer_indices_hashset",
+          "session_error_field",
+          "add_config_peer_uses_from_bytes",
+          "peer_public_key_writeback_to_draft",
+          "new_peer_indices_remove_on_confirm",
+          "new_peer_indices_shift_on_delete",
+          "focused_section_clamp_on_delete",
+          "preview_config_blocked_by_session_error",
+          "fields_for_section_is_new_correct",
+          "new_peer_lifecycle_tests_11"
         ]
       }
     ]

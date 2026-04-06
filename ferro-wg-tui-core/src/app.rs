@@ -30,7 +30,7 @@ impl Tab {
 
     /// Tab display title.
     #[must_use]
-    pub fn title(self) -> &'static str {
+    pub const fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Status => "Status",
@@ -78,6 +78,8 @@ pub enum InputMode {
     Import(String),
     /// Typing an export file path. Inner `String` is the current buffer.
     Export(String),
+    /// Editing a single config field. Buffer lives in `AppState::config_edit`.
+    EditField,
 }
 
 #[cfg(test)]

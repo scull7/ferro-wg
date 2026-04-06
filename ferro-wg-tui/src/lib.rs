@@ -14,11 +14,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseEvent,
+};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::text::Text;
+use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -32,8 +36,8 @@ use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
 use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, ConfirmDialogComponent, ConnectionBarComponent,
-    LogsComponent, OverviewComponent, PeersComponent, StatusBarComponent, StatusComponent,
-    TabBarComponent,
+    DiffPreviewComponent, HelpOverlayComponent, LogsComponent, OverviewComponent, PeersComponent,
+    StatusBarComponent, StatusComponent, TabBarComponent, ToastComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
 use futures::StreamExt;
@@ -61,6 +65,12 @@ const MIN_HEIGHT_FOR_CONNECTION_BAR: u16 =
 /// Delegates to [`MIN_USEFUL_WIDTH`] so this threshold stays in sync with any
 /// changes to the bar's prefix or indicator strings.
 const MIN_WIDTH_FOR_CONNECTION_BAR: u16 = MIN_USEFUL_WIDTH;
+
+/// Minimum terminal width for responsive layout.
+const MIN_TERMINAL_WIDTH: u16 = 80;
+
+/// Minimum terminal height for responsive layout.
+const MIN_TERMINAL_HEIGHT: u16 = 24;
 
 /// UI-facing errors from TUI operations.
 ///
@@ -132,8 +142,14 @@ struct ComponentBundle {
     status_bar: StatusBarComponent,
     /// Optional chrome: multi-connection selector bar.
     connection_bar: ConnectionBarComponent,
-    /// Modal overlay: confirmation dialog (rendered on top of everything).
+    /// Modal overlay: confirmation dialog.
     confirm_dialog: ConfirmDialogComponent,
+    /// Modal overlay: diff preview (rendered on top of everything).
+    diff_preview: DiffPreviewComponent,
+    /// Modal overlay: help overlay (topmost).
+    help_overlay: HelpOverlayComponent,
+    /// Toast notifications in bottom-right corner.
+    toast: ToastComponent,
 }
 
 impl ComponentBundle {
@@ -151,6 +167,9 @@ impl ComponentBundle {
             status_bar: StatusBarComponent::new(),
             connection_bar: ConnectionBarComponent::new(),
             confirm_dialog: ConfirmDialogComponent::new(),
+            diff_preview: DiffPreviewComponent::new(),
+            help_overlay: HelpOverlayComponent::new(),
+            toast: ToastComponent::new(),
         }
     }
 }
@@ -197,25 +216,74 @@ fn handle_daemon_messages(
     }
 }
 
+/// Render "Terminal too small" message when the terminal is below minimum size.
+fn render_too_small(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let text = Text::styled("Terminal too small (min 80×24)", state.theme.error);
+    let para = Paragraph::new(text).alignment(Alignment::Center);
+    frame.render_widget(para, area);
+}
+
 /// Render the UI to the terminal.
-fn render_ui(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+fn render_ui<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
     state: &AppState,
     bundle: &mut ComponentBundle,
     chunks: &[ratatui::layout::Rect],
     show_bar: bool,
+    area: ratatui::layout::Rect,
 ) -> Result<(), Box<dyn std::error::Error>> {
     terminal.draw(|frame| {
+        if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+            render_too_small(frame, area, state);
+            return;
+        }
         bundle.tab_bar.render(frame, chunks[0], false, state);
         if show_bar {
             bundle.connection_bar.render(frame, chunks[1], false, state);
         }
         bundle.tabs[state.active_tab.index()].render(frame, chunks[2], true, state);
         bundle.status_bar.render(frame, chunks[3], false, state);
-        // Render the confirmation dialog last so it floats on top of all other content.
         bundle.confirm_dialog.render(frame, chunks[2], false, state);
+        bundle.diff_preview.render(frame, chunks[2], false, state); // topmost
+        bundle.help_overlay.render(frame, chunks[2], false, state); // topmost
+        bundle.toast.render(frame, area, false, state);
     })?;
     Ok(())
+}
+
+/// Handle a mouse event: resolve it to an action, dispatch, and spawn any command.
+#[allow(clippy::too_many_arguments)]
+fn handle_mouse_event(
+    mouse: MouseEvent,
+    state: &mut AppState,
+    bundle: &mut ComponentBundle,
+    daemon_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+    config_path: &Path,
+    benchmarks_path: &Path,
+    chunks: &[ratatui::layout::Rect],
+) {
+    let action = if state.show_help
+        || state.pending_confirm.is_some()
+        || state.config_diff_pending.is_some()
+    {
+        None
+    } else {
+        ferro_wg_tui_components::tab_bar::resolve_mouse_action(&mouse, chunks[0])
+            .or_else(|| bundle.tabs[state.active_tab.index()].handle_mouse(mouse, state))
+    };
+
+    let Some(ref action) = action else { return };
+
+    dispatch_all(state, action, bundle);
+    maybe_spawn_command(
+        action,
+        state,
+        daemon_tx,
+        tasks,
+        config_path,
+        benchmarks_path,
+    );
 }
 
 /// Handle a key event: resolve it to an action, dispatch, and spawn any command.
@@ -228,7 +296,13 @@ fn handle_key_event(
     config_path: &Path,
     benchmarks_path: &Path,
 ) {
-    let action = if state.pending_confirm.is_some() {
+    let action = if state.show_help {
+        // Help overlay captures all keys while open.
+        bundle.help_overlay.handle_key(key, state)
+    } else if state.config_diff_pending.is_some() {
+        // Diff preview captures all keys while open.
+        bundle.diff_preview.handle_key(key, state)
+    } else if state.pending_confirm.is_some() {
         // Confirmation dialog captures all keys; no other handler runs.
         bundle.confirm_dialog.handle_key(key, state)
     } else if matches!(
@@ -278,6 +352,17 @@ fn handle_key_event(
         None
     };
 
+    // For SaveConfig: capture the draft and connection name *before* dispatch
+    // clears config_diff_pending from state.
+    let save_config_data = if let Action::SaveConfig { reconnect } = action {
+        state
+            .config_diff_pending
+            .as_ref()
+            .map(|p| (p.connection_name.clone(), p.draft.clone(), *reconnect))
+    } else {
+        None
+    };
+
     dispatch_all(state, action, bundle);
     maybe_spawn_command(
         action,
@@ -306,6 +391,17 @@ fn handle_key_event(
 
     if let Some(path) = export_path {
         spawn_export_task(path, &state.benchmark_history.clone(), daemon_tx, tasks);
+    }
+
+    if let Some((connection_name, draft, reconnect)) = save_config_data {
+        spawn_save_config_task(
+            connection_name,
+            draft,
+            reconnect,
+            config_path,
+            daemon_tx,
+            tasks,
+        );
     }
 }
 
@@ -392,7 +488,7 @@ pub async fn run(
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -401,7 +497,11 @@ pub async fn run(
     let result = event_loop(&mut terminal, app_config, config_path, benchmarks_path).await;
 
     let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = crossterm::execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
     let _ = terminal.show_cursor();
 
     result
@@ -438,12 +538,11 @@ async fn event_loop(
             &mut tasks,
             &benchmarks_path,
         );
-        state.clear_expired_feedback();
+        state.clear_expired_toasts();
 
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         let (chunks, show_bar) = compute_layout(area, state.connections.len());
-        render_ui(terminal, &state, &mut bundle, &chunks, show_bar)?;
 
         match events.next().await {
             Some(AppEvent::Key(key)) => {
@@ -457,9 +556,23 @@ async fn event_loop(
                     &benchmarks_path,
                 );
             }
+            Some(AppEvent::Mouse(mouse)) => {
+                handle_mouse_event(
+                    mouse,
+                    &mut state,
+                    &mut bundle,
+                    &daemon_tx,
+                    &mut tasks,
+                    &config_path,
+                    &benchmarks_path,
+                    &chunks,
+                );
+            }
             Some(AppEvent::Tick) => spawn_status_poll(&daemon_tx, &poll_in_flight, &mut tasks),
             None => break,
         }
+
+        render_ui(terminal, &state, &mut bundle, &chunks, show_bar, area)?;
     }
     tasks.abort_all();
     Ok(())
@@ -511,6 +624,7 @@ fn dispatch_all(state: &mut AppState, action: &Action, bundle: &mut ComponentBun
     bundle.tab_bar.update(action, state);
     bundle.status_bar.update(action, state);
     bundle.confirm_dialog.update(action, state);
+    bundle.help_overlay.update(action, state);
 }
 
 /// Map a [`ConfirmAction`] to the [`Action`] that should execute after confirmation.
@@ -522,6 +636,7 @@ fn confirmed_action(action: &ConfirmAction) -> Action {
     match action {
         ConfirmAction::DisconnectAll => Action::DisconnectAll,
         ConfirmAction::StopDaemon => Action::StopDaemon,
+        ConfirmAction::DeletePeer(i) => Action::DeleteConfigPeer(*i),
     }
 }
 
@@ -541,6 +656,8 @@ fn handle_global_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('5') => Some(Action::SelectTab(Tab::Config)),
         KeyCode::Char('6') => Some(Action::SelectTab(Tab::Logs)),
         KeyCode::Char('/') => Some(Action::EnterSearch),
+        KeyCode::Char('T') => Some(Action::ToggleTheme),
+        KeyCode::Char('?') => Some(Action::ShowHelp),
         KeyCode::Char('i') => Some(Action::EnterImport),
         _ => None,
     }
@@ -848,6 +965,72 @@ fn spawn_save_history_task(
     });
 }
 
+/// Save a `WgConfig` draft for the named connection to disk.
+///
+/// Flow:
+/// 1. Load the current [`AppConfig`] from `config_path`.
+/// 2. Write a backup to `config_path` + `.bak`.
+/// 3. Replace the named connection's config with `draft`.
+/// 4. Write the updated config back to `config_path`.
+/// 5. Send [`DaemonMessage::ReloadConfig`] to reload app state.
+/// 6. If `reconnect`, send daemon `Down` + `Up` commands for the connection.
+fn spawn_save_config_task(
+    connection_name: String,
+    draft: ferro_wg_core::config::WgConfig,
+    reconnect: bool,
+    config_path: &Path,
+    tx: &mpsc::UnboundedSender<DaemonMessage>,
+    tasks: &mut JoinSet<()>,
+) {
+    let config_path = config_path.to_path_buf();
+    let tx = tx.clone();
+    tasks.spawn(async move {
+        let msg = try_save_config(&connection_name, &draft, &config_path);
+        let _ = tx.send(msg);
+        if reconnect {
+            // Best-effort reconnect: tear down then bring back up.
+            let down = DaemonCommand::Down {
+                connection_name: Some(connection_name.clone()),
+            };
+            let up = DaemonCommand::Up {
+                connection_name: Some(connection_name.clone()),
+                backend: ferro_wg_core::error::BackendKind::Boringtun,
+            };
+            let _ = client::send_command(&down).await;
+            let _ = client::send_command(&up).await;
+        }
+    });
+}
+
+/// Perform the backup-and-write save operation.
+///
+/// Returns a [`DaemonMessage`] to be forwarded to the event loop.
+fn try_save_config(
+    connection_name: &str,
+    draft: &ferro_wg_core::config::WgConfig,
+    config_path: &Path,
+) -> DaemonMessage {
+    let result: Result<AppConfig, String> = (|| {
+        let mut app_config = config_toml::load_app_config(config_path)
+            .map_err(|e| format!("Could not load config: {e}"))?;
+        // Backup before writing.
+        let backup_path = config_path.with_extension("toml.bak");
+        let backup_content = config_toml::save_app_config_string(&app_config)
+            .map_err(|e| format!("Could not serialise backup: {e}"))?;
+        std::fs::write(&backup_path, backup_content)
+            .map_err(|e| format!("Could not write backup: {e}"))?;
+        // Apply draft.
+        app_config.insert(connection_name.to_string(), draft.clone());
+        config_toml::save_app_config(&app_config, config_path)
+            .map_err(|e| format!("Could not write config: {e}"))?;
+        Ok(app_config)
+    })();
+    match result {
+        Ok(config) => DaemonMessage::ReloadConfig(config, "Config saved".into()),
+        Err(e) => DaemonMessage::CommandError(TuiError::Generic(e)),
+    }
+}
+
 /// If the action is a peer command or daemon lifecycle command, spawn a background task.
 fn maybe_spawn_command(
     action: &Action,
@@ -941,6 +1124,8 @@ mod tests {
     use ferro_wg_core::stats::BenchmarkResult;
     use ferro_wg_tui_core::AppState;
     use ferro_wg_tui_core::benchmark::{BenchmarkResultMap, BenchmarkRun};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -1093,5 +1278,94 @@ mod tests {
 
         let msg = rx.recv().await.unwrap();
         assert!(matches!(msg, DaemonMessage::CommandError(_)));
+    }
+
+    #[test]
+    fn compute_layout_80x24() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (chunks, _show_bar) = compute_layout(area, 0);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].height, TAB_BAR_HEIGHT);
+        assert_eq!(chunks[3].height, STATUS_BAR_HEIGHT);
+        assert!(chunks[2].height >= 1);
+    }
+
+    fn render_ui_to_buffer(width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = AppState::new(AppConfig::default());
+        let mut bundle = ComponentBundle::new();
+        let area = Rect::new(0, 0, width, height);
+        let (chunks, show_bar) = compute_layout(area, state.connections.len());
+        render_ui(&mut terminal, &state, &mut bundle, &chunks, show_bar, area).unwrap();
+    }
+
+    #[test]
+    fn render_ui_at_79x24() {
+        render_ui_to_buffer(79, 24);
+    }
+
+    #[test]
+    fn render_ui_at_80x23() {
+        render_ui_to_buffer(80, 23);
+    }
+
+    #[test]
+    fn render_ui_at_80x24() {
+        render_ui_to_buffer(80, 24);
+    }
+
+    fn render_component_to_buffer(tab_index: usize, width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = AppState::new(AppConfig::default());
+        let mut bundle = ComponentBundle::new();
+        let area = Rect::new(0, 0, width, height);
+        terminal
+            .draw(|frame| {
+                bundle.tabs[tab_index].render(frame, area, true, &state);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn overview_component_at_80x24_empty() {
+        render_component_to_buffer(0, 80, 24);
+    }
+
+    #[test]
+    fn overview_component_at_80x24_one_connection() {
+        // Note: Using default config (empty), so no connection, but test no panic
+        render_component_to_buffer(0, 80, 24);
+    }
+
+    #[test]
+    fn overview_component_at_120x40_one_connection() {
+        render_component_to_buffer(0, 120, 40);
+    }
+
+    #[test]
+    fn status_component_at_80x24() {
+        render_component_to_buffer(1, 80, 24);
+    }
+
+    #[test]
+    fn peers_component_at_80x24() {
+        render_component_to_buffer(2, 80, 24);
+    }
+
+    #[test]
+    fn compare_component_at_80x24() {
+        render_component_to_buffer(3, 80, 24);
+    }
+
+    #[test]
+    fn config_component_at_80x24() {
+        render_component_to_buffer(4, 80, 24);
+    }
+
+    #[test]
+    fn logs_component_at_80x24() {
+        render_component_to_buffer(5, 80, 24);
     }
 }

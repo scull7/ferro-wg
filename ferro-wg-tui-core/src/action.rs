@@ -9,6 +9,7 @@ use ferro_wg_core::ipc::{BenchmarkProgress, PeerStatus};
 use ferro_wg_core::stats::BenchmarkResult;
 
 use crate::app::Tab;
+use crate::config_edit::ConfigSection;
 
 /// An action that requires user confirmation before executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,8 @@ pub enum ConfirmAction {
     DisconnectAll,
     /// Stop the daemon process.
     StopDaemon,
+    /// Delete the peer at this index from the draft.
+    DeletePeer(usize),
 }
 
 /// An action that can be dispatched through the TUI state machine.
@@ -123,6 +126,15 @@ pub enum Action {
     /// Toggle `AppState::compare_view` between `Live` and `Historical`.
     ToggleCompareView,
 
+    /// Toggle between Mocha and Latte themes.
+    ToggleTheme,
+
+    /// Show the help overlay.
+    ShowHelp,
+
+    /// Hide the help overlay.
+    HideHelp,
+
     // -- Export actions --
     /// Enter export path input mode (opens the path prompt in the status bar).
     EnterExport,
@@ -148,4 +160,63 @@ pub enum Action {
     ConfirmYes,
     /// User cancelled the pending action.
     ConfirmNo,
+
+    // -- Config editing --
+    /// Enter edit mode for the focused field in the Config tab.
+    ///
+    /// Carries the current focus so `AppState::dispatch` can initialise
+    /// `config_edit` with the correct section, field index, and pre-filled
+    /// edit buffer copied from the live config.
+    EnterConfigEdit {
+        /// Which section of the form is focused.
+        section: ConfigSection,
+        /// Which field within that section is focused.
+        field_idx: usize,
+    },
+
+    /// Forward a key event to the active edit buffer.
+    ///
+    /// `AppState::dispatch` unpacks `Char` → append, `Backspace` → pop,
+    /// `Enter` → commit (clear buffer, revert to `Normal`),
+    /// `Esc` → cancel (clear buffer, revert to `Normal`).
+    ConfigEditKey(KeyEvent),
+
+    /// Move field focus down within the current section (wraps).
+    ConfigFocusNext,
+
+    /// Move field focus up within the current section (wraps).
+    ConfigFocusPrev,
+
+    /// Move section focus to the Interface block.
+    ConfigFocusInterface,
+
+    /// Move section focus to peer at the given index.
+    ConfigFocusPeer(usize),
+
+    /// Append a new blank peer to the draft and enter `EditField` on its `PublicKey`.
+    AddConfigPeer,
+
+    /// Remove the peer at the given index from the draft (after confirmation).
+    DeleteConfigPeer(usize),
+
+    /// Request the diff preview: serialise the draft to TOML, diff against the
+    /// original, and store the result in `AppState::config_diff_pending`.
+    /// Blocked if any field has a pending `field_error` or `WgConfig::validate` fails.
+    PreviewConfig,
+
+    /// Scroll the diff preview overlay down by one line.
+    ConfigDiffScrollDown,
+
+    /// Scroll the diff preview overlay up by one line.
+    ConfigDiffScrollUp,
+
+    /// Save the pending draft to disk (backup first), then reload config state.
+    /// Sent from within the diff preview; clears `config_diff_pending` on success.
+    SaveConfig {
+        /// When `true`, reconnect affected tunnels after saving.
+        reconnect: bool,
+    },
+
+    /// Discard all pending edits and clear `AppState::config_edit`.
+    DiscardConfigEdits,
 }

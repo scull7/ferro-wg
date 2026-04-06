@@ -34,22 +34,6 @@ impl Default for ConfirmDialogComponent {
     }
 }
 
-/// Compute a centered [`Rect`] with a percentage width and fixed height.
-///
-/// `pct_x` is the desired width as a percentage of `area.width` (0–100).
-/// The returned rect is clamped to fit within `area`.
-fn centered_rect(pct_x: u16, height: u16, area: Rect) -> Rect {
-    let width = area.width * pct_x / 100;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width: width.min(area.width),
-        height: height.min(area.height),
-    }
-}
-
 impl Component for ConfirmDialogComponent {
     /// Route keys when the confirmation dialog is active.
     ///
@@ -70,7 +54,7 @@ impl Component for ConfirmDialogComponent {
         let Some(pending) = &state.pending_confirm else {
             return;
         };
-        let overlay_area = centered_rect(60, 5, area);
+        let overlay_area = crate::util::centered_rect(60, 5, area);
         frame.render_widget(Clear, overlay_area);
         let block = state.theme.overlay_block("Confirm");
         let inner = block.inner(overlay_area);
