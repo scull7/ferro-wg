@@ -1,14 +1,14 @@
 //! Overview tab: aggregate health table across all connections.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
+use ratatui::Frame;
 
 use ferro_wg_tui_core::{
-    Action, AppState, Component, ConfirmAction, ConnectionState, Tab, format_bytes,
-    format_handshake_age,
+    format_bytes, format_handshake_age, Action, AppState, Component, ConfirmAction,
+    ConnectionState, ConnectionView, Tab,
 };
 
 // Overview table column widths. Must sum to 100 for the percentage columns
@@ -57,17 +57,8 @@ impl Default for OverviewComponent {
 impl Component for OverviewComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') if !state.connections.is_empty() => {
-                let next = (state.selected_connection + 1) % state.connections.len();
-                Some(Action::SelectConnection(next))
-            }
-            KeyCode::Up | KeyCode::Char('k') if !state.connections.is_empty() => {
-                let prev = state
-                    .selected_connection
-                    .checked_sub(1)
-                    .unwrap_or(state.connections.len() - 1);
-                Some(Action::SelectConnection(prev))
-            }
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::NextRow),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::PrevRow),
             KeyCode::Enter => Some(Action::SelectTab(Tab::Status)),
             // Bulk connection control (daemon must be connected to be useful,
             // but we don't gate here — feedback from the daemon handles errors).
@@ -86,9 +77,27 @@ impl Component for OverviewComponent {
         }
     }
 
-    fn update(&mut self, _action: &Action, state: &AppState) {
-        // Keep the table cursor authoritative from state, not local tracking.
-        self.table_state.select(Some(state.selected_connection));
+    fn update(&mut self, action: &Action, state: &AppState) {
+        let visible_count = state
+            .connections
+            .iter()
+            .filter(|c| state.visible_connections.contains(&c.name))
+            .count();
+        let max = visible_count.saturating_sub(1);
+        let current = self.table_state.selected().unwrap_or(0);
+        match action {
+            Action::NextRow => {
+                self.table_state
+                    .select(Some(current.saturating_add(1).min(max)));
+            }
+            Action::PrevRow => {
+                self.table_state.select(Some(current.saturating_sub(1)));
+            }
+            Action::SelectTab(_) | Action::NextTab | Action::PrevTab => {
+                self.table_state.select(Some(0));
+            }
+            _ => {}
+        }
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool, state: &AppState) {
@@ -99,7 +108,7 @@ impl Component for OverviewComponent {
 
         // Sync cursor (defensive; update() handles it on every dispatch, but
         // render may run before the first dispatch on a new state).
-        self.table_state.select(Some(state.selected_connection));
+        self.table_state.select(Some(0));
 
         let header = Row::new(vec![
             "#",
@@ -113,8 +122,12 @@ impl Component for OverviewComponent {
         ])
         .style(theme.header_style());
 
-        let rows: Vec<Row<'_>> = state
+        let visible_conns: Vec<&ConnectionView> = state
             .connections
+            .iter()
+            .filter(|c| state.visible_connections.contains(&c.name))
+            .collect();
+        let rows: Vec<Row<'_>> = visible_conns
             .iter()
             .enumerate()
             .map(|(i, conn)| {
@@ -193,8 +206,8 @@ impl Component for OverviewComponent {
 mod tests {
     use std::collections::BTreeMap;
 
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     use super::*;
     use ferro_wg_core::config::{AppConfig, InterfaceConfig, PeerConfig, WgConfig};
@@ -359,25 +372,25 @@ mod tests {
         let mut comp = OverviewComponent::new();
         let state = three_connection_state(); // selected_connection = 0
         let action = comp.handle_key(KeyEvent::from(KeyCode::Down), &state);
-        assert_eq!(action, Some(Action::SelectConnection(1)));
+        assert_eq!(action, Some(Action::NextRow));
     }
 
     #[test]
     fn overview_key_down_wraps() {
         let mut comp = OverviewComponent::new();
-        let mut state = three_connection_state();
-        state.selected_connection = 2; // last index (3 connections)
+        let state = three_connection_state();
+
         let action = comp.handle_key(KeyEvent::from(KeyCode::Down), &state);
-        assert_eq!(action, Some(Action::SelectConnection(0)));
+        assert_eq!(action, Some(Action::NextRow));
     }
 
     #[test]
     fn overview_key_up_wraps() {
         let mut comp = OverviewComponent::new();
-        let mut state = three_connection_state();
-        state.selected_connection = 0;
+        let state = three_connection_state();
+
         let action = comp.handle_key(KeyEvent::from(KeyCode::Up), &state);
-        assert_eq!(action, Some(Action::SelectConnection(2)));
+        assert_eq!(action, Some(Action::PrevRow));
     }
 
     #[test]
@@ -393,16 +406,16 @@ mod tests {
         let mut comp = OverviewComponent::new();
         let state = AppState::new(AppConfig::default());
         let action = comp.handle_key(KeyEvent::from(KeyCode::Down), &state);
-        assert_eq!(action, None);
+        assert_eq!(action, Some(Action::NextRow));
     }
 
     #[test]
     fn overview_update_syncs_table_cursor() {
         let mut comp = OverviewComponent::new();
-        let mut state = three_connection_state();
-        state.selected_connection = 2;
-        comp.update(&Action::SelectConnection(2), &state);
-        assert_eq!(comp.table_state.selected(), Some(2));
+        let state = three_connection_state();
+
+        comp.update(&Action::SelectTab(Tab::Overview), &state);
+        assert_eq!(comp.table_state.selected(), Some(0));
     }
 
     // ── Narrow-terminal edge cases ────────────────────────────────────────────
@@ -474,11 +487,11 @@ mod tests {
         for i in 0..100 {
             connections.insert(format!("conn{i:03}"), make_wg_config());
         }
-        let mut state = AppState::new(AppConfig {
+        let state = AppState::new(AppConfig {
             connections,
             ..AppConfig::default()
         });
-        state.selected_connection = 99;
+
         render_overview(&state); // must not panic
     }
 

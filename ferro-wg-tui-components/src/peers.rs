@@ -1,10 +1,10 @@
 //! Peers tab: all configured peers with routing and backend details.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
+use ratatui::Frame;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
 
@@ -24,7 +24,7 @@ impl PeersComponent {
         }
     }
 
-    /// Number of displayable rows (filtered peers of the active connection).
+    /// Number of displayable rows (filtered peers from all visible connections).
     fn row_count(state: &AppState) -> usize {
         state.filtered_peers().count()
     }
@@ -69,14 +69,6 @@ impl Component for PeersComponent {
             return;
         }
         let theme = &state.theme;
-
-        let Some(_conn) = state.active_connection() else {
-            let para = ratatui::widgets::Paragraph::new("No connections configured.")
-                .block(theme.panel_block("Peers"))
-                .style(Style::default().fg(theme.muted));
-            frame.render_widget(para, area);
-            return;
-        };
 
         let header = Row::new(vec![
             "Peer",

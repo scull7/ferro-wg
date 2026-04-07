@@ -927,17 +927,18 @@ fn spawn_switch_backend_task(
             return;
         }
     };
-    let Some(connection) = state.active_connection() else {
+    if state.visible_connections.is_empty() {
         let tx = tx.clone();
         tasks.spawn(async move {
             let _ = tx.send(DaemonMessage::CommandError(TuiError::DaemonResponse(
-                "no active connection to switch backend for".into(),
+                "no visible connections to switch backend for".into(),
             )));
         });
         return;
-    };
+    }
+    let connection_name = state.visible_connections.iter().min().unwrap().clone();
     let cmd = DaemonCommand::SwitchBackend {
-        connection_name: connection.name.clone(),
+        connection_name,
         backend: bk,
     };
     let description = format!("Switched backend: {backend}");
@@ -1054,8 +1055,9 @@ fn maybe_spawn_command(
         action,
         Action::StartBenchmark | Action::StartBenchmarkForBackend(_)
     ) {
-        if let Some(connection) = state.active_connection() {
-            spawn_benchmark_task(connection.name.clone(), 10, tx, tasks);
+        if !state.visible_connections.is_empty() {
+            let connection_name = state.visible_connections.iter().min().unwrap().clone();
+            spawn_benchmark_task(connection_name, 10, tx, tasks);
         }
         return;
     }
@@ -1169,7 +1171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_maybe_spawn_command_switch_backend_no_active_connection() {
+    async fn test_maybe_spawn_command_switch_backend_no_visible_connections() {
         let config_path = PathBuf::from("/tmp/config.toml");
         let benchmarks_path = PathBuf::from("/tmp/benchmarks.json");
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1192,7 +1194,7 @@ mod tests {
             DaemonMessage::CommandError(TuiError::DaemonResponse(_))
         ));
         if let DaemonMessage::CommandError(TuiError::DaemonResponse(s)) = msg {
-            assert!(s.contains("no active connection"));
+            assert!(s.contains("no visible connections"));
         }
     }
 
