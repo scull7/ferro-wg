@@ -1,14 +1,14 @@
 //! Overview tab: aggregate health table across all connections.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
-use ratatui::Frame;
 
 use ferro_wg_tui_core::{
-    format_bytes, format_handshake_age, Action, AppState, Component, ConfirmAction,
-    ConnectionState, ConnectionView, Tab,
+    Action, AppState, Component, ConfirmAction, ConnectionState, ConnectionView, Tab, format_bytes,
+    format_handshake_age,
 };
 
 // Overview table column widths. Must sum to 100 for the percentage columns
@@ -206,8 +206,8 @@ impl Component for OverviewComponent {
 mod tests {
     use std::collections::BTreeMap;
 
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
     use ferro_wg_core::config::{AppConfig, InterfaceConfig, PeerConfig, WgConfig};

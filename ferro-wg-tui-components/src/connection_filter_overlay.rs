@@ -5,9 +5,9 @@
 //! with checkboxes for toggling visibility.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
-use ratatui::Frame;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
 
@@ -153,8 +153,8 @@ impl Component for ConnectionFilterOverlayComponent {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use ferro_wg_core::config::{AppConfig, InterfaceConfig, PeerConfig, WgConfig};
     use ferro_wg_core::key::PrivateKey;

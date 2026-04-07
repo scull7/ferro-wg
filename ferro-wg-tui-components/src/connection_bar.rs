@@ -3,11 +3,11 @@
 use std::borrow::Cow;
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use ferro_wg_tui_core::{Action, AppState, Component, ConnectionState};
 
@@ -294,8 +294,8 @@ impl Component for ConnectionBarComponent {
 mod tests {
     use std::collections::BTreeMap;
 
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
     use ferro_wg_core::config::{AppConfig, InterfaceConfig, WgConfig};
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn scrolled_selected_at_start_is_visible() {
         let state = many_connection_state(20); // c00..c19
-                                               // "c00"
+        // "c00"
         let content = render_bar(&state, 80);
         assert!(
             content.contains("c00"),

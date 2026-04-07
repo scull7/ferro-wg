@@ -1,14 +1,14 @@
 //! Status tab: active tunnel overview.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
-use ratatui::Frame;
 
 use ferro_wg_tui_core::{
-    format_bytes, format_handshake_age, Action, AppState, Component, ConnectionState,
-    ConnectionView, Theme,
+    Action, AppState, Component, ConnectionState, ConnectionView, Theme, format_bytes,
+    format_handshake_age,
 };
 
 // Status tab connection table column widths (percentages). Must sum to 100.
@@ -246,8 +246,8 @@ impl Component for StatusComponent {
 mod tests {
     use std::collections::BTreeMap;
 
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
     use ferro_wg_core::config::{AppConfig, InterfaceConfig, PeerConfig, WgConfig};

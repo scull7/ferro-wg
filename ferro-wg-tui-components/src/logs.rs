@@ -1,11 +1,11 @@
 use std::collections::{HashSet, VecDeque};
 
 use crossterm::event::KeyEvent;
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
-use ratatui::Frame;
 use tracing::warn;
 
 use ferro_wg_core::config::LogDisplayConfig;

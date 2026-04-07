@@ -1,10 +1,10 @@
 //! Peers tab: all configured peers with routing and backend details.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Cell, Row, Table, TableState};
-use ratatui::Frame;
 
 use ferro_wg_tui_core::{Action, AppState, Component};
 

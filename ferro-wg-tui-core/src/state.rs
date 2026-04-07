@@ -285,7 +285,8 @@ impl AppState {
             .collect();
 
         let theme_kind = ThemeKind::default();
-        let visible_connections: HashSet<String> = connections.iter().map(|c| c.name.clone()).collect();
+        let visible_connections: HashSet<String> =
+            connections.iter().map(|c| c.name.clone()).collect();
         Self {
             running: true,
             active_tab: Tab::Overview,
@@ -312,8 +313,6 @@ impl AppState {
             config_diff_pending: None,
         }
     }
-
-
 
     /// Append a structured log entry to the buffer, evicting the oldest when full.
     pub fn append_log(&self, entry: LogEntry) {
@@ -363,7 +362,12 @@ impl AppState {
             | Action::BenchmarkComplete(_) => self.handle_benchmark_actions(action),
             Action::ToggleCompareView => self.handle_compare_actions(action),
             Action::ToggleTheme => self.handle_theme_action(action),
-             Action::ShowHelp | Action::HideHelp | Action::ShowConnectionFilter | Action::HideConnectionFilter | Action::ToggleConnectionVisibility(_) | Action::SetConnectionFilterSearch(_) => self.handle_help_action(action),
+            Action::ShowHelp
+            | Action::HideHelp
+            | Action::ShowConnectionFilter
+            | Action::HideConnectionFilter
+            | Action::ToggleConnectionVisibility(_)
+            | Action::SetConnectionFilterSearch(_) => self.handle_help_action(action),
             Action::EnterExport
             | Action::ExportKey(_)
             | Action::SubmitImport
@@ -454,7 +458,6 @@ impl AppState {
                 warn!(name = %s.name, "UpdatePeers received status for unknown connection");
             }
         }
-
     }
 
     /// The current import path buffer, when in [`InputMode::Import`].
@@ -546,8 +549,6 @@ impl AppState {
         }
     }
 
-
-
     /// Handle peer-related actions.
     fn handle_peer_actions(&mut self, action: &Action) {
         if let Action::UpdatePeers(statuses) = action {
@@ -574,8 +575,6 @@ impl AppState {
             _ => {}
         }
     }
-
-
 
     /// Handle import-related actions.
     fn handle_import_actions(&mut self, action: &Action) {
@@ -694,7 +693,11 @@ impl AppState {
             Action::EnterConfigEdit { section, field_idx } => {
                 if !self.visible_connections.is_empty() {
                     let conn_name = self.visible_connections.iter().min().unwrap();
-                    let conn = self.connections.iter().find(|c| c.name == *conn_name).unwrap();
+                    let conn = self
+                        .connections
+                        .iter()
+                        .find(|c| c.name == *conn_name)
+                        .unwrap();
                     let fields = fields_for_section(*section, false);
                     let field: EditableField = fields
                         .get(*field_idx)
@@ -1346,12 +1349,6 @@ mod tests {
         }
     }
 
-
-
-
-
-
-
     #[test]
     fn select_connection_out_of_bounds_does_not_clear_search_query() {
         // Out-of-bounds SelectConnection is a no-op; search is preserved.
@@ -1361,20 +1358,12 @@ mod tests {
         assert_eq!(state.search_query, "mia");
     }
 
-
-
-
-
-
-
     #[test]
     fn prev_row_clamps_at_zero() {
         let mut state = two_connection_state();
         state.dispatch(&Action::PrevRow);
         assert_eq!(state.connections[0].selected_peer_row, 0);
     }
-
-
 
     #[test]
     fn filtered_peers_matches_active_connection() {
@@ -1710,8 +1699,6 @@ mod tests {
         assert_eq!(state.connections.len(), 1);
         assert_eq!(state.connections[0].name, "new-conn");
     }
-
-
 
     #[test]
     fn second_request_confirm_replaces_pending() {

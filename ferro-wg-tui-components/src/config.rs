@@ -1,13 +1,13 @@
 //! Config tab: interface and peer configuration display.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
-use ferro_wg_tui_core::config_edit::{fields_for_section, ConfigSection, EditableField};
+use ferro_wg_tui_core::config_edit::{ConfigSection, EditableField, fields_for_section};
 use ferro_wg_tui_core::{Action, AppState, Component};
 
 /// Interactive display and editor of the active `WireGuard` interface and peer configuration.
