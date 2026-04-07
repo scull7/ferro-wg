@@ -250,7 +250,9 @@ fn render_ui<B: ratatui::backend::Backend>(
         bundle.confirm_dialog.render(frame, chunks[2], false, state);
         bundle.diff_preview.render(frame, chunks[2], false, state); // topmost
         bundle.help_overlay.render(frame, chunks[2], false, state); // topmost
-        bundle.connection_filter_overlay.render(frame, chunks[2], false, state); // topmost
+        bundle
+            .connection_filter_overlay
+            .render(frame, chunks[2], false, state); // topmost
         bundle.toast.render(frame, area, false, state);
     })?;
     Ok(())
