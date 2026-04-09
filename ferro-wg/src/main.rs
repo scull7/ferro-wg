@@ -324,9 +324,12 @@ fn cmd_daemon(
     println!("Connections: {}", conn_names.join(", "));
     println!("Press Ctrl+C to stop.\n");
 
-    // Bounded channel: sender blocks under backpressure instead of dropping messages.
-    let (log_tx, log_rx) = tokio::sync::mpsc::channel::<ferro_wg_core::ipc::LogEntry>(4096);
+    // Broadcast channel: each StreamLogs client subscribes independently.
+    // Capacity matches the ring buffer so a slow client sees at most one
+    // buffer-worth of lag before entries are dropped with a warning.
+    let (log_tx, _) = tokio::sync::broadcast::channel::<ferro_wg_core::ipc::LogEntry>(1000);
     let log_buffer_for_broadcast = log_buffer.clone();
+    let log_tx_broadcast = log_tx.clone();
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -336,14 +339,13 @@ fn cmd_daemon(
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 let entries = log_buffer_for_broadcast.drain_logs();
                 for entry in entries {
-                    if log_tx.send(entry).await.is_err() {
-                        // Receiver dropped; daemon is shutting down.
-                        return;
-                    }
+                    // Sending to a broadcast channel with no subscribers is fine;
+                    // the error is silently ignored so the task keeps running.
+                    let _ = log_tx_broadcast.send(entry);
                 }
             }
         });
-        ferro_wg_core::daemon::run(app_config, config_path, &socket_path, log_buffer, log_rx).await
+        ferro_wg_core::daemon::run(app_config, config_path, &socket_path, log_buffer, log_tx).await
     })?;
     Ok(())
 }

@@ -2,9 +2,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
 use ferro_wg_tui_core::{
@@ -12,14 +11,26 @@ use ferro_wg_tui_core::{
     format_handshake_age,
 };
 
-// Status tab peer table column widths (percentages). Must sum to 100.
-const COL_PEER_W: u16 = 25; // "Peer"
-const COL_ENDPOINT_W: u16 = 30; // "Endpoint"
-const COL_ALLOWED_W: u16 = 30; // "Allowed IPs"
-const COL_KEEPALIVE_W: u16 = 15; // "Keepalive"
+// Status tab connection table column widths (percentages). Must sum to 100.
+const COL_NAME_W: u16 = 15; // "Name"
+const COL_STATUS_W: u16 = 10; // "Status"
+const COL_BACKEND_W: u16 = 10; // "Backend"
+const COL_ENDPOINT_W: u16 = 15; // "Endpoint"
+const COL_INTERFACE_W: u16 = 10; // "Interface"
+const COL_RXTX_W: u16 = 15; // "Rx / Tx"
+const COL_HANDSHAKE_W: u16 = 15; // "Handshake"
+const COL_WARNINGS_W: u16 = 10; // "Warnings"
 
 const _: () = assert!(
-    COL_PEER_W + COL_ENDPOINT_W + COL_ALLOWED_W + COL_KEEPALIVE_W == 100,
+    COL_NAME_W
+        + COL_STATUS_W
+        + COL_BACKEND_W
+        + COL_ENDPOINT_W
+        + COL_INTERFACE_W
+        + COL_RXTX_W
+        + COL_HANDSHAKE_W
+        + COL_WARNINGS_W
+        == 100,
     "Status percentage columns must sum to 100"
 );
 
@@ -45,124 +56,87 @@ impl StatusComponent {
         }
     }
 
-    /// Number of displayable rows (filtered peers of the active connection).
+    /// Number of displayable rows (visible connections).
     fn row_count(state: &AppState) -> usize {
-        state.filtered_peers().count()
-    }
-
-    /// Get the name of the active connection, if any.
-    fn active_connection_name(state: &AppState) -> Option<String> {
-        state.active_connection().map(|c| c.name.clone())
-    }
-
-    /// Build the connection-level summary lines and compute the required height.
-    ///
-    /// Returns `(lines, height)` where `height` is 2 normally or 3 when a
-    /// health warning is present.
-    fn connection_summary(conn: &ConnectionView, theme: &Theme) -> (Vec<Line<'static>>, u16) {
-        let warning: Option<String> = conn.status.as_ref().and_then(|s| s.health_warning.clone());
-
-        let (is_connected, state_str, hs, rx, tx, backend_str, iface_str) =
-            conn.status.as_ref().map_or(
-                (
-                    false,
-                    "down",
-                    "—".to_owned(),
-                    "—".to_owned(),
-                    "—".to_owned(),
-                    "—".to_owned(),
-                    "—".to_owned(),
-                ),
-                |s| {
-                    let connected = s.state == ConnectionState::Connected;
-                    let hs = s
-                        .stats
-                        .last_handshake
-                        .map_or_else(|| "—".to_owned(), format_handshake_age);
-                    let rx = format_bytes(s.stats.rx_bytes);
-                    let tx = format_bytes(s.stats.tx_bytes);
-                    let backend = s.backend.to_string();
-                    let iface = s.interface.clone().unwrap_or_else(|| "—".to_owned());
-                    (
-                        connected,
-                        if connected { "connected" } else { "down" },
-                        hs,
-                        rx,
-                        tx,
-                        backend,
-                        iface,
-                    )
-                },
-            );
-
-        let placeholder_style = conn
-            .status
-            .as_ref()
-            .map_or(Style::default().fg(theme.muted), |_| Style::default());
-        let state_style = if is_connected {
-            Style::default().fg(theme.success)
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        let label = Style::default().fg(theme.muted);
-
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("State: ", label),
-                Span::styled(state_str, state_style),
-                Span::raw("  "),
-                Span::styled("Backend: ", label),
-                Span::styled(backend_str, placeholder_style),
-                Span::raw("  "),
-                Span::styled("Interface: ", label),
-                Span::styled(iface_str, placeholder_style),
-            ]),
-            Line::from(vec![
-                Span::styled("Rx: ", label),
-                Span::styled(rx, placeholder_style),
-                Span::raw("  "),
-                Span::styled("Tx: ", label),
-                Span::styled(tx, placeholder_style),
-                Span::raw("  "),
-                Span::styled("Handshake: ", label),
-                Span::styled(hs, placeholder_style),
-                Span::styled("  (connection totals, not per-peer)", label),
-            ]),
-        ];
-        let height = if let Some(w) = warning {
-            lines.push(Line::from(vec![
-                Span::styled("[!] ", Style::default().fg(theme.warning)),
-                Span::styled(w, Style::default().fg(theme.warning)),
-            ]));
-            3
-        } else {
-            2
-        };
-        (lines, height)
-    }
-
-    /// Build per-peer table rows for the active connection.
-    ///
-    /// Absent endpoints are rendered as `"—"` in the muted style.
-    fn peer_rows(state: &AppState, theme: &Theme) -> Vec<Row<'static>> {
         state
-            .filtered_peers()
-            .map(|p| {
-                let allowed = p.allowed_ips.join(", ");
-                let keepalive = if p.persistent_keepalive == 0 {
-                    "off".to_owned()
+            .connections
+            .iter()
+            .filter(|c| state.visible_connections.contains(&c.name))
+            .count()
+    }
+
+    /// Get the visible connections in display order.
+    fn visible_connections(state: &AppState) -> Vec<&ConnectionView> {
+        state
+            .connections
+            .iter()
+            .filter(|c| state.visible_connections.contains(&c.name))
+            .collect()
+    }
+
+    /// Get the name of the connection at the selected row, if any.
+    fn selected_connection_name(state: &AppState, selected_row: usize) -> Option<String> {
+        Self::visible_connections(state)
+            .get(selected_row)
+            .map(|c| c.name.clone())
+    }
+
+    /// Build connection table rows for visible connections.
+    fn connection_rows(state: &AppState, theme: &Theme) -> Vec<Row<'static>> {
+        Self::visible_connections(state)
+            .into_iter()
+            .map(|conn| {
+                let (state_str, backend_str, endpoint, interface, rx_tx, hs, warning) =
+                    conn.status.as_ref().map_or(
+                        (
+                            "down".to_owned(),
+                            "—".to_owned(),
+                            "—".to_owned(),
+                            "—".to_owned(),
+                            "—".to_owned(),
+                            "—".to_owned(),
+                            "—".to_owned(),
+                        ),
+                        |s| {
+                            let state = if s.state == ConnectionState::Connected {
+                                "connected"
+                            } else {
+                                "down"
+                            };
+                            let backend = s.backend.to_string();
+                            let ep = s.endpoint.clone().unwrap_or_else(|| "—".to_owned());
+                            let iface = s.interface.clone().unwrap_or_else(|| "—".to_owned());
+                            let rx = format_bytes(s.stats.rx_bytes);
+                            let tx = format_bytes(s.stats.tx_bytes);
+                            let rxtx = format!("{rx} / {tx}");
+                            let handshake = s
+                                .stats
+                                .last_handshake
+                                .map_or_else(|| "—".to_owned(), format_handshake_age);
+                            let warn = s.health_warning.clone().unwrap_or_else(|| "—".to_owned());
+                            (state.to_owned(), backend, ep, iface, rxtx, handshake, warn)
+                        },
+                    );
+
+                let state_style = if conn
+                    .status
+                    .as_ref()
+                    .is_some_and(|s| s.state == ConnectionState::Connected)
+                {
+                    Style::default().fg(theme.success)
                 } else {
-                    format!("{}s", p.persistent_keepalive)
+                    Style::default().fg(theme.muted)
                 };
-                let (endpoint, ep_style): (String, Style) = p.endpoint.as_ref().map_or_else(
-                    || ("—".to_owned(), Style::default().fg(theme.muted)),
-                    |ep| (ep.clone(), Style::default()),
-                );
+
                 Row::new(vec![
-                    Cell::from(p.name.clone()),
-                    Cell::from(endpoint).style(ep_style),
-                    Cell::from(allowed),
-                    Cell::from(keepalive),
+                    Cell::from(conn.name.clone()),
+                    Cell::from(state_str).style(state_style),
+                    Cell::from(backend_str),
+                    Cell::from(endpoint),
+                    Cell::from(interface),
+                    Cell::from(rx_tx),
+                    Cell::from(hs),
+                    Cell::from(warning),
                 ])
             })
             .collect()
@@ -177,14 +151,20 @@ impl Default for StatusComponent {
 
 impl Component for StatusComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
+        let selected_row = self.table_state.selected().unwrap_or(0);
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => Some(Action::NextRow),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::PrevRow),
             KeyCode::Enter | KeyCode::Char('u') => {
-                Self::active_connection_name(state).map(Action::ConnectPeer)
+                Self::selected_connection_name(state, selected_row).map(Action::ConnectPeer)
             }
-            KeyCode::Char('d') => Self::active_connection_name(state).map(Action::DisconnectPeer),
-            KeyCode::Char('b') => Self::active_connection_name(state).map(Action::CyclePeerBackend),
+            KeyCode::Char('d') => {
+                Self::selected_connection_name(state, selected_row).map(Action::DisconnectPeer)
+            }
+            KeyCode::Char('b') => {
+                Self::selected_connection_name(state, selected_row).map(Action::CyclePeerBackend)
+            }
+            KeyCode::Char('f') => Some(Action::ShowConnectionFilter),
             _ => None,
         }
     }
@@ -214,49 +194,51 @@ impl Component for StatusComponent {
         }
         let theme = &state.theme;
 
-        let Some(conn) = state.active_connection() else {
-            let para = Paragraph::new("No connections configured.")
+        if Self::row_count(state) == 0 {
+            let para = Paragraph::new("No visible connections.")
                 .block(theme.panel_block("Status"))
                 .style(Style::default().fg(theme.muted));
             frame.render_widget(para, area);
             return;
-        };
+        }
 
         // Render the outer border once; work inside the inner area.
         let block = theme.panel_block("Status");
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // ── Connection-level summary ──────────────────────────────────────────
-        let (summary_content, summary_height) = Self::connection_summary(conn, theme);
-        let chunks =
-            Layout::vertical([Constraint::Length(summary_height), Constraint::Min(0)]).split(inner);
-        debug_assert_eq!(
-            chunks.len(),
-            2,
-            "Status inner layout must yield exactly 2 chunks"
-        );
-        frame.render_widget(Paragraph::new(summary_content), chunks[0]);
+        // ── Connection table ──────────────────────────────────────────────────
+        let header = Row::new(vec![
+            "Name",
+            "Status",
+            "Backend",
+            "Endpoint",
+            "Interface",
+            "Rx / Tx",
+            "Handshake",
+            "Warnings",
+        ])
+        .style(theme.header_style());
 
-        // ── Per-peer table ────────────────────────────────────────────────────
-        let header = Row::new(vec!["Peer", "Endpoint", "Allowed IPs", "Keepalive"])
-            .style(theme.header_style());
-
-        let rows = Self::peer_rows(state, theme);
+        let rows = Self::connection_rows(state, theme);
 
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(COL_PEER_W),
+                Constraint::Percentage(COL_NAME_W),
+                Constraint::Percentage(COL_STATUS_W),
+                Constraint::Percentage(COL_BACKEND_W),
                 Constraint::Percentage(COL_ENDPOINT_W),
-                Constraint::Percentage(COL_ALLOWED_W),
-                Constraint::Percentage(COL_KEEPALIVE_W),
+                Constraint::Percentage(COL_INTERFACE_W),
+                Constraint::Percentage(COL_RXTX_W),
+                Constraint::Percentage(COL_HANDSHAKE_W),
+                Constraint::Percentage(COL_WARNINGS_W),
             ],
         )
         .header(header)
         .row_highlight_style(theme.highlight_style());
 
-        frame.render_stateful_widget(table, chunks[1], &mut self.table_state);
+        frame.render_stateful_widget(table, inner, &mut self.table_state);
     }
 }
 
@@ -319,6 +301,35 @@ mod tests {
         }
     }
 
+    fn make_app_config(entries: &[(&str, Vec<PeerConfig>)]) -> AppConfig {
+        let mut connections = BTreeMap::new();
+        for (name, peers) in entries {
+            connections.insert(
+                (*name).to_string(),
+                WgConfig {
+                    interface: InterfaceConfig {
+                        private_key: PrivateKey::generate(),
+                        listen_port: 51820,
+                        addresses: vec!["10.0.0.2/24".into()],
+                        dns: Vec::new(),
+                        dns_search: Vec::new(),
+                        mtu: 1420,
+                        fwmark: 0,
+                        pre_up: Vec::new(),
+                        post_up: Vec::new(),
+                        pre_down: Vec::new(),
+                        post_down: Vec::new(),
+                    },
+                    peers: peers.clone(),
+                },
+            );
+        }
+        AppConfig {
+            connections,
+            ..AppConfig::default()
+        }
+    }
+
     fn test_state() -> AppState {
         AppState::new(make_app_config_with_peers(vec![
             PeerConfig {
@@ -340,12 +351,46 @@ mod tests {
         ]))
     }
 
+    fn multi_connection_state() -> AppState {
+        AppState::new(make_app_config(&[
+            (
+                "mia",
+                vec![PeerConfig {
+                    name: "peer-a".into(),
+                    public_key: PrivateKey::generate().public_key(),
+                    preshared_key: None,
+                    endpoint: Some("1.2.3.4:51820".into()),
+                    allowed_ips: vec!["10.0.0.0/24".into()],
+                    persistent_keepalive: 25,
+                }],
+            ),
+            (
+                "ord01",
+                vec![PeerConfig {
+                    name: "peer-b".into(),
+                    public_key: PrivateKey::generate().public_key(),
+                    preshared_key: None,
+                    endpoint: Some("5.6.7.8:51820".into()),
+                    allowed_ips: vec!["10.0.1.0/24".into()],
+                    persistent_keepalive: 25,
+                }],
+            ),
+        ]))
+    }
+
     // ── Column percentage validation ───────────────────────────────────────────
 
     #[test]
     fn status_column_widths_sum_to_100() {
         assert_eq!(
-            COL_PEER_W + COL_ENDPOINT_W + COL_ALLOWED_W + COL_KEEPALIVE_W,
+            COL_NAME_W
+                + COL_STATUS_W
+                + COL_BACKEND_W
+                + COL_ENDPOINT_W
+                + COL_INTERFACE_W
+                + COL_RXTX_W
+                + COL_HANDSHAKE_W
+                + COL_WARNINGS_W,
             100,
             "status column percentages must sum to 100"
         );
@@ -372,11 +417,11 @@ mod tests {
     #[test]
     fn update_clamps_rows() {
         let mut comp = StatusComponent::new();
-        let state = test_state(); // 2 peers
+        let state = test_state(); // 1 connection
         comp.update(&Action::NextRow, &state);
-        assert_eq!(comp.table_state.selected(), Some(1));
+        assert_eq!(comp.table_state.selected(), Some(0));
         comp.update(&Action::NextRow, &state);
-        assert_eq!(comp.table_state.selected(), Some(1)); // clamped
+        assert_eq!(comp.table_state.selected(), Some(0)); // clamped
     }
 
     #[test]
@@ -384,85 +429,15 @@ mod tests {
         let mut comp = StatusComponent::new();
         let state = test_state();
         comp.update(&Action::NextRow, &state);
-        assert_eq!(comp.table_state.selected(), Some(1));
+        assert_eq!(comp.table_state.selected(), Some(0));
         comp.update(&Action::SelectTab(Tab::Peers), &state);
         assert_eq!(comp.table_state.selected(), Some(0));
     }
 
-    // ── Multi-peer render tests ───────────────────────────────────────────────
+    // ── Connection render tests ───────────────────────────────────────────────
 
     #[test]
-    fn status_renders_both_peer_names() {
-        let state = test_state(); // peer-a and peer-b
-        let content = render_status(&state, 120, 20);
-        assert!(
-            content.contains("peer-a"),
-            "expected 'peer-a' in: {content:?}"
-        );
-        assert!(
-            content.contains("peer-b"),
-            "expected 'peer-b' in: {content:?}"
-        );
-    }
-
-    #[test]
-    fn status_renders_distinct_peer_endpoints() {
-        let state = test_state();
-        let content = render_status(&state, 120, 20);
-        assert!(
-            content.contains("1.2.3.4"),
-            "expected endpoint '1.2.3.4' in: {content:?}"
-        );
-        assert!(
-            content.contains("5.6.7.8"),
-            "expected endpoint '5.6.7.8' in: {content:?}"
-        );
-    }
-
-    #[test]
-    fn status_renders_distinct_allowed_ips() {
-        let state = test_state();
-        let content = render_status(&state, 120, 20);
-        assert!(
-            content.contains("10.0.0.0/24"),
-            "expected '10.0.0.0/24' in: {content:?}"
-        );
-        assert!(
-            content.contains("10.0.1.0/24"),
-            "expected '10.0.1.0/24' in: {content:?}"
-        );
-    }
-
-    #[test]
-    fn status_renders_nonzero_keepalive_as_seconds() {
-        // test_state has persistent_keepalive=25 for both peers
-        let state = test_state();
-        let content = render_status(&state, 120, 20);
-        assert!(
-            content.contains("25s"),
-            "expected '25s' keepalive in: {content:?}"
-        );
-    }
-
-    #[test]
-    fn status_renders_zero_keepalive_as_off() {
-        let state = AppState::new(make_app_config_with_peers(vec![PeerConfig {
-            name: "peer-zero".into(),
-            public_key: PrivateKey::generate().public_key(),
-            preshared_key: None,
-            endpoint: Some("9.9.9.9:51820".into()),
-            allowed_ips: vec!["192.168.0.0/24".into()],
-            persistent_keepalive: 0,
-        }]));
-        let content = render_status(&state, 120, 20);
-        assert!(
-            content.contains("off"),
-            "expected 'off' for zero keepalive in: {content:?}"
-        );
-    }
-
-    #[test]
-    fn status_connected_summary_shows_connected() {
+    fn status_health_warning_renders_in_summary() {
         let mut state = test_state();
         state.connections[0].status = Some(ConnectionStatus {
             state: ConnectionState::Connected,
@@ -470,12 +445,12 @@ mod tests {
             stats: TunnelStats::default(),
             endpoint: None,
             interface: Some("utun4".into()),
-            health_warning: None,
+            health_warning: Some("stale handshake".into()),
         });
         let content = render_status(&state, 120, 20);
         assert!(
-            content.contains("connected"),
-            "expected 'connected' in summary: {content:?}"
+            content.contains("stale handsh"),
+            "expected 'stale handsh' warning in: {content:?}"
         );
     }
 
@@ -491,38 +466,37 @@ mod tests {
     }
 
     #[test]
-    fn status_empty_config_shows_no_connections_message() {
+    fn status_empty_config_shows_no_visible_connections_message() {
         let state = AppState::new(AppConfig::default());
         let content = render_status(&state, 120, 20);
         assert!(
-            content.contains("No connections configured"),
-            "expected 'No connections configured' in: {content:?}"
+            content.contains("No visible connections"),
+            "expected 'No visible connections' in: {content:?}"
+        );
+    }
+
+    #[test]
+    fn status_no_visible_connections_shows_message() {
+        let mut state = test_state();
+        state.visible_connections.clear();
+        let content = render_status(&state, 120, 20);
+        assert!(
+            content.contains("No visible connections"),
+            "expected 'No visible connections' in: {content:?}"
+        );
+    }
+
+    #[test]
+    fn status_multi_connection_shows_both() {
+        let state = multi_connection_state();
+        let content = render_status(&state, 120, 20);
+        assert!(
+            content.contains("mia") && content.contains("ord01"),
+            "expected both 'mia' and 'ord01' connections in: {content:?}"
         );
     }
 
     // ── Commit 5: health indicators ──────────────────────────────────────────
-
-    #[test]
-    fn status_health_warning_renders_in_summary() {
-        let mut state = test_state();
-        state.connections[0].status = Some(ConnectionStatus {
-            state: ConnectionState::Connected,
-            backend: BackendKind::Boringtun,
-            stats: TunnelStats::default(),
-            endpoint: None,
-            interface: Some("utun4".into()),
-            health_warning: Some("stale handshake".into()),
-        });
-        let content = render_status(&state, 120, 20);
-        assert!(
-            content.contains("[!]"),
-            "expected '[!]' warning indicator in: {content:?}"
-        );
-        assert!(
-            content.contains("stale handshake"),
-            "expected warning text in: {content:?}"
-        );
-    }
 
     #[test]
     fn status_no_warning_when_healthy() {

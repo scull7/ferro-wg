@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
@@ -177,15 +177,25 @@ impl LogsComponent {
         &self,
         buf: &'a VecDeque<LogEntry>,
         search: &str,
-        active_connection: Option<&str>,
+        visible_connections: &HashSet<String>,
     ) -> Vec<&'a LogEntry> {
-        log_filter::filtered_lines(
+        let mut filtered = log_filter::filtered_lines(
             buf,
             search,
             self.min_level,
-            self.connection_filter,
-            active_connection,
-        )
+            ConnectionFilter::All, // always All to get all, then filter
+            None,
+        );
+        if self.connection_filter == ConnectionFilter::Active {
+            filtered.retain(|entry| {
+                entry.connection_name.is_none()
+                    || entry
+                        .connection_name
+                        .as_ref()
+                        .is_some_and(|name| visible_connections.contains(name))
+            });
+        }
+        filtered
     }
 
     /// Lock `log_entries` and return the number of entries that pass all active
@@ -198,9 +208,8 @@ impl LogsComponent {
             return None;
         };
         let search = state.search_query.to_ascii_lowercase();
-        let active_connection = state.active_connection().map(|c| c.name.as_str());
         Some(
-            self.get_filtered_entries(&entries, &search, active_connection)
+            self.get_filtered_entries(&entries, &search, &state.visible_connections)
                 .len(),
         )
     }
@@ -333,11 +342,9 @@ impl Component for LogsComponent {
             return;
         };
 
-        let active_connection = state.active_connection().map(|c| c.name.as_str());
-
         // Build the filtered view. Pre-lowercase once so per-entry matching is cheap.
         let search = state.search_query.to_ascii_lowercase();
-        let filtered = self.get_filtered_entries(&log_entries, &search, active_connection);
+        let filtered = self.get_filtered_entries(&log_entries, &search, &state.visible_connections);
         let total_filtered = filtered.len();
 
         // Cache view_height so handle_key can compute valid scroll bounds.
@@ -368,9 +375,7 @@ impl Component for LogsComponent {
         // Build block title with level and connection filter labels.
         let conn_label: String = match self.connection_filter {
             ConnectionFilter::All => "all".to_owned(),
-            ConnectionFilter::Active => {
-                active_connection.map_or_else(|| "all".to_owned(), ToOwned::to_owned)
-            }
+            ConnectionFilter::Active => "visible".to_owned(),
         };
 
         let title = if search.is_empty() {
@@ -452,7 +457,8 @@ mod tests {
             make_entry(LogLevel::Info, Some("ord"), "msg b"),
             make_entry(LogLevel::Info, None, "global msg"),
         ]);
-        let result = component.get_filtered_entries(&buf, "", Some("mia"));
+        let visible = HashSet::new();
+        let result = component.get_filtered_entries(&buf, "", &visible);
         assert_eq!(result.len(), 3);
     }
 
@@ -464,8 +470,9 @@ mod tests {
             make_entry(LogLevel::Info, Some("mia"), "mia entry"),
             make_entry(LogLevel::Info, Some("ord"), "ord entry"),
         ]);
-        // active connection = "mia"; "ord" entry should be hidden.
-        let result = component.get_filtered_entries(&buf, "", Some("mia"));
+        // visible connections = "mia"; "ord" entry should be hidden.
+        let visible = HashSet::from(["mia".to_string()]);
+        let result = component.get_filtered_entries(&buf, "", &visible);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].connection_name.as_deref(), Some("mia"));
     }
@@ -478,7 +485,8 @@ mod tests {
             make_entry(LogLevel::Info, None, "global startup"),
             make_entry(LogLevel::Info, Some("ord"), "ord entry"),
         ]);
-        let result = component.get_filtered_entries(&buf, "", Some("mia"));
+        let visible = HashSet::from(["mia".to_string()]);
+        let result = component.get_filtered_entries(&buf, "", &visible);
         assert_eq!(result.len(), 1);
         assert!(
             result[0].connection_name.is_none(),
@@ -494,8 +502,9 @@ mod tests {
             make_entry(LogLevel::Info, None, "global"),
             make_entry(LogLevel::Info, Some("mia"), "mia entry"),
         ]);
-        // No active connection → only global events pass.
-        let result = component.get_filtered_entries(&buf, "", None);
+        // No visible connections → only global events pass.
+        let visible = HashSet::new();
+        let result = component.get_filtered_entries(&buf, "", &visible);
         assert_eq!(result.len(), 1);
         assert!(result[0].connection_name.is_none());
     }
@@ -633,7 +642,8 @@ mod tests {
             make_entry(LogLevel::Debug, Some("ord"), "ord"),
         ]);
         // Fast path is skipped because connection_filter != All.
-        let result = component.get_filtered_entries(&buf, "", Some("mia"));
+        let visible = HashSet::from(["mia".to_string()]);
+        let result = component.get_filtered_entries(&buf, "", &visible);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].connection_name.as_deref(), Some("mia"));
     }

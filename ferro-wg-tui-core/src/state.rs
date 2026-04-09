@@ -197,9 +197,9 @@ pub struct AppState {
     pub search_query: String,
     /// All configured connections in display order (sorted by name).
     pub connections: Vec<ConnectionView>,
-    /// Index into `connections` for the currently focused connection.
-    /// Always 0 when `connections` is empty.
-    pub selected_connection: usize,
+    /// Set of connection names that are visible in multi-connection views.
+    /// Defaults to all connections from config.
+    pub visible_connections: HashSet<String>,
     /// Structured log entries for the Logs tab.
     pub log_entries: Arc<Mutex<VecDeque<LogEntry>>>,
     /// Current theme kind (Mocha or Latte).
@@ -208,6 +208,10 @@ pub struct AppState {
     pub theme: Theme,
     /// Whether the help overlay is shown.
     pub show_help: bool,
+    /// Whether the connection filter overlay is shown.
+    pub show_connection_filter: bool,
+    /// Search query for the connection filter overlay.
+    pub connection_filter_search: String,
     /// Whether the daemon is currently reachable.
     pub daemon_connected: bool,
     /// Transient toast messages (success or error) with expiry.
@@ -264,12 +268,12 @@ impl AppState {
     /// Create a new state from the full application config.
     ///
     /// Connections are stored in alphabetical order by name.
-    /// An empty `AppConfig` produces `connections: vec![]` and
-    /// `selected_connection: 0`; all accessors return `None` gracefully.
+    /// An empty `AppConfig` produces `connections: vec![]`;
+    /// all accessors return `None` gracefully.
     #[must_use]
     pub fn new(app_config: AppConfig) -> Self {
         // BTreeMap is already sorted by key, so iteration order is alphabetical.
-        let connections = app_config
+        let connections: Vec<ConnectionView> = app_config
             .connections
             .into_iter()
             .map(|(name, config)| ConnectionView {
@@ -281,17 +285,21 @@ impl AppState {
             .collect();
 
         let theme_kind = ThemeKind::default();
+        let visible_connections: HashSet<String> =
+            connections.iter().map(|c| c.name.clone()).collect();
         Self {
             running: true,
             active_tab: Tab::Overview,
             input_mode: InputMode::Normal,
             search_query: String::new(),
             connections,
-            selected_connection: 0,
+            visible_connections,
             log_entries: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             theme_kind,
             theme: theme_kind.into_theme(),
             show_help: false,
+            show_connection_filter: false,
+            connection_filter_search: String::new(),
             daemon_connected: false,
             toasts: VecDeque::new(),
             log_display: app_config.log_display,
@@ -304,14 +312,6 @@ impl AppState {
             config_edit: None,
             config_diff_pending: None,
         }
-    }
-
-    /// Returns the currently focused connection, if any.
-    ///
-    /// Returns `None` when `connections` is empty.
-    #[must_use]
-    pub fn active_connection(&self) -> Option<&ConnectionView> {
-        self.connections.get(self.selected_connection)
     }
 
     /// Append a structured log entry to the buffer, evicting the oldest when full.
@@ -351,13 +351,10 @@ impl AppState {
             | Action::ClearSearch
             | Action::SearchInput(_)
             | Action::SearchBackspace => self.handle_search_actions(action),
-            Action::SelectNextConnection
-            | Action::SelectPrevConnection
-            | Action::SelectConnection(_) => self.handle_connection_actions(action),
+
             Action::UpdatePeers(_) => self.handle_peer_actions(action),
             Action::DaemonConnectivityChanged(_) => self.handle_daemon_actions(action),
             Action::DaemonOk(_) | Action::DaemonError(_) => self.handle_feedback_actions(action),
-            Action::NextRow | Action::PrevRow => self.handle_row_actions(action),
             Action::EnterImport | Action::ImportKey(_) => self.handle_import_actions(action),
             Action::StartBenchmark
             | Action::StartBenchmarkForBackend(_)
@@ -365,7 +362,12 @@ impl AppState {
             | Action::BenchmarkComplete(_) => self.handle_benchmark_actions(action),
             Action::ToggleCompareView => self.handle_compare_actions(action),
             Action::ToggleTheme => self.handle_theme_action(action),
-            Action::ShowHelp | Action::HideHelp => self.handle_help_action(action),
+            Action::ShowHelp
+            | Action::HideHelp
+            | Action::ShowConnectionFilter
+            | Action::HideConnectionFilter
+            | Action::ToggleConnectionVisibility(_)
+            | Action::SetConnectionFilterSearch(_) => self.handle_help_action(action),
             Action::EnterExport
             | Action::ExportKey(_)
             | Action::SubmitImport
@@ -429,8 +431,7 @@ impl AppState {
 
     /// Apply a batch of peer status updates from a daemon poll.
     ///
-    /// Marks the daemon as reachable, updates each named connection, and
-    /// clamps `selected_connection` into bounds in case the list changed.
+    /// Marks the daemon as reachable and updates each named connection.
     fn apply_peer_updates(&mut self, statuses: &[ferro_wg_core::ipc::PeerStatus]) {
         self.daemon_connected = true;
         for s in statuses {
@@ -457,10 +458,6 @@ impl AppState {
                 warn!(name = %s.name, "UpdatePeers received status for unknown connection");
             }
         }
-        // Clamp in case connections changed (defensive; static in Phase 2).
-        self.selected_connection = self
-            .selected_connection
-            .min(self.connections.len().saturating_sub(1));
     }
 
     /// The current import path buffer, when in [`InputMode::Import`].
@@ -489,8 +486,7 @@ impl AppState {
 
     /// Rebuild the connection list from a new [`AppConfig`].
     ///
-    /// Preserves `selected_connection` by clamping it into bounds.
-    /// All other connection state (live status, peer row) is reset because
+    /// All connection state (live status, peer row) is reset because
     /// the daemon will push fresh status on the next poll.
     pub fn reload_from_config(&mut self, app_config: AppConfig) {
         let AppConfig {
@@ -507,9 +503,7 @@ impl AppState {
             })
             .collect();
         self.log_display = log_display;
-        self.selected_connection = self
-            .selected_connection
-            .min(self.connections.len().saturating_sub(1));
+        self.visible_connections = self.connections.iter().map(|c| c.name.clone()).collect();
     }
 
     /// Handle tab-related actions.
@@ -555,41 +549,6 @@ impl AppState {
         }
     }
 
-    /// Handle connection selection actions.
-    fn handle_connection_actions(&mut self, action: &Action) {
-        match action {
-            Action::SelectNextConnection => {
-                if !self.connections.is_empty() {
-                    self.selected_connection =
-                        (self.selected_connection + 1) % self.connections.len();
-                    self.search_query.clear();
-                }
-            }
-            Action::SelectPrevConnection => {
-                if !self.connections.is_empty() {
-                    self.selected_connection = self
-                        .selected_connection
-                        .checked_sub(1)
-                        .unwrap_or(self.connections.len() - 1);
-                    self.search_query.clear();
-                }
-            }
-            Action::SelectConnection(i) => {
-                if *i >= self.connections.len() {
-                    warn!(
-                        i,
-                        len = self.connections.len(),
-                        "SelectConnection index out of bounds; ignoring"
-                    );
-                } else {
-                    self.selected_connection = *i;
-                    self.search_query.clear();
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Handle peer-related actions.
     fn handle_peer_actions(&mut self, action: &Action) {
         if let Action::UpdatePeers(statuses) = action {
@@ -612,24 +571,6 @@ impl AppState {
             }
             Action::DaemonError(msg) => {
                 self.push_toast(Toast::error(msg.clone()));
-            }
-            _ => {}
-        }
-    }
-
-    /// Handle row navigation actions.
-    fn handle_row_actions(&mut self, action: &Action) {
-        match action {
-            Action::NextRow => {
-                if let Some(conn) = self.connections.get_mut(self.selected_connection) {
-                    let max = conn.config.peers.len().saturating_sub(1);
-                    conn.selected_peer_row = (conn.selected_peer_row + 1).min(max);
-                }
-            }
-            Action::PrevRow => {
-                if let Some(conn) = self.connections.get_mut(self.selected_connection) {
-                    conn.selected_peer_row = conn.selected_peer_row.saturating_sub(1);
-                }
             }
             _ => {}
         }
@@ -678,8 +619,10 @@ impl AppState {
                 let run = BenchmarkRun {
                     timestamp_ms,
                     connection_name: self
-                        .active_connection()
-                        .map(|c| c.name.clone())
+                        .visible_connections
+                        .iter()
+                        .min()
+                        .cloned()
                         .unwrap_or_default(),
                     results: self.benchmark_results.clone(),
                 };
@@ -748,7 +691,13 @@ impl AppState {
     fn handle_config_actions(&mut self, action: &Action) {
         match action {
             Action::EnterConfigEdit { section, field_idx } => {
-                if let Some(conn) = self.active_connection() {
+                if !self.visible_connections.is_empty() {
+                    let conn_name = self.visible_connections.iter().min().unwrap();
+                    let conn = self
+                        .connections
+                        .iter()
+                        .find(|c| c.name == *conn_name)
+                        .unwrap();
                     let fields = fields_for_section(*section, false);
                     let field: EditableField = fields
                         .get(*field_idx)
@@ -989,6 +938,21 @@ impl AppState {
         match action {
             Action::ShowHelp => self.show_help = true,
             Action::HideHelp => self.show_help = false,
+            Action::ShowConnectionFilter => self.show_connection_filter = true,
+            Action::HideConnectionFilter => {
+                self.show_connection_filter = false;
+                self.connection_filter_search.clear();
+            }
+            Action::ToggleConnectionVisibility(name) => {
+                if self.visible_connections.contains(name.as_str()) {
+                    self.visible_connections.remove(name.as_str());
+                } else {
+                    self.visible_connections.insert(name.clone());
+                }
+            }
+            Action::SetConnectionFilterSearch(query) => {
+                self.connection_filter_search.clone_from(query);
+            }
             _ => {}
         }
     }
@@ -1012,24 +976,23 @@ impl AppState {
         }
     }
 
-    /// Peers from the active connection matching the current search query.
+    /// Peers from visible connections matching the current search query.
     ///
-    /// Returns an empty iterator when there is no active connection.
-    /// Returns all peers when the query is empty. Matches against
+    /// Returns all peers from visible connections when the query is empty. Matches against
     /// the peer name and endpoint (case-insensitive substring).
     pub fn filtered_peers(&self) -> impl Iterator<Item = &ferro_wg_core::config::PeerConfig> {
         let query = self.search_query.to_lowercase();
-        let peers: &[ferro_wg_core::config::PeerConfig] = self
-            .connections
-            .get(self.selected_connection)
-            .map_or(&[], |c| c.config.peers.as_slice());
-        peers.iter().filter(move |p| {
-            query.is_empty()
-                || p.name.to_lowercase().contains(&query)
-                || p.endpoint
-                    .as_ref()
-                    .is_some_and(|ep| ep.to_lowercase().contains(&query))
-        })
+        self.connections
+            .iter()
+            .filter(|c| self.visible_connections.contains(&c.name))
+            .flat_map(|c| c.config.peers.iter())
+            .filter(move |p| {
+                query.is_empty()
+                    || p.name.to_lowercase().contains(&query)
+                    || p.endpoint
+                        .as_ref()
+                        .is_some_and(|ep| ep.to_lowercase().contains(&query))
+            })
     }
 }
 
@@ -1120,7 +1083,6 @@ mod tests {
         assert_eq!(state.active_tab, Tab::Overview);
         assert_eq!(state.input_mode, InputMode::Normal);
         assert_eq!(state.connections.len(), 2);
-        assert_eq!(state.selected_connection, 0);
     }
 
     #[test]
@@ -1245,6 +1207,31 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_show_connection_filter() {
+        let mut state = two_connection_state();
+        assert!(!state.show_connection_filter);
+        state.dispatch(&Action::ShowConnectionFilter);
+        assert!(state.show_connection_filter);
+    }
+
+    #[test]
+    fn dispatch_set_connection_filter_search() {
+        let mut state = two_connection_state();
+        state.dispatch(&Action::SetConnectionFilterSearch("test".to_string()));
+        assert_eq!(state.connection_filter_search, "test");
+    }
+
+    #[test]
+    fn dispatch_toggle_connection_visibility() {
+        let mut state = two_connection_state();
+        assert!(state.visible_connections.contains("mia"));
+        state.dispatch(&Action::ToggleConnectionVisibility("mia".to_string()));
+        assert!(!state.visible_connections.contains("mia"));
+        state.dispatch(&Action::ToggleConnectionVisibility("mia".to_string()));
+        assert!(state.visible_connections.contains("mia"));
+    }
+
+    #[test]
     fn clear_expired_toasts_removes_only_front_expired() {
         let mut state = two_connection_state();
         let expired = Toast {
@@ -1302,8 +1289,7 @@ mod tests {
     fn new_empty_config() {
         let state = AppState::new(AppConfig::default());
         assert!(state.connections.is_empty());
-        assert_eq!(state.selected_connection, 0);
-        assert!(state.active_connection().is_none());
+        assert!(state.visible_connections.is_empty());
     }
 
     #[test]
@@ -1364,46 +1350,6 @@ mod tests {
     }
 
     #[test]
-    fn select_next_wraps() {
-        let mut state = two_connection_state();
-        state.selected_connection = 1; // last index
-        state.dispatch(&Action::SelectNextConnection);
-        assert_eq!(state.selected_connection, 0);
-    }
-
-    #[test]
-    fn select_prev_wraps() {
-        let mut state = two_connection_state();
-        assert_eq!(state.selected_connection, 0);
-        state.dispatch(&Action::SelectPrevConnection);
-        assert_eq!(state.selected_connection, 1); // wraps to last
-    }
-
-    #[test]
-    fn select_next_empty() {
-        let mut state = AppState::new(AppConfig::default());
-        // Must not panic.
-        state.dispatch(&Action::SelectNextConnection);
-        assert_eq!(state.selected_connection, 0);
-    }
-
-    #[test]
-    fn select_connection_out_of_bounds() {
-        let mut state = two_connection_state();
-        state.dispatch(&Action::SelectConnection(99));
-        // Silently ignored; selection unchanged.
-        assert_eq!(state.selected_connection, 0);
-    }
-
-    #[test]
-    fn select_connection_clears_search_query() {
-        let mut state = two_connection_state();
-        state.search_query = "mia".into();
-        state.dispatch(&Action::SelectConnection(1));
-        assert!(state.search_query.is_empty());
-    }
-
-    #[test]
     fn select_connection_out_of_bounds_does_not_clear_search_query() {
         // Out-of-bounds SelectConnection is a no-op; search is preserved.
         let mut state = two_connection_state();
@@ -1413,56 +1359,10 @@ mod tests {
     }
 
     #[test]
-    fn select_next_clears_search_query() {
-        let mut state = two_connection_state();
-        state.search_query = "sjc".into();
-        state.dispatch(&Action::SelectNextConnection);
-        assert!(state.search_query.is_empty());
-    }
-
-    #[test]
-    fn select_prev_clears_search_query() {
-        let mut state = two_connection_state();
-        state.selected_connection = 1;
-        state.search_query = "ord".into();
-        state.dispatch(&Action::SelectPrevConnection);
-        assert!(state.search_query.is_empty());
-    }
-
-    #[test]
-    fn next_prev_row_per_connection() {
-        let mut state = AppState::new(make_app_config(&[
-            ("mia", vec![make_peer("p1"), make_peer("p2")]),
-            ("ord01", vec![make_peer("p3"), make_peer("p4")]),
-        ]));
-        // Move row cursor on connection 0 (mia).
-        state.dispatch(&Action::NextRow);
-        assert_eq!(state.connections[0].selected_peer_row, 1);
-        // Connection 1 (ord01) is unaffected.
-        assert_eq!(state.connections[1].selected_peer_row, 0);
-    }
-
-    #[test]
-    fn next_row_clamps_at_end() {
-        let mut state = AppState::new(make_app_config(&[("mia", vec![make_peer("p1")])]));
-        state.dispatch(&Action::NextRow);
-        state.dispatch(&Action::NextRow); // already at last index
-        assert_eq!(state.connections[0].selected_peer_row, 0); // only 1 peer → max index 0
-    }
-
-    #[test]
     fn prev_row_clamps_at_zero() {
         let mut state = two_connection_state();
         state.dispatch(&Action::PrevRow);
         assert_eq!(state.connections[0].selected_peer_row, 0);
-    }
-
-    #[test]
-    fn next_row_no_connection_no_panic() {
-        let mut state = AppState::new(AppConfig::default());
-        state.dispatch(&Action::NextRow);
-        // No panic, no state change.
-        assert_eq!(state.selected_connection, 0);
     }
 
     #[test]
@@ -1798,16 +1698,6 @@ mod tests {
         state.reload_from_config(new_config);
         assert_eq!(state.connections.len(), 1);
         assert_eq!(state.connections[0].name, "new-conn");
-    }
-
-    #[test]
-    fn reload_from_config_clamps_selection() {
-        let mut state = two_connection_state();
-        state.selected_connection = 1; // points at second connection
-        // Reload with only one connection — selection must clamp to 0.
-        let new_config = make_app_config(&[("only", vec![])]);
-        state.reload_from_config(new_config);
-        assert_eq!(state.selected_connection, 0);
     }
 
     #[test]

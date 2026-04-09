@@ -135,6 +135,18 @@ pub enum Action {
     /// Hide the help overlay.
     HideHelp,
 
+    /// Show the connection filter overlay.
+    ShowConnectionFilter,
+
+    /// Hide the connection filter overlay.
+    HideConnectionFilter,
+
+    /// Toggle visibility of a connection by name.
+    ToggleConnectionVisibility(String),
+
+    /// Set the connection filter search query.
+    SetConnectionFilterSearch(String),
+
     // -- Export actions --
     /// Enter export path input mode (opens the path prompt in the status bar).
     EnterExport,

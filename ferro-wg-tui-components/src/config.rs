@@ -83,7 +83,15 @@ impl Default for ConfigComponent {
 
 impl Component for ConfigComponent {
     fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Action> {
-        let conn = state.active_connection()?;
+        if state.visible_connections.is_empty() {
+            return None;
+        }
+        let conn_name = state.visible_connections.iter().min().unwrap();
+        let conn = state
+            .connections
+            .iter()
+            .find(|c| c.name == *conn_name)
+            .unwrap();
 
         // Only handle keys when Config tab is active and not in edit mode
         if state.active_tab != ferro_wg_tui_core::app::Tab::Config
@@ -143,12 +151,24 @@ impl Component for ConfigComponent {
                 self.focused_field_idx = 0;
             }
             Action::ConfigFocusNext => {
-                if let Some(conn) = state.active_connection() {
+                if !state.visible_connections.is_empty() {
+                    let conn_name = state.visible_connections.iter().min().unwrap();
+                    let conn = state
+                        .connections
+                        .iter()
+                        .find(|c| c.name == *conn_name)
+                        .unwrap();
                     self.focus_next(&conn.config);
                 }
             }
             Action::ConfigFocusPrev => {
-                if let Some(conn) = state.active_connection() {
+                if !state.visible_connections.is_empty() {
+                    let conn_name = state.visible_connections.iter().min().unwrap();
+                    let conn = state
+                        .connections
+                        .iter()
+                        .find(|c| c.name == *conn_name)
+                        .unwrap();
                     self.focus_prev(&conn.config);
                 }
             }
@@ -157,11 +177,17 @@ impl Component for ConfigComponent {
                 if let ConfigSection::Peer(focused_idx) = self.focused_section {
                     if focused_idx == *peer_idx {
                         // Move focus to interface if this was the last peer
-                        if let Some(conn) = state.active_connection()
-                            && conn.config.peers.is_empty()
-                        {
-                            self.focused_section = ConfigSection::Interface;
-                            self.focused_field_idx = 0;
+                        if !state.visible_connections.is_empty() {
+                            let conn_name = state.visible_connections.iter().min().unwrap();
+                            let conn = state
+                                .connections
+                                .iter()
+                                .find(|c| c.name == *conn_name)
+                                .unwrap();
+                            if conn.config.peers.is_empty() {
+                                self.focused_section = ConfigSection::Interface;
+                                self.focused_field_idx = 0;
+                            }
                         }
                     } else if focused_idx > *peer_idx {
                         // Shift focus up if we deleted a peer before the focused one
@@ -179,13 +205,19 @@ impl Component for ConfigComponent {
         }
         let theme = &state.theme;
 
-        let Some(conn) = state.active_connection() else {
+        if state.visible_connections.is_empty() {
             let para = Paragraph::new("No connections configured.")
                 .block(theme.panel_block("Config"))
                 .style(Style::default().fg(theme.muted));
             frame.render_widget(para, area);
             return;
-        };
+        }
+        let conn_name = state.visible_connections.iter().min().unwrap();
+        let conn = state
+            .connections
+            .iter()
+            .find(|c| c.name == *conn_name)
+            .unwrap();
 
         let mut lines = Vec::new();
 

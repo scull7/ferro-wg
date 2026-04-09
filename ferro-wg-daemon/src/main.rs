@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use ferro_wg_core::daemon::{LogBuffer, LogLayer};
 use ferro_wg_core::ipc::LogEntry;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
 
@@ -42,11 +42,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => "trace",
     };
 
-    // Bounded channel: sender blocks under backpressure instead of dropping messages.
-    let (log_tx, log_rx) = mpsc::channel::<LogEntry>(4096);
     let log_buffer = LogBuffer::new(1000);
 
-    // Spawn broadcaster task to isolate async I/O from the tracing layer.
+    // Broadcast channel: each StreamLogs client subscribes independently.
+    let (log_tx, _) = broadcast::channel::<LogEntry>(1000);
+    let log_tx_broadcast = log_tx.clone();
+
+    // Spawn broadcaster task to drain the ring buffer into the broadcast channel.
     let log_buffer_for_broadcast = log_buffer.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new()
@@ -56,10 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 let entries = log_buffer_for_broadcast.drain_logs();
                 for entry in entries {
-                    if log_tx.send(entry).await.is_err() {
-                        // Receiver dropped; daemon is shutting down.
-                        return;
-                    }
+                    // Ignored if no subscribers are currently connected.
+                    let _ = log_tx_broadcast.send(entry);
                 }
             }
         });
@@ -79,5 +79,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Run the IPC server.
-    server::run(config, &cli.config, &cli.socket, log_buffer, log_rx).await
+    server::run(config, &cli.config, &cli.socket, log_buffer, log_tx).await
 }

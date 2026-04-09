@@ -36,8 +36,9 @@ use ferro_wg_tui_components::status_bar::STATUS_BAR_HEIGHT;
 use ferro_wg_tui_components::tab_bar::TAB_BAR_HEIGHT;
 use ferro_wg_tui_components::{
     CompareComponent, ConfigComponent, ConfirmDialogComponent, ConnectionBarComponent,
-    DiffPreviewComponent, HelpOverlayComponent, LogsComponent, OverviewComponent, PeersComponent,
-    StatusBarComponent, StatusComponent, TabBarComponent, ToastComponent,
+    ConnectionFilterOverlayComponent, DiffPreviewComponent, HelpOverlayComponent, LogsComponent,
+    OverviewComponent, PeersComponent, StatusBarComponent, StatusComponent, TabBarComponent,
+    ToastComponent,
 };
 use ferro_wg_tui_core::{Action, AppState, Component, ConfirmAction, InputMode, Tab};
 use futures::StreamExt;
@@ -148,6 +149,8 @@ struct ComponentBundle {
     diff_preview: DiffPreviewComponent,
     /// Modal overlay: help overlay (topmost).
     help_overlay: HelpOverlayComponent,
+    /// Modal overlay: connection filter overlay.
+    connection_filter_overlay: ConnectionFilterOverlayComponent,
     /// Toast notifications in bottom-right corner.
     toast: ToastComponent,
 }
@@ -169,6 +172,7 @@ impl ComponentBundle {
             confirm_dialog: ConfirmDialogComponent::new(),
             diff_preview: DiffPreviewComponent::new(),
             help_overlay: HelpOverlayComponent::new(),
+            connection_filter_overlay: ConnectionFilterOverlayComponent::new(),
             toast: ToastComponent::new(),
         }
     }
@@ -246,6 +250,9 @@ fn render_ui<B: ratatui::backend::Backend>(
         bundle.confirm_dialog.render(frame, chunks[2], false, state);
         bundle.diff_preview.render(frame, chunks[2], false, state); // topmost
         bundle.help_overlay.render(frame, chunks[2], false, state); // topmost
+        bundle
+            .connection_filter_overlay
+            .render(frame, chunks[2], false, state); // topmost
         bundle.toast.render(frame, area, false, state);
     })?;
     Ok(())
@@ -264,6 +271,7 @@ fn handle_mouse_event(
     chunks: &[ratatui::layout::Rect],
 ) {
     let action = if state.show_help
+        || state.show_connection_filter
         || state.pending_confirm.is_some()
         || state.config_diff_pending.is_some()
     {
@@ -299,6 +307,9 @@ fn handle_key_event(
     let action = if state.show_help {
         // Help overlay captures all keys while open.
         bundle.help_overlay.handle_key(key, state)
+    } else if state.show_connection_filter {
+        // Connection filter overlay captures all keys while open.
+        bundle.connection_filter_overlay.handle_key(key, state)
     } else if state.config_diff_pending.is_some() {
         // Diff preview captures all keys while open.
         bundle.diff_preview.handle_key(key, state)
@@ -625,6 +636,7 @@ fn dispatch_all(state: &mut AppState, action: &Action, bundle: &mut ComponentBun
     bundle.status_bar.update(action, state);
     bundle.confirm_dialog.update(action, state);
     bundle.help_overlay.update(action, state);
+    bundle.connection_filter_overlay.update(action, state);
 }
 
 /// Map a [`ConfirmAction`] to the [`Action`] that should execute after confirmation.
@@ -917,17 +929,18 @@ fn spawn_switch_backend_task(
             return;
         }
     };
-    let Some(connection) = state.active_connection() else {
+    if state.visible_connections.is_empty() {
         let tx = tx.clone();
         tasks.spawn(async move {
             let _ = tx.send(DaemonMessage::CommandError(TuiError::DaemonResponse(
-                "no active connection to switch backend for".into(),
+                "no visible connections to switch backend for".into(),
             )));
         });
         return;
-    };
+    }
+    let connection_name = state.visible_connections.iter().min().unwrap().clone();
     let cmd = DaemonCommand::SwitchBackend {
-        connection_name: connection.name.clone(),
+        connection_name,
         backend: bk,
     };
     let description = format!("Switched backend: {backend}");
@@ -1044,8 +1057,9 @@ fn maybe_spawn_command(
         action,
         Action::StartBenchmark | Action::StartBenchmarkForBackend(_)
     ) {
-        if let Some(connection) = state.active_connection() {
-            spawn_benchmark_task(connection.name.clone(), 10, tx, tasks);
+        if !state.visible_connections.is_empty() {
+            let connection_name = state.visible_connections.iter().min().unwrap().clone();
+            spawn_benchmark_task(connection_name, 10, tx, tasks);
         }
         return;
     }
@@ -1159,7 +1173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_maybe_spawn_command_switch_backend_no_active_connection() {
+    async fn test_maybe_spawn_command_switch_backend_no_visible_connections() {
         let config_path = PathBuf::from("/tmp/config.toml");
         let benchmarks_path = PathBuf::from("/tmp/benchmarks.json");
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1182,7 +1196,7 @@ mod tests {
             DaemonMessage::CommandError(TuiError::DaemonResponse(_))
         ));
         if let DaemonMessage::CommandError(TuiError::DaemonResponse(s)) = msg {
-            assert!(s.contains("no active connection"));
+            assert!(s.contains("no visible connections"));
         }
     }
 
